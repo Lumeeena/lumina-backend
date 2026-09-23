@@ -12,6 +12,14 @@
     "register-schema": "node --require ts-node/register src/registerSchema.ts"
   },
   "dependencies": {
+    "@opentelemetry/api": "^1.9.0",
+    "@opentelemetry/exporter-trace-otlp-http": "^0.54.0",
+    "@opentelemetry/instrumentation-pg": "^0.45.0",
+    "@opentelemetry/resources": "^1.25.0",
+    "@opentelemetry/sdk-node": "^0.54.0",
+    "@opentelemetry/sdk-trace-node": "^1.25.0",
+    "@opentelemetry/semantic-conventions": "^1.25.0",
+    "@sentry/node": "^8.0.0",
     "@stellar/stellar-sdk": "^16.0.0",
     "node-fetch": "^3.0.0",
     "pg": "^8.0.0",

@@ -27,11 +27,20 @@ export interface HealthThresholds {
   maxSecondsSinceIndex: number;
   /** Ledgers behind Horizon before reporting unhealthy. */
   maxLagLedgers: number;
+  /**
+   * Seconds after startup within which the service tolerates having never
+   * indexed anything. Defaults to 300s (5 minutes) — long enough for a real
+   * cold start, but prevents a misconfigured service from reporting healthy
+   * indefinitely. Once this window closes and the indexer still has not
+   * indexed anything, the service reports degraded.
+   */
+  startToleranceSeconds: number;
 }
 
 export const DEFAULT_THRESHOLDS: HealthThresholds = {
   maxSecondsSinceIndex: Number(process.env.HEALTH_MAX_SECONDS_SINCE_INDEX ?? 60),
   maxLagLedgers: Number(process.env.HEALTH_MAX_LAG_LEDGERS ?? 20),
+  startToleranceSeconds: Number(process.env.HEALTH_START_TOLERANCE_SECONDS ?? 300),
 };
 
 export interface IndexerState {
@@ -88,17 +97,22 @@ export async function buildHealthReport(
 
   const lagLedgers = Math.max(0, state.latestHorizonLedger - state.latestIndexedLedger);
 
+  const uptimeSeconds = (now - state.startedAt) / 1000;
+  const startingTolerance = uptimeSeconds <= thresholds.startToleranceSeconds;
+  const starting = state.lastIndexedAt === null && startingTolerance;
+  const neverIndexedButExpired = state.lastIndexedAt === null && !startingTolerance;
+
   const freshnessOk =
-    secondsSinceLastIndex === null || secondsSinceLastIndex <= thresholds.maxSecondsSinceIndex;
+    secondsSinceLastIndex === null ? !neverIndexedButExpired : secondsSinceLastIndex <= thresholds.maxSecondsSinceIndex;
   checks.push({
     name: 'indexing-freshness',
     ok: freshnessOk,
     detail: freshnessOk
       ? undefined
-      : `no ledger indexed for ${Math.round(secondsSinceLastIndex!)}s (threshold ${thresholds.maxSecondsSinceIndex}s)`,
+      : neverIndexedButExpired
+        ? `no ledger indexed for ${Math.round(uptimeSeconds)}s; start tolerance window closed after ${thresholds.startToleranceSeconds}s`
+        : `no ledger indexed for ${Math.round(secondsSinceLastIndex!)}s (threshold ${thresholds.maxSecondsSinceIndex}s)`,
   });
-
-  const starting = state.lastIndexedAt === null;
 
   // Lag is meaningless before the first ledger lands — at boot the indexer is
   // "behind" by the entire chain — so the check is reported but not counted
@@ -118,7 +132,7 @@ export async function buildHealthReport(
 
   return {
     status,
-    uptimeSeconds: Math.round((now - state.startedAt) / 1000),
+    uptimeSeconds: Math.round(uptimeSeconds),
     latestIndexedLedger: state.latestIndexedLedger,
     latestHorizonLedger: state.latestHorizonLedger,
     lagLedgers,

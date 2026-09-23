@@ -22,6 +22,8 @@ import {
   subscriptionsActive,
   subscriptionsRejected,
 } from './metrics';
+import { initTracing, shutdownTracing } from './tracing';
+import { initErrorTracking, shutdownErrorTracking } from './errorTracking';
 
 const log = subsystem('server');
 const startedAt = Date.now();
@@ -44,6 +46,9 @@ const notifier = new LedgerNotifier({
 });
 
 async function main() {
+  initErrorTracking();
+  initTracing();
+
   const app = express();
   const httpServer = createServer(app);
 
@@ -163,7 +168,10 @@ async function main() {
   for (const signal of ['SIGINT', 'SIGTERM'] as const) {
     process.on(signal, () => {
       log.info({ signal }, 'shutting down');
-      void server.stop().then(() => process.exit(0));
+      void server.stop()
+        .then(() => shutdownTracing())
+        .then(() => shutdownErrorTracking())
+        .then(() => process.exit(0));
     });
   }
 }
