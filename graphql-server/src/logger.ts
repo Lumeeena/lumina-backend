@@ -16,6 +16,10 @@ export const logger = pino({
     : {}),
 });
 
-export function subsystem(name: string) {
-  return logger.child({ subsystem: name });
+export function subsystem(name: string, correlationId?: string) {
+  const bindings: Record<string, unknown> = { subsystem: name };
+  if (correlationId) {
+    bindings.correlationId = correlationId;
+  }
+  return logger.child(bindings);
 }

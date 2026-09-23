@@ -10,10 +10,12 @@ import type { Pool } from 'pg';
 import { getAccountOperationsInLedger, getTransactionsByLedger } from './db';
 import type { IndexedNotification } from './notifications';
 import type { LedgerNotifier } from './pubsub';
+import type { subsystem } from './logger';
 
 export interface SubscriptionContext {
   pool: Pool;
   notifier: LedgerNotifier;
+  requestLogger: ReturnType<typeof subsystem>;
 }
 
 /** Notifications about ledger writes; event-only notifications are not rows. */
@@ -30,7 +32,7 @@ function isLedgerWrite(notification: IndexedNotification): boolean {
 async function* expandLedgers<T>(
   notifications: AsyncIterableIterator<IndexedNotification>,
   load: (ledger: number) => Promise<T[]>,
-  log: (message: string, detail?: unknown) => void
+  requestLogger: ReturnType<typeof subsystem>
 ): AsyncGenerator<T> {
   for await (const notification of notifications) {
     if (!isLedgerWrite(notification)) continue;
@@ -39,7 +41,7 @@ async function* expandLedgers<T>(
     try {
       rows = await load(notification.ledger);
     } catch (err) {
-      log('subscription failed to read ledger', {
+      requestLogger.warn('subscription failed to read ledger', {
         ledger: notification.ledger,
         error: err instanceof Error ? err.message : err,
       });
@@ -52,13 +54,11 @@ async function* expandLedgers<T>(
   }
 }
 
-export function createSubscriptionResolvers(
-  log: (message: string, detail?: unknown) => void = () => {}
-) {
+export function createSubscriptionResolvers() {
   return {
     newTransaction: {
       subscribe(_: unknown, __: unknown, { pool, notifier }: SubscriptionContext) {
-        return expandLedgers(notifier.subscribe(), ledger => getTransactionsByLedger(pool, ledger), log);
+        return expandLedgers(notifier.subscribe(), ledger => getTransactionsByLedger(pool, ledger), requestLogger);
       },
       // The stream already yields Transaction objects; without this Apollo
       // would look for a `newTransaction` key on each one.
@@ -70,7 +70,7 @@ export function createSubscriptionResolvers(
         return expandLedgers(
           notifier.subscribe(),
           ledger => getAccountOperationsInLedger(pool, ledger, args.address),
-          log
+          requestLogger
         );
       },
       resolve: (payload: unknown) => payload,

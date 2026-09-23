@@ -11,10 +11,16 @@ import { Pool } from 'pg';
 import { GraphQLError } from 'graphql';
 import { useServer } from 'graphql-ws/lib/use/ws';
 import { WebSocketServer } from 'ws';
-import { Context, resolvers } from './resolvers';
+import { Context as BaseContext, resolvers } from './resolvers';
 import { LedgerNotifier, SubscriberLimitError } from './pubsub';
 import { subsystem } from './logger';
 import { buildServerHealth, metricsPlugin, samplePool, serverHealthStatusCode } from './observability';
+import { v4 as uuidv4 } from 'uuid'; // TODO: Ensure 'uuid' is a dependency
+
+interface Context extends BaseContext {
+  correlationId: string;
+  requestLogger: ReturnType<typeof subsystem>;
+}
 import {
   listenerConnected,
   metricsContentType,
@@ -56,7 +62,11 @@ async function main() {
   const wsCleanup = useServer(
     {
       schema,
-      context: async (): Promise<Context> => ({ pool, notifier }),
+      context: async (ctx): Promise<Context> => {
+        const correlationId = (ctx.connectionParams?.['x-correlation-id'] as string) || uuidv4();
+        const requestLogger = subsystem('subscription', correlationId);
+        return { pool, notifier, correlationId, requestLogger };
+      },
       onError: (_ctx: unknown, _message: unknown, errors: readonly Error[]) => {
         for (const error of errors) {
           log.error({ err: error.message }, 'subscription error');
@@ -143,7 +153,13 @@ async function main() {
   const middleware = [
     cors(),
     express.json(),
-    expressMiddleware(server, { context: async () => ({ pool }) }),
+    expressMiddleware(server, {
+      context: async ({ req }) => {
+        const correlationId = (req.headers['x-correlation-id'] as string) || uuidv4();
+        const requestLogger = subsystem('graphql', correlationId);
+        return { pool, notifier, correlationId, requestLogger };
+      },
+    }),
   ];
   app.use('/graphql', ...middleware);
   app.use('/', ...middleware);
@@ -156,6 +172,7 @@ async function main() {
       subscriptions: `ws://localhost:${PORT}/graphql`,
       health: `http://localhost:${PORT}/health`,
       metrics: `http://localhost:${PORT}/metrics`,
+      database: redactUrl(DATABASE_URL),
     },
     'lumina graphql server listening'
   );
@@ -172,3 +189,14 @@ main().catch(err => {
   log.fatal({ err: err instanceof Error ? err.message : err }, 'failed to start graphql server');
   process.exit(1);
 });
+
+/** Never log a database URL with its password in it. */
+function redactUrl(url: string): string {
+  try {
+    const parsed = new URL(url);
+    if (parsed.password) parsed.password = '***';
+    return parsed.toString();
+  } catch {
+    return '(unparseable)';
+  }
+}
