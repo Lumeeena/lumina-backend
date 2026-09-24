@@ -13,7 +13,8 @@
     "build:indexer": "cd indexer && npm run build",
     "test": "npm run test:indexer && npm run test:graphql",
     "test:indexer": "cd indexer && npm test",
-    "test:graphql": "cd graphql-server && npm test"
+    "test:graphql": "cd graphql-server && npm test",
+    "manage-keys": "npm run --prefix graphql-server manage-keys --"
   },
   "engines": {
     "node": ">=18"

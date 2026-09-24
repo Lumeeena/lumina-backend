@@ -7,7 +7,8 @@
     "dev": "ts-node src/index.ts",
     "build": "tsc && cp src/schema.graphql dist/schema.graphql",
     "start": "node dist/index.js",
-    "test": "node --require ts-node/register --test src/db.test.ts src/horizon.test.ts src/pubsub.test.ts src/subscriptions.test.ts src/customEvents.test.ts src/search.test.ts",
+    "test": "node --require ts-node/register --test src/db.test.ts src/horizon.test.ts src/pubsub.test.ts src/subscriptions.test.ts src/customEvents.test.ts src/search.test.ts src/keys.test.ts",
+    "manage-keys": "node --require ts-node/register src/manageKeys.ts",
     "codegen": "graphql-codegen --config codegen.yml",
     "test:integration": "node --require ts-node/register --test src/pubsub.integration.test.ts src/search.integration.test.ts"
   },
