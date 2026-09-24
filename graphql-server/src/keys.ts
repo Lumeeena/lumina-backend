@@ -101,7 +101,7 @@ export async function listApiKeys(pool: Pool): Promise<ApiKeyRecord[]> {
   const query = `
     SELECT id, key_hash, key_prefix, label, rate_limit, created_at, revoked_at, updated_at
     FROM api_keys
-    ORDER BY id ASC
+    ORDER BY created_at DESC, id DESC
   `;
   const res = await pool.query(query);
   return res.rows.map(mapApiKeyRow);

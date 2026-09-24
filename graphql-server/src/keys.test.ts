@@ -10,7 +10,7 @@ import {
   revokeApiKey,
   setApiKeyLimit,
 } from './keys';
-import { runCli } from './manageKeys';
+import { runCli, parsePositiveInteger } from './manageKeys';
 
 function createMockPool(rowsToReturn: any[] = []) {
   const queries: { sql: string; params: any[] }[] = [];
@@ -125,6 +125,7 @@ describe('API Keys — DB Operations', () => {
     const pool = createMockPool(rows);
 
     const keys = await listApiKeys(pool);
+    assert.match(pool.queries[0].sql, /ORDER BY created_at DESC, id DESC/);
     assert.equal(keys.length, 2);
     assert.equal(keys[0].id, 1);
     assert.equal(keys[0].label, 'app-1');
@@ -348,5 +349,24 @@ describe('API Keys — CLI command execution', () => {
     } finally {
       console.log = origLog;
     }
+  });
+});
+
+describe('API Keys — CLI input validation', () => {
+  it('parsePositiveInteger accepts valid positive integers', () => {
+    assert.equal(parsePositiveInteger('1'), 1);
+    assert.equal(parsePositiveInteger('60'), 60);
+    assert.equal(parsePositiveInteger('1000'), 1000);
+    assert.equal(parsePositiveInteger('  120  '), 120);
+  });
+
+  it('parsePositiveInteger rejects strings with non-numeric suffixes or float/exponent syntax', () => {
+    assert.equal(parsePositiveInteger('10foo'), null);
+    assert.equal(parsePositiveInteger('10.5'), null);
+    assert.equal(parsePositiveInteger('1e3'), null);
+    assert.equal(parsePositiveInteger('0'), null);
+    assert.equal(parsePositiveInteger('-5'), null);
+    assert.equal(parsePositiveInteger(''), null);
+    assert.equal(parsePositiveInteger('abc'), null);
   });
 });

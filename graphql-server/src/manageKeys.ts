@@ -44,6 +44,14 @@ function formatDate(date: Date | null): string {
   return date.toISOString().replace('T', ' ').substring(0, 19);
 }
 
+export function parsePositiveInteger(input: string): number | null {
+  const trimmed = input.trim();
+  if (!/^\d+$/.test(trimmed)) return null;
+  const num = Number(trimmed);
+  if (!Number.isInteger(num) || num <= 0 || !Number.isSafeInteger(num)) return null;
+  return num;
+}
+
 export async function runCli(args: string[], pool: Pool): Promise<void> {
   const [command, arg1, arg2] = args;
   if (!command) usage();
@@ -57,8 +65,8 @@ export async function runCli(args: string[], pool: Pool): Promise<void> {
       const label = arg1;
       let rateLimit = 60;
       if (arg2) {
-        const parsed = parseInt(arg2, 10);
-        if (isNaN(parsed) || parsed <= 0) {
+        const parsed = parsePositiveInteger(arg2);
+        if (parsed === null) {
           console.error(`Error: Invalid rate limit "${arg2}". Must be a positive integer.`);
           process.exit(1);
         }
@@ -159,8 +167,8 @@ export async function runCli(args: string[], pool: Pool): Promise<void> {
         console.error('Error: "set-limit" requires a key ID/hash and a new limit.');
         usage();
       }
-      const parsedLimit = parseInt(arg2, 10);
-      if (isNaN(parsedLimit) || parsedLimit <= 0) {
+      const parsedLimit = parsePositiveInteger(arg2);
+      if (parsedLimit === null) {
         console.error(`Error: Invalid rate limit "${arg2}". Must be a positive integer.`);
         process.exit(1);
       }
