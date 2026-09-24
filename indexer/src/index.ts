@@ -58,6 +58,12 @@ import { getAccount, getLatestLedgerSequence, getLedger, getLedgerOperations, ge
 import { getActiveContracts } from './registry';
 import { getEvents, getLatestLedgerSequence as getLatestRpcLedgerSequence, type ContractEvent } from './soroban';
 
+// Read version from package.json for logging
+import { readFileSync } from 'fs';
+import { join } from 'path';
+const packageJson = JSON.parse(readFileSync(join(__dirname, '../package.json'), 'utf-8'));
+const VERSION = packageJson.version;
+
 const HORIZON_URL = process.env.HORIZON_URL ?? 'https://horizon.stellar.org';
 const DATABASE_URL = process.env.DATABASE_URL ?? 'postgresql://localhost:5432/lumina';
 const POLL_INTERVAL_MS = parseInt(process.env.POLL_INTERVAL_MS ?? '5000', 10);
@@ -301,7 +307,7 @@ async function indexCustomEvents(events: ContractEvent[]): Promise<void> {
 async function run() {
   initErrorTracking();
   initTracing();
-  log.info({ horizon: HORIZON_URL, database: redactUrl(DATABASE_URL), healthPort: HEALTH_PORT }, 'lumina indexer starting');
+  log.info({ version: VERSION, horizon: HORIZON_URL, database: redactUrl(DATABASE_URL), healthPort: HEALTH_PORT }, 'lumina indexer starting');
   startHealthServer({ port: HEALTH_PORT, getState: () => state, pool });
 
   let cursor = await getLatestIndexedLedger(pool);

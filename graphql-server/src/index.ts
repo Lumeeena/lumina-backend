@@ -34,6 +34,10 @@ import { initErrorTracking, shutdownErrorTracking } from './errorTracking';
 const log = subsystem('server');
 const startedAt = Date.now();
 
+// Read version from package.json for logging and API reporting
+const packageJson = JSON.parse(readFileSync(join(__dirname, '../package.json'), 'utf-8'));
+const VERSION = packageJson.version;
+
 const typeDefs = readFileSync(join(__dirname, 'schema.graphql'), 'utf-8');
 
 const DATABASE_URL = process.env.DATABASE_URL ?? 'postgresql://localhost:5432/lumina';
@@ -163,6 +167,7 @@ async function main() {
 
   log.info(
     {
+      version: VERSION,
       graphql: `http://localhost:${PORT}/graphql`,
       subscriptions: `ws://localhost:${PORT}/graphql`,
       health: `http://localhost:${PORT}/health`,
