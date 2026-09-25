@@ -30,7 +30,7 @@ import {
   loadContractSchemas,
 } from './db';
 import { decodeEvents } from './customDecode';
-import { subsystem } from './logger';
+import { routineLogger, subsystem } from './logger';
 import {
   contractEventsIndexed,
   customEventsDecoded,
@@ -44,6 +44,11 @@ import { initTracing, shutdownTracing } from './tracing';
 import { initErrorTracking, captureException, shutdownErrorTracking } from './errorTracking';
 
 const log = subsystem('indexer');
+
+// Routine success goes through `routine`, which samples (LOG_SAMPLE_RATE) and
+// carries a `suppressed` count on every emitted line. Warnings and errors stay on
+// `log`, which is never sampled.
+const routine = routineLogger('indexer');
 
 const HEALTH_PORT = parseInt(process.env.HEALTH_PORT ?? '9090', 10);
 
@@ -149,6 +154,10 @@ async function fetchAndIndexLedger(sequence: number): Promise<void> {
   state.latestIndexedLedger = sequence;
   state.lastIndexedAt = Date.now();
   recordIndexedLedger(sequence, transactions.length, operations.length);
+  routine.success(
+    { ledger: sequence, transactions: transactions.length, operations: operations.length },
+    'ledger indexed'
+  );
 }
 
 export async function fetchAndIndexLedgerWithRetry(
@@ -219,7 +228,7 @@ async function pollRegistry(): Promise<void> {
       log.warn({ count: invalid.length, addresses: invalid }, 'registry discovery skipped non-contract addresses');
     }
     discoveredContractIds = entries.filter(isContractAddress);
-    log.info({ contracts: discoveredContractIds.length }, 'registry discovery complete');
+    routine.success({ contracts: discoveredContractIds.length }, 'registry discovery complete');
   } catch (err) {
     indexingErrors.inc({ loop: 'registry' });
     log.error({ err: message(err) }, 'registry polling failed');
@@ -252,7 +261,7 @@ async function pollContractEvents(): Promise<void> {
 
     const { events, latestLedger } = await getEvents(SOROBAN_RPC_URL, contractIds, eventsCursor);
     if (events.length > 0) {
-      log.info({ events: events.length, fromLedger: eventsCursor }, 'indexing contract events');
+      routine.success({ events: events.length, fromLedger: eventsCursor }, 'indexing contract events');
       contractEventsIndexed.inc(events.length);
       await insertContractEvents(pool, events);
       await indexCustomEvents(events);
@@ -294,7 +303,7 @@ async function indexCustomEvents(events: ContractEvent[]): Promise<void> {
     }
 
     if (decoded.length > 0) {
-      log.info({ decoded: decoded.length }, 'decoded events against custom schemas');
+      routine.success({ decoded: decoded.length }, 'decoded events against custom schemas');
       customEventsDecoded.inc({ outcome: 'decoded' }, decoded.length);
       await insertCustomEvents(pool, decoded);
     }

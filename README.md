@@ -220,6 +220,24 @@ npm run dev
 | `HEALTH_MAX_LAG_LEDGERS` | `20` — lag threshold before `/health` reports 503 |
 | `LOG_LEVEL` | `info` |
 | `LOG_PRETTY` | unset — `true` for human-readable local logs |
+| `LOG_SAMPLE_RATE` | `0.01` — fraction of routine success logs emitted (see below) |
+
+Routine success logs — one per indexed ledger, plus one per contract-event and
+custom-decode batch — are sampled with `LOG_SAMPLE_RATE`, because at a 5s poll
+they are the highest-volume source in the indexer and they are measurement
+duplicates of the Prometheus counters in `metrics.ts`. `1` logs every one of
+them, `0` logs none.
+
+Warnings and errors are never sampled. The sampled path is a separate method
+(`routineLogger(...).success()`), so there is no way to log a failure through a
+logger that drops lines; `indexer/src/logger.test.ts` asserts that at rate 0 a
+warning and an error are still emitted.
+
+An emitted line carries a `suppressed` field with the number of routine
+successes dropped since the previous emitted line, so a sampled stream still
+shows how much work happened rather than implying nothing did. An unusable
+`LOG_SAMPLE_RATE` falls back to the default and says so, instead of stopping the
+indexer from starting.
 
 ### GraphQL server environment variables
 
