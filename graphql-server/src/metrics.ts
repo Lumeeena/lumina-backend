@@ -65,6 +65,26 @@ export const dbPoolWaiting = new Gauge({
   registers: [registry],
 });
 
+export const dbPoolErrors = new Counter({
+  name: 'lumina_graphql_db_pool_errors_total',
+  help: 'Unexpected idle PostgreSQL pool client errors.',
+  registers: [registry],
+});
+
+export const exportRuns = new Counter({
+  name: 'lumina_scheduled_exports_total',
+  help: 'Scheduled object-storage exports by outcome.',
+  labelNames: ['outcome'] as const,
+  registers: [registry],
+});
+
+export const exportRunDuration = new Histogram({
+  name: 'lumina_scheduled_export_duration_seconds',
+  help: 'Duration of scheduled object-storage exports.',
+  buckets: [1, 5, 15, 30, 60, 120, 300, 900],
+  registers: [registry],
+});
+
 export function metricsContentType(): string {
   return registry.contentType;
 }

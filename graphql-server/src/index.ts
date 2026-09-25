@@ -22,6 +22,7 @@ interface Context extends BaseContext {
   requestLogger: ReturnType<typeof subsystem>;
 }
 import {
+  dbPoolErrors,
   listenerConnected,
   metricsContentType,
   renderMetrics,
@@ -30,6 +31,7 @@ import {
 } from './metrics';
 import { initTracing, shutdownTracing } from './tracing';
 import { initErrorTracking, shutdownErrorTracking } from './errorTracking';
+import { scheduledExportOptions, startScheduledExports } from './scheduledExport';
 
 const log = subsystem('server');
 const startedAt = Date.now();
@@ -46,6 +48,10 @@ const MAX_SUBSCRIPTIONS = parseInt(process.env.MAX_SUBSCRIPTIONS ?? '500', 10);
 const SUBSCRIPTION_QUEUE_LIMIT = parseInt(process.env.SUBSCRIPTION_QUEUE_LIMIT ?? '64', 10);
 
 const pool = new Pool({ connectionString: DATABASE_URL });
+pool.on('error', err => {
+  dbPoolErrors.inc();
+  log.error({ err: err.message }, 'unexpected PostgreSQL pool client error; pool will replace the client');
+});
 const schema = makeExecutableSchema({ typeDefs, resolvers });
 
 const notifier = new LedgerNotifier({
@@ -54,6 +60,7 @@ const notifier = new LedgerNotifier({
   queueLimit: SUBSCRIPTION_QUEUE_LIMIT,
   log: (message, detail) => subsystem('pubsub').info({ detail }, message),
 });
+let stopScheduledExports: () => Promise<void> = async () => {};
 
 async function main() {
   initErrorTracking();
@@ -109,6 +116,7 @@ async function main() {
         async serverWillStart() {
           return {
             async drainServer() {
+              await stopScheduledExports();
               await wsCleanup.dispose();
               await notifier.stop();
             },
@@ -120,6 +128,11 @@ async function main() {
 
   await server.start();
   await notifier.start();
+  const exportOptions = scheduledExportOptions();
+  if (exportOptions) {
+    stopScheduledExports = startScheduledExports(pool, exportOptions);
+    log.info({ bucket: exportOptions.bucket, intervalMs: exportOptions.intervalMs }, 'scheduled exports enabled');
+  }
 
   // Ahead of the GraphQL middleware so an operator can always reach them, even
   // while the schema layer is unhappy.
