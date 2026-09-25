@@ -323,6 +323,14 @@ health. If it stays down, check Postgres connectivity from the GraphQL
 container. `lumina_graphql_subscriptions_rejected_total` increasing means
 clients are hitting the `MAX_SUBSCRIPTIONS` ceiling.
 
+### Database Backup & Restore Runbook
+
+The indexer records full historical ledger state in PostgreSQL that cannot be reconstructed from chain tip alone. See [docs/DATABASE_RESTORE_RUNBOOK.md](docs/DATABASE_RESTORE_RUNBOOK.md) for the operational runbook covering:
+- Backup strategy, snapshot isolation, and recommended cadence
+- Step-by-step restoration procedure and expected duration benchmarks
+- Indexer startup catch-up behavior against restored databases
+- Gap detection queries and remediation procedures
+
 ## Testing
 
 ```bash
