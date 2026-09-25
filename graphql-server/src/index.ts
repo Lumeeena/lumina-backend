@@ -44,8 +44,16 @@ const DATABASE_URL = process.env.DATABASE_URL ?? 'postgresql://localhost:5432/lu
 const PORT = parseInt(process.env.PORT ?? '4000', 10);
 const MAX_SUBSCRIPTIONS = parseInt(process.env.MAX_SUBSCRIPTIONS ?? '500', 10);
 const SUBSCRIPTION_QUEUE_LIMIT = parseInt(process.env.SUBSCRIPTION_QUEUE_LIMIT ?? '64', 10);
+const DB_POOL_MAX = process.env.DB_POOL_MAX ? parseInt(process.env.DB_POOL_MAX, 10) : undefined;
+const DB_POOL_IDLE_TIMEOUT = process.env.DB_POOL_IDLE_TIMEOUT ? parseInt(process.env.DB_POOL_IDLE_TIMEOUT, 10) : undefined;
+const DB_POOL_CONNECTION_TIMEOUT = process.env.DB_POOL_CONNECTION_TIMEOUT ? parseInt(process.env.DB_POOL_CONNECTION_TIMEOUT, 10) : undefined;
 
-const pool = new Pool({ connectionString: DATABASE_URL });
+const pool = new Pool({ 
+  connectionString: DATABASE_URL,
+  max: DB_POOL_MAX,
+  idleTimeoutMillis: DB_POOL_IDLE_TIMEOUT,
+  connectionTimeoutMillis: DB_POOL_CONNECTION_TIMEOUT,
+});
 const schema = makeExecutableSchema({ typeDefs, resolvers });
 
 const notifier = new LedgerNotifier({
@@ -173,6 +181,9 @@ async function main() {
       health: `http://localhost:${PORT}/health`,
       metrics: `http://localhost:${PORT}/metrics`,
       database: redactUrl(DATABASE_URL),
+      dbPoolMax: DB_POOL_MAX ?? 10,
+      dbPoolIdleTimeout: DB_POOL_IDLE_TIMEOUT ?? 10000,
+      dbPoolConnectionTimeout: DB_POOL_CONNECTION_TIMEOUT ?? 0,
     },
     'lumina graphql server listening'
   );
