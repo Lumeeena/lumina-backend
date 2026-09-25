@@ -3,7 +3,7 @@ version: "3.9"
 services:
   # PostgreSQL — stores indexed Stellar network data
   postgres:
-    image: postgres:16-alpine
+    image: postgres:16-alpine@sha256:721873c34ceb9f8d8fc265984940dc982404c105f19ad51be9fdc5970a6080ea
     restart: unless-stopped
     environment:
       POSTGRES_DB: lumina
@@ -94,7 +94,7 @@ services:
   # Grafana lands on http://localhost:3001 (admin/admin) with the Lumina
   # dashboard already provisioned.
   prometheus:
-    image: prom/prometheus:v2.54.1
+    image: prom/prometheus:v2.54.1@sha256:f6639335d34a77d9d9db382b92eeb7fc00934be8eae81dbc03b31cfe90411a94
     profiles: ["observability"]
     restart: unless-stopped
     depends_on:
@@ -107,7 +107,7 @@ services:
       - "127.0.0.1:9091:9090"
 
   grafana:
-    image: grafana/grafana:11.2.0
+    image: grafana/grafana:11.2.0@sha256:408afb9726de5122b00a2576763a8a57a3c86d5b0eff5305bc994ceb3eb96c3f
     profiles: ["observability"]
     restart: unless-stopped
     depends_on:
