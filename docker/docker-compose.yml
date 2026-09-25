@@ -75,6 +75,9 @@ services:
     environment:
       DATABASE_URL: postgresql://lumina:lumina_dev@postgres:5432/lumina
       PORT: "4000"
+      RUN_MIGRATIONS_ON_STARTUP: ${RUN_MIGRATIONS_ON_STARTUP:-false}
+      EXPORT_RATE_LIMIT_PER_MINUTE: ${EXPORT_RATE_LIMIT_PER_MINUTE:-2}
+      MAX_CONCURRENT_EXPORTS: ${MAX_CONCURRENT_EXPORTS:-2}
     ports:
       - "127.0.0.1:4000:4000"
     healthcheck:

@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import type { Pool } from 'pg';
+import { Pool as PgPool } from 'pg';
 import {
   getAccountFromDb,
   getEventsByContract,
@@ -41,6 +42,19 @@ test('mapLedger converts BIGINT strings and Date to GraphQL shape', () => {
     baseFee: 100,
     baseReserve: 5000000,
   });
+});
+
+test('PostgreSQL TIMESTAMPTZ round-trips an offset instant as UTC', { skip: !process.env.TEST_DATABASE_URL }, async () => {
+  const pool = new PgPool({ connectionString: process.env.TEST_DATABASE_URL });
+  const client = await pool.connect();
+  try {
+    await client.query("SET TIME ZONE 'America/Los_Angeles'");
+    const { rows } = await client.query<{ value: Date }>(
+      'SELECT $1::timestamptz AS value', ['2026-06-14T09:30:00.123+05:30']
+    );
+    assert.ok(rows[0].value instanceof Date);
+    assert.equal(rows[0].value.toISOString(), '2026-06-14T04:00:00.123Z');
+  } finally { client.release(); await pool.end(); }
 });
 
 test('mapTransaction keeps feeCharged as a string (no precision loss)', () => {
