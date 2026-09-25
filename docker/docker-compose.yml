@@ -10,10 +10,23 @@ services:
       POSTGRES_USER: lumina
       POSTGRES_PASSWORD: lumina_dev
       POSTGRES_INITDB_ARGS: ${POSTGRES_INITDB_ARGS:-}
+      # Consumed by docker/initdb/03_roles.sh when it applies db/roles.sql. The
+      # two service DATABASE_URLs below are built from the same values, so
+      # changing one here changes both ends.
+      LUMINA_GRAPHQL_PASSWORD: ${LUMINA_GRAPHQL_PASSWORD:-lumina_graphql_dev}
+      LUMINA_INDEXER_PASSWORD: ${LUMINA_INDEXER_PASSWORD:-lumina_indexer_dev}
     volumes:
       - postgres_data:/var/lib/postgresql/data
       - ../db/schema.sql:/docker-entrypoint-initdb.d/01_schema.sql
       - ../db/seed.sql:/docker-entrypoint-initdb.d/02_seed.sql:ro
+      # Runs last: creates lumina_owner/lumina_graphql/lumina_indexer, moves
+      # ownership, and applies the grants. Wrapped in a .sh because db/roles.sql
+      # needs psql variables the .sql init path cannot pass. Mounted outside
+      # docker-entrypoint-initdb.d so the entrypoint does not also try to run it
+      # bare (it refuses to run without passwords).
+      - ./initdb/03_roles.sh:/docker-entrypoint-initdb.d/03_roles.sh:ro
+      - ../db/roles.sql:/opt/lumina/db/roles.sql:ro
+      - ../db/verify_roles.sql:/opt/lumina/db/verify_roles.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U lumina -d lumina"]
       interval: 10s
@@ -31,7 +44,9 @@ services:
       postgres:
         condition: service_healthy
     environment:
-      DATABASE_URL: postgresql://lumina:lumina_dev@postgres:5432/lumina
+      # Least-privilege login: DML on the indexed tables, no DDL. See
+      # docs/DATABASE_ROLES.md.
+      DATABASE_URL: postgresql://lumina_indexer:${LUMINA_INDEXER_PASSWORD:-lumina_indexer_dev}@postgres:5432/lumina
       HORIZON_URL: https://horizon.stellar.org
       POLL_INTERVAL_MS: "5000"
       # Conservative pacing for anonymous public Horizon access — its
@@ -73,7 +88,8 @@ services:
       postgres:
         condition: service_healthy
     environment:
-      DATABASE_URL: postgresql://lumina:lumina_dev@postgres:5432/lumina
+      # Read-only login: SELECT + LISTEN. See docs/DATABASE_ROLES.md.
+      DATABASE_URL: postgresql://lumina_graphql:${LUMINA_GRAPHQL_PASSWORD:-lumina_graphql_dev}@postgres:5432/lumina
       PORT: "4000"
     ports:
       - "127.0.0.1:4000:4000"

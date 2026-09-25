@@ -15,7 +15,7 @@ indexer/         Polls Stellar Horizon, writes ledgers/transactions/operations/a
                   to Postgres, and (opt-in) indexes Soroban contract events via RPC
 graphql-server/   Apollo GraphQL API — reads from Postgres, falls back to Horizon
                   only for accounts that haven't been indexed yet
-db/               PostgreSQL schema + migrations
+db/               PostgreSQL schema, migrations, and role grants
 docker/           Dockerfiles + docker-compose.yml for postgres + indexer + graphql
 ```
 
@@ -171,6 +171,15 @@ docker compose -f docker/docker-compose.yml up
 # once
 psql $DATABASE_URL -f db/schema.sql
 
+# once — the least-privilege roles the services connect as (see
+# docs/DATABASE_ROLES.md). Needs a superuser connection the first time: it
+# creates roles and moves object ownership.
+psql "$ADMIN_DATABASE_URL" \
+  -v graphql_password="$LUMINA_GRAPHQL_PASSWORD" \
+  -v indexer_password="$LUMINA_INDEXER_PASSWORD" \
+  -f db/roles.sql
+psql "$ADMIN_DATABASE_URL" -f db/verify_roles.sql   # asserts the grants
+
 # indexer
 cd indexer && npm install && npm run dev
 
@@ -178,12 +187,20 @@ cd indexer && npm install && npm run dev
 cd graphql-server && npm install && npm run dev
 ```
 
+Each service then runs against its own role rather than the owning one:
+`DATABASE_URL=postgresql://lumina_indexer:…` for the indexer and
+`postgresql://lumina_graphql:…` for the GraphQL server. The server is
+read-only, so it cannot write even if a resolver is compromised; the indexer
+can write its seven indexed tables and nothing else. Operator commands that do
+write — `db/migrations/*.sql`, `npm run manage-keys` — use an `lumina_owner`
+connection instead.
+
 ### Indexer environment variables
 
 | Variable | Default | Notes |
 |---|---|---|
 | `HORIZON_URL` | `https://horizon.stellar.org` | |
-| `DATABASE_URL` | `postgresql://localhost:5432/lumina` | |
+| `DATABASE_URL` | `postgresql://localhost:5432/lumina` | Connect as `lumina_indexer` in a provisioned database — see [docs/DATABASE_ROLES.md](docs/DATABASE_ROLES.md) |
 | `START_LEDGER` | latest | Only used when the DB is empty |
 | `POLL_INTERVAL_MS` | `5000` | |
 | `HORIZON_MIN_REQUEST_INTERVAL_MS` | `100` | Minimum spacing between outbound Horizon requests, to avoid bursts tripping the per-IP rate limit |
@@ -225,7 +242,7 @@ npm run dev
 
 | Variable | Default |
 |---|---|
-| `DATABASE_URL` | `postgresql://localhost:5432/lumina` |
+| `DATABASE_URL` | `postgresql://localhost:5432/lumina` — connect as read-only `lumina_graphql` in a provisioned database ([docs/DATABASE_ROLES.md](docs/DATABASE_ROLES.md)) |
 | `PORT` | `4000` |
 | `LOG_LEVEL` | `info` — `debug` for per-ledger detail |
 | `LOG_PRETTY` | unset — `true` for human-readable local logs |
