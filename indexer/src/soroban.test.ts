@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { getEvents, getLatestLedgerSequence } from './soroban';
+import { getEvents, getLatestLedgerSequence, getLedgerEntries, GET_LEDGER_ENTRIES_MAX_KEYS } from './soroban';
+import { registry } from './metrics';
 
 // Real XDR fixtures: ScSymbol("swap") and ScMap({ amount: "1000" }), generated via
 // @stellar/stellar-sdk's nativeToScVal so decoding is exercised against real wire format.
@@ -82,4 +83,33 @@ test('getLatestLedgerSequence returns the sequence from a real getLatestLedger r
   });
   const sequence = await getLatestLedgerSequence('https://rpc.example.com');
   assert.equal(sequence, 4081327);
+});
+
+test('getLedgerEntries chunks requests to the RPC key limit and aggregates results', async () => {
+  const requests: string[][] = [];
+  (global as unknown as { fetch: typeof fetch }).fetch = (async (_url: unknown, init?: RequestInit) => {
+    const request = JSON.parse(String(init?.body));
+    requests.push(request.params.keys);
+    return {
+      ok: true,
+      json: async () => ({ result: {
+        entries: request.params.keys.map((key: string) => ({ key, xdr: `value:${key}`, lastModifiedLedgerSeq: 12 })),
+        latestLedger: requests.length === 1 ? 10 : 13,
+      } }),
+    } as Response;
+  }) as typeof fetch;
+  const keys = Array.from({ length: GET_LEDGER_ENTRIES_MAX_KEYS + 1 }, (_, index) => `key-${index}`);
+  const result = await getLedgerEntries('https://rpc.example.com', keys);
+  assert.deepEqual(requests.map(batch => batch.length), [GET_LEDGER_ENTRIES_MAX_KEYS, 1]);
+  assert.deepEqual(result.entries.map(entry => entry.key), keys);
+  assert.equal(result.latestLedger, 13);
+  const metric = await registry.getSingleMetric('lumina_soroban_requests_total')?.get();
+  assert.ok(metric?.values.some(value => value.labels['method'] === 'getLedgerEntries' && value.value >= 2));
+});
+
+test('getLedgerEntries makes no RPC calls for an empty key list', async () => {
+  let called = false;
+  (global as unknown as { fetch: typeof fetch }).fetch = (async () => { called = true; throw new Error('unexpected RPC'); }) as typeof fetch;
+  assert.deepEqual(await getLedgerEntries('https://rpc.example.com', []), { entries: [], latestLedger: 0 });
+  assert.equal(called, false);
 });

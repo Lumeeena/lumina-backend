@@ -22,6 +22,7 @@ interface Context extends BaseContext {
   requestLogger: ReturnType<typeof subsystem>;
 }
 import {
+  dbPoolErrors,
   listenerConnected,
   metricsContentType,
   renderMetrics,
@@ -30,6 +31,7 @@ import {
 } from './metrics';
 import { initTracing, shutdownTracing } from './tracing';
 import { initErrorTracking, shutdownErrorTracking } from './errorTracking';
+import { scheduledExportOptions, startScheduledExports } from './scheduledExport';
 
 const log = subsystem('server');
 const startedAt = Date.now();
@@ -62,8 +64,13 @@ const notifier = new LedgerNotifier({
   queueLimit: SUBSCRIPTION_QUEUE_LIMIT,
   log: (message, detail) => subsystem('pubsub').info({ detail }, message),
 });
+let stopScheduledExports: () => Promise<void> = async () => {};
 
 async function main() {
+  if (process.env.RUN_MIGRATIONS_ON_STARTUP === 'true') {
+    const status = await runMigrations(pool, loadMigrations());
+    log.info({ applied: status.applied, pending: status.pending }, 'database migrations ready');
+  }
   initErrorTracking();
   initTracing();
 
@@ -117,6 +124,7 @@ async function main() {
         async serverWillStart() {
           return {
             async drainServer() {
+              await stopScheduledExports();
               await wsCleanup.dispose();
               await notifier.stop();
             },
@@ -128,6 +136,11 @@ async function main() {
 
   await server.start();
   await notifier.start();
+  const exportOptions = scheduledExportOptions();
+  if (exportOptions) {
+    stopScheduledExports = startScheduledExports(pool, exportOptions);
+    log.info({ bucket: exportOptions.bucket, intervalMs: exportOptions.intervalMs }, 'scheduled exports enabled');
+  }
 
   // Ahead of the GraphQL middleware so an operator can always reach them, even
   // while the schema layer is unhappy.
@@ -161,6 +174,52 @@ async function main() {
         log.error({ err: err instanceof Error ? err.message : err }, 'failed to render metrics');
         res.status(500).send('metrics unavailable');
       });
+  });
+
+  app.get('/export', async (req, res) => {
+    const match = /^Bearer\s+(lum_[a-f0-9]{64})$/i.exec(req.header('authorization') ?? '');
+    let authorized = false;
+    try { authorized = Boolean(match && await hasExportPermission(pool, match[1])); }
+    catch (error) {
+      log.error({ err: error instanceof Error ? error.message : error }, 'export authorization failed');
+      res.status(503).json({ error: 'Export authorization is temporarily unavailable' });
+      return;
+    }
+    if (!authorized || !match) {
+      res.status(403).json({ error: 'A valid API key with export permission is required' });
+      return;
+    }
+    const keyHash = hashApiKey(match[1]);
+    if (!exportLimiter.allow(keyHash)) {
+      res.set('Retry-After', '60').status(429).json({ error: 'Export rate limit exceeded' });
+      return;
+    }
+    const release = exportLimiter.acquire();
+    if (!release) {
+      res.set('Retry-After', '30').status(429).json({ error: 'Concurrent export limit reached' });
+      return;
+    }
+    res.status(200).set({
+      'Content-Type': 'application/x-ndjson; charset=utf-8',
+      'Content-Disposition': 'attachment; filename="lumina-export.ndjson"',
+      'Cache-Control': 'no-store',
+    });
+    try {
+      await writeDatabaseExport(pool, line => new Promise<boolean>(resolve => {
+        if (res.destroyed) { resolve(false); return; }
+        if (res.write(line)) { resolve(true); return; }
+        const drained = () => { cleanup(); resolve(true); };
+        const closed = () => { cleanup(); resolve(false); };
+        const cleanup = () => { res.off('drain', drained); res.off('close', closed); };
+        res.once('drain', drained);
+        res.once('close', closed);
+      }));
+      if (!res.destroyed) res.end();
+    } catch (error) {
+      log.error({ err: error instanceof Error ? error.message : error }, 'database export failed');
+      if (!res.headersSent) res.status(500).json({ error: 'Export failed' });
+      else res.destroy(error instanceof Error ? error : undefined);
+    } finally { release(); }
   });
 
   const middleware = [

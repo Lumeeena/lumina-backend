@@ -13,6 +13,11 @@
  *   manage-keys set-limit <id|hash> <limit>   Update a key's rate limit (req/min)
  *
  * Reads DATABASE_URL from environment (default: postgresql://localhost:5432/lumina).
+ *
+ * This is an operator CLI, not part of the server: it writes to `api_keys`, so
+ * it must run with the owning role (a member of `lumina_owner`), never with the
+ * read-only `lumina_graphql` role the server connects as. See
+ * docs/DATABASE_ROLES.md.
  */
 import { Pool } from 'pg';
 import {
@@ -21,6 +26,7 @@ import {
   getApiKey,
   revokeApiKey,
   setApiKeyLimit,
+  setApiKeyExportPermission,
 } from './keys';
 
 const DATABASE_URL = process.env.DATABASE_URL ?? 'postgresql://localhost:5432/lumina';
@@ -34,6 +40,8 @@ function usage(): never {
       '  manage-keys show <id|hash>                Show key metadata (cannot print plaintext key)',
       '  manage-keys revoke <id|hash>              Revoke an API key immediately',
       '  manage-keys set-limit <id|hash> <limit>   Set key rate limit in requests per minute',
+      '  manage-keys grant-export <id|hash>        Grant bulk export permission',
+      '  manage-keys revoke-export <id|hash>       Revoke bulk export permission',
     ].join('\n')
   );
   process.exit(1);
@@ -177,6 +185,14 @@ export async function runCli(args: string[], pool: Pool): Promise<void> {
       break;
     }
 
+    case 'grant-export':
+    case 'revoke-export': {
+      if (!arg1) { console.error(`Error: "${command}" requires a key ID or hash.`); usage(); }
+      await setApiKeyExportPermission(pool, arg1, command === 'grant-export');
+      console.log(`Bulk export permission ${command === 'grant-export' ? 'granted' : 'revoked'} for API key ${arg1}.`);
+      break;
+    }
+
     default:
       usage();
   }
@@ -184,6 +200,7 @@ export async function runCli(args: string[], pool: Pool): Promise<void> {
 
 async function main(): Promise<void> {
   const pool = new Pool({ connectionString: DATABASE_URL });
+  pool.on('error', err => console.error('Unexpected PostgreSQL pool client error:', err.message));
   try {
     await runCli(process.argv.slice(2), pool);
   } finally {

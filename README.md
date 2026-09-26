@@ -15,7 +15,7 @@ indexer/         Polls Stellar Horizon, writes ledgers/transactions/operations/a
                   to Postgres, and (opt-in) indexes Soroban contract events via RPC
 graphql-server/   Apollo GraphQL API — reads from Postgres, falls back to Horizon
                   only for accounts that haven't been indexed yet
-db/               PostgreSQL schema + migrations
+db/               PostgreSQL schema, migrations, and role grants
 docker/           Dockerfiles + docker-compose.yml for postgres + indexer + graphql
 ```
 
@@ -171,12 +171,29 @@ docker compose -f docker/docker-compose.yml up
 # once
 psql $DATABASE_URL -f db/schema.sql
 
+# once — the least-privilege roles the services connect as (see
+# docs/DATABASE_ROLES.md). Needs a superuser connection the first time: it
+# creates roles and moves object ownership.
+psql "$ADMIN_DATABASE_URL" \
+  -v graphql_password="$LUMINA_GRAPHQL_PASSWORD" \
+  -v indexer_password="$LUMINA_INDEXER_PASSWORD" \
+  -f db/roles.sql
+psql "$ADMIN_DATABASE_URL" -f db/verify_roles.sql   # asserts the grants
+
 # indexer
 cd indexer && npm install && npm run dev
 
 # graphql server
 cd graphql-server && npm install && npm run dev
 ```
+
+Each service then runs against its own role rather than the owning one:
+`DATABASE_URL=postgresql://lumina_indexer:…` for the indexer and
+`postgresql://lumina_graphql:…` for the GraphQL server. The server is
+read-only, so it cannot write even if a resolver is compromised; the indexer
+can write its seven indexed tables and nothing else. Operator commands that do
+write — `db/migrations/*.sql`, `npm run manage-keys` — use an `lumina_owner`
+connection instead.
 
 ### Indexer environment variables
 
@@ -223,6 +240,24 @@ npm run dev
 | `HEALTH_MAX_LAG_LEDGERS` | `20` — lag threshold before `/health` reports 503 |
 | `LOG_LEVEL` | `info` |
 | `LOG_PRETTY` | unset — `true` for human-readable local logs |
+| `LOG_SAMPLE_RATE` | `0.01` — fraction of routine success logs emitted (see below) |
+
+Routine success logs — one per indexed ledger, plus one per contract-event and
+custom-decode batch — are sampled with `LOG_SAMPLE_RATE`, because at a 5s poll
+they are the highest-volume source in the indexer and they are measurement
+duplicates of the Prometheus counters in `metrics.ts`. `1` logs every one of
+them, `0` logs none.
+
+Warnings and errors are never sampled. The sampled path is a separate method
+(`routineLogger(...).success()`), so there is no way to log a failure through a
+logger that drops lines; `indexer/src/logger.test.ts` asserts that at rate 0 a
+warning and an error are still emitted.
+
+An emitted line carries a `suppressed` field with the number of routine
+successes dropped since the previous emitted line, so a sampled stream still
+shows how much work happened rather than implying nothing did. An unusable
+`LOG_SAMPLE_RATE` falls back to the default and says so, instead of stopping the
+indexer from starting.
 
 ### GraphQL server environment variables
 
@@ -328,6 +363,14 @@ is down and reconnecting; queries are unaffected and this is not fatal to
 health. If it stays down, check Postgres connectivity from the GraphQL
 container. `lumina_graphql_subscriptions_rejected_total` increasing means
 clients are hitting the `MAX_SUBSCRIPTIONS` ceiling.
+
+### Database Backup & Restore Runbook
+
+The indexer records full historical ledger state in PostgreSQL that cannot be reconstructed from chain tip alone. See [docs/DATABASE_RESTORE_RUNBOOK.md](docs/DATABASE_RESTORE_RUNBOOK.md) for the operational runbook covering:
+- Backup strategy, snapshot isolation, and recommended cadence
+- Step-by-step restoration procedure and expected duration benchmarks
+- Indexer startup catch-up behavior against restored databases
+- Gap detection queries and remediation procedures
 
 ## Testing
 

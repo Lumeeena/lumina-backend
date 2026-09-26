@@ -30,7 +30,7 @@ import {
   loadContractSchemas,
 } from './db';
 import { decodeEvents } from './customDecode';
-import { subsystem } from './logger';
+import { routineLogger, subsystem } from './logger';
 import {
   contractEventsIndexed,
   customEventsDecoded,
@@ -44,6 +44,11 @@ import { initTracing, shutdownTracing } from './tracing';
 import { initErrorTracking, captureException, shutdownErrorTracking } from './errorTracking';
 
 const log = subsystem('indexer');
+
+// Routine success goes through `routine`, which samples (LOG_SAMPLE_RATE) and
+// carries a `suppressed` count on every emitted line. Warnings and errors stay on
+// `log`, which is never sampled.
+const routine = routineLogger('indexer');
 
 const HEALTH_PORT = parseInt(process.env.HEALTH_PORT ?? '9090', 10);
 
@@ -118,6 +123,9 @@ let loopTick = 0;
 let eventsCursor = 0;
 const accountCache = new Map<string, number>(); // address -> last-fetched-at
 
+let isShuttingDown = false;
+let isLoopRunning = false;
+
 function pruneAccountCache(now: number): void {
   if (accountCache.size < ACCOUNT_CACHE_MAX_SIZE) return;
   for (const [address, fetchedAt] of accountCache) {
@@ -156,6 +164,10 @@ async function fetchAndIndexLedger(sequence: number): Promise<void> {
   state.latestIndexedLedger = sequence;
   state.lastIndexedAt = Date.now();
   recordIndexedLedger(sequence, transactions.length, operations.length);
+  routine.success(
+    { ledger: sequence, transactions: transactions.length, operations: operations.length },
+    'ledger indexed'
+  );
 }
 
 export async function fetchAndIndexLedgerWithRetry(
@@ -192,6 +204,7 @@ export async function runLedgerCatchUp(
   onAdvanced: (cursor: number) => void = () => {}
 ): Promise<number> {
   for (let seq = cursor + 1; seq <= latest; seq++) {
+    if (isShuttingDown) break;
     const indexed = await indexOne(seq);
     if (!indexed) break;
     cursor = seq;
@@ -226,7 +239,7 @@ async function pollRegistry(): Promise<void> {
       log.warn({ count: invalid.length, addresses: invalid }, 'registry discovery skipped non-contract addresses');
     }
     discoveredContractIds = entries.filter(isContractAddress);
-    log.info({ contracts: discoveredContractIds.length }, 'registry discovery complete');
+    routine.success({ contracts: discoveredContractIds.length }, 'registry discovery complete');
   } catch (err) {
     indexingErrors.inc({ loop: 'registry' });
     log.error({ err: message(err) }, 'registry polling failed');
@@ -259,7 +272,7 @@ async function pollContractEvents(): Promise<void> {
 
     const { events, latestLedger } = await getEvents(SOROBAN_RPC_URL, contractIds, eventsCursor);
     if (events.length > 0) {
-      log.info({ events: events.length, fromLedger: eventsCursor }, 'indexing contract events');
+      routine.success({ events: events.length, fromLedger: eventsCursor }, 'indexing contract events');
       contractEventsIndexed.inc(events.length);
       await insertContractEvents(pool, events);
       await indexCustomEvents(events);
@@ -301,7 +314,7 @@ async function indexCustomEvents(events: ContractEvent[]): Promise<void> {
     }
 
     if (decoded.length > 0) {
-      log.info({ decoded: decoded.length }, 'decoded events against custom schemas');
+      routine.success({ decoded: decoded.length }, 'decoded events against custom schemas');
       customEventsDecoded.inc({ outcome: 'decoded' }, decoded.length);
       await insertCustomEvents(pool, decoded);
     }
@@ -328,7 +341,8 @@ async function run() {
     log.info({ ledger: cursor + 1 }, 'resuming from ledger');
   }
 
-  while (true) {
+  isLoopRunning = true;
+  while (!isShuttingDown) {
     try {
       if (loopTick % REGISTRY_POLL_EVERY_N_TICKS === 0) {
         await pollRegistry();
@@ -341,6 +355,7 @@ async function run() {
 
       cursor = await runLedgerCatchUp(cursor, latest, undefined, advanced => recordHorizonTip(latest, advanced));
 
+      if (isShuttingDown) break;
       await pollContractEvents();
     } catch (err) {
       indexingErrors.inc({ loop: 'main' });
@@ -350,12 +365,26 @@ async function run() {
       }
     }
 
+    if (isShuttingDown) break;
     await new Promise(r => setTimeout(r, POLL_INTERVAL_MS));
   }
+  isLoopRunning = false;
 }
 
 async function shutdown() {
+  if (isShuttingDown) return;
+  isShuttingDown = true;
   log.info('shutting down indexer');
+
+  setTimeout(() => {
+    log.fatal('shutdown timeout exceeded, forcing exit');
+    process.exit(1);
+  }, 10000).unref();
+
+  while (isLoopRunning) {
+    await new Promise(r => setTimeout(r, 100));
+  }
+
   await pool.end();
   await shutdownTracing();
   await shutdownErrorTracking();
