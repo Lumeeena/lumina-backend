@@ -2,8 +2,17 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import type { Pool, PoolClient } from 'pg';
 import { getLatestIndexedEventLedger, getLatestIndexedLedger, indexLedger, insertContractEvents, upsertAccount } from './db';
-import type { HorizonAccount, HorizonLedger, HorizonOperation, HorizonTransaction } from './horizon';
-import type { ContractEvent } from './soroban';
+import { makeAccount, makeContractEvent, makeLedger, makeOperation, makeTransaction } from '../../shared/test-factories';
+
+test('createPool logs and counts idle client errors instead of leaving them unhandled', async () => {
+  const pool = createPool('postgresql://localhost:5432/lumina');
+  const metric = registry.getSingleMetric('lumina_indexer_db_pool_errors_total')!;
+  const before = (await metric.get()).values[0]?.value ?? 0;
+  pool.emit('error', new Error('simulated idle client error'));
+  const after = (await metric.get()).values[0]?.value ?? 0;
+  assert.equal(after, before + 1);
+  await pool.end();
+});
 
 function makeFakeClient(opts: { failOn?: string } = {}) {
   const calls: string[] = [];
@@ -31,34 +40,9 @@ function fakePool(client: unknown): Pool {
   return { connect: async () => client } as unknown as Pool;
 }
 
-const ledger: HorizonLedger = {
-  sequence: 100,
-  closed_at: '2026-01-01T00:00:00Z',
-  successful_transaction_count: 1,
-  failed_transaction_count: 0,
-  operation_count: 1,
-  base_fee_in_stroops: 100,
-  base_reserve_in_stroops: 5000000,
-};
-
-const tx: HorizonTransaction = {
-  hash: 'tx1',
-  ledger: 100,
-  created_at: '2026-01-01T00:00:00Z',
-  source_account: 'GABC',
-  fee_charged: '100',
-  operation_count: 1,
-  successful: true,
-  memo_type: 'none',
-};
-
-const op: HorizonOperation = {
-  id: 'op1',
-  type: 'payment',
-  transaction_hash: 'tx1',
-  created_at: '2026-01-01T00:00:00Z',
-  source_account: 'GABC',
-};
+const ledger = makeLedger();
+const tx = makeTransaction();
+const op = makeOperation();
 
 test('indexLedger writes ledger, transactions, and operations inside one commit', async () => {
   const { client, calls } = makeFakeClient();
@@ -92,17 +76,7 @@ test('getLatestIndexedLedger returns the numeric max sequence', async () => {
   assert.equal(await getLatestIndexedLedger(pool), 4242);
 });
 
-const account: HorizonAccount = {
-  account_id: 'GABC',
-  sequence: '1',
-  subentry_count: 0,
-  last_modified_ledger: 100,
-  num_sponsored: 0,
-  num_sponsoring: 0,
-  balances: [],
-  flags: { auth_required: false, auth_revocable: false, auth_immutable: false, auth_clawback_enabled: false },
-  thresholds: { low_threshold: 0, med_threshold: 0, high_threshold: 0 },
-};
+const account = makeAccount();
 
 test('indexLedger writes accounts inside the same commit when provided', async () => {
   const { client, calls } = makeFakeClient();
@@ -127,16 +101,7 @@ test('upsertAccount inserts with an ON CONFLICT upsert', async () => {
   assert.match(queries[0], /ON CONFLICT \(address\) DO UPDATE/);
 });
 
-const event: ContractEvent = {
-  id: 'evt1',
-  type: 'contract',
-  contractId: 'CABC',
-  ledger: 100,
-  createdAt: '2026-01-01T00:00:00Z',
-  pagingToken: 'token1',
-  topics: ['"swap"'],
-  value: { amount: '10' },
-};
+const event = makeContractEvent();
 
 test('insertContractEvents writes one row per event', async () => {
   const queries: string[] = [];

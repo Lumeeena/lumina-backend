@@ -19,6 +19,7 @@ Breaking changes are rare and advance the major version. Deprecation notices app
 ## [Unreleased]
 
 ### Added
+- Consumer documentation for API key authentication, rate limit headers, the anonymous tier, and the migration timeline (#84)
 - Resolver integration tests against real database (#122)
 - Consumer-facing GraphQL API documentation (#121)
 - Versioning policy and release workflow (#118)
