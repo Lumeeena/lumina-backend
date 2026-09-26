@@ -17,7 +17,7 @@ import { Client } from 'pg';
 import { INDEXED_CHANNEL } from './notifications';
 import { LedgerNotifier } from './pubsub';
 
-const DATABASE_URL = process.env.TEST_DATABASE_URL;
+const DATABASE_URL = process.env['TEST_DATABASE_URL'];
 const skip = DATABASE_URL ? false : 'TEST_DATABASE_URL is not set';
 
 /**

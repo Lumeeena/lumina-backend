@@ -1,7 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import type { Pool, PoolClient } from 'pg';
-import { getLatestIndexedEventLedger, getLatestIndexedLedger, indexLedger, insertContractEvents, upsertAccount } from './db';
+import { createPool, getLatestIndexedEventLedger, getLatestIndexedLedger, indexLedger, insertContractEvents, upsertAccount } from './db';
+import { registry } from './metrics';
 import { makeAccount, makeContractEvent, makeLedger, makeOperation, makeTransaction } from '../../shared/test-factories';
 
 test('createPool logs and counts idle client errors instead of leaving them unhandled', async () => {
@@ -104,6 +105,40 @@ test('indexLedger writes accounts inside the same commit when provided', async (
     'COMMIT',
     'RELEASE',
   ]);
+});
+
+test('ensurePartitions calls the partition-maintenance function with the requested lookahead', async () => {
+  const calls: Array<{ sql: string; params: unknown[] }> = [];
+  const pool = {
+    query: async (sql: string, params: unknown[]) => {
+      calls.push({ sql, params });
+      return { rows: [] };
+    },
+  } as unknown as Pool;
+
+  await ensurePartitions(pool, 7);
+
+  assert.equal(calls.length, 1);
+  const call = calls[0];
+  assert.ok(call);
+  assert.match(call.sql, /SELECT ensure_operations_partitions\(\$1\)/);
+  assert.deepEqual(call.params, [7]);
+});
+
+test('ensurePartitions defaults the lookahead to 5 partitions', async () => {
+  const calls: Array<{ sql: string; params: unknown[] }> = [];
+  const pool = {
+    query: async (sql: string, params: unknown[]) => {
+      calls.push({ sql, params });
+      return { rows: [] };
+    },
+  } as unknown as Pool;
+
+  await ensurePartitions(pool);
+
+  const call = calls[0];
+  assert.ok(call);
+  assert.deepEqual(call.params, [5]);
 });
 
 test('upsertAccount inserts with an ON CONFLICT upsert', async () => {

@@ -17,7 +17,7 @@ import { parseContractSchema } from './customSchema';
 import { deleteContractSchema, insertCustomEvents, loadContractSchemas, upsertContractSchema } from './db';
 import type { ContractEvent } from './soroban';
 
-const DATABASE_URL = process.env.TEST_DATABASE_URL;
+const DATABASE_URL = process.env['TEST_DATABASE_URL'];
 const skip = DATABASE_URL ? false : 'TEST_DATABASE_URL is not set';
 
 /**

@@ -15,12 +15,10 @@
  */
 
 import { performance } from 'perf_hooks';
-import { createPool } from 'pg';
 import {
   DATABASE_URL,
   HORIZON_URL,
   fetchAndIndexLedgerWithRetry,
-  log as indexerLog, // Renaming to avoid conflict with local log
   message,
   redactUrl,
   pool as indexerPool, // Renaming to avoid conflict with local pool

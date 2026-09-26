@@ -21,6 +21,7 @@
 
 import {
   createPool,
+  ensurePartitions,
   getLatestIndexedEventLedger,
   getLatestIndexedLedger,
   indexLedger,
