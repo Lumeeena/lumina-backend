@@ -11,6 +11,7 @@ import { Pool } from 'pg';
 import { GraphQLError } from 'graphql';
 import { useServer } from 'graphql-ws/lib/use/ws';
 import { WebSocketServer } from 'ws';
+import { to as copyTo } from 'pg-copy-streams';
 import { Context, createContext, resolvers } from './resolvers';
 import { LedgerNotifier, SubscriberLimitError } from './pubsub';
 import { subsystem } from './logger';
@@ -176,50 +177,59 @@ async function main() {
       });
   });
 
-  app.get('/export', async (req, res) => {
-    const match = /^Bearer\s+(lum_[a-f0-9]{64})$/i.exec(req.header('authorization') ?? '');
-    let authorized = false;
-    try { authorized = Boolean(match && await hasExportPermission(pool, match[1])); }
-    catch (error) {
-      log.error({ err: error instanceof Error ? error.message : error }, 'export authorization failed');
-      res.status(503).json({ error: 'Export authorization is temporarily unavailable' });
+  app.get('/export/:table', async (req, res) => {
+    const table = req.params.table;
+    if (!['transactions', 'operations', 'ledgers'].includes(table)) {
+      res.status(400).send('Invalid table');
       return;
     }
-    if (!authorized || !match) {
-      res.status(403).json({ error: 'A valid API key with export permission is required' });
-      return;
+
+    const { min_ledger, max_ledger, min_date, max_date } = req.query;
+
+    const whereClauses: string[] = [];
+    const ledgerCol = table === 'ledgers' ? 'sequence' : 'ledger';
+    const dateCol = table === 'ledgers' ? 'closed_at' : 'created_at';
+
+    if (min_ledger) {
+      const parsed = parseInt(min_ledger as string, 10);
+      if (!isNaN(parsed)) whereClauses.push(`${ledgerCol} >= ${parsed}`);
     }
-    const keyHash = hashApiKey(match[1]);
-    if (!exportLimiter.allow(keyHash)) {
-      res.set('Retry-After', '60').status(429).json({ error: 'Export rate limit exceeded' });
-      return;
+    if (max_ledger) {
+      const parsed = parseInt(max_ledger as string, 10);
+      if (!isNaN(parsed)) whereClauses.push(`${ledgerCol} <= ${parsed}`);
     }
-    const release = exportLimiter.acquire();
-    if (!release) {
-      res.set('Retry-After', '30').status(429).json({ error: 'Concurrent export limit reached' });
-      return;
+    if (min_date) {
+      const parsed = new Date(min_date as string);
+      if (!isNaN(parsed.getTime())) whereClauses.push(`${dateCol} >= '${parsed.toISOString()}'`);
     }
-    res.status(200).set({
-      'Content-Type': 'application/x-ndjson; charset=utf-8',
-      'Content-Disposition': 'attachment; filename="lumina-export.ndjson"',
-      'Cache-Control': 'no-store',
-    });
+    if (max_date) {
+      const parsed = new Date(max_date as string);
+      if (!isNaN(parsed.getTime())) whereClauses.push(`${dateCol} <= '${parsed.toISOString()}'`);
+    }
+
+    const whereStr = whereClauses.length > 0 ? `WHERE ${whereClauses.join(' AND ')}` : '';
+
     try {
-      await writeDatabaseExport(pool, line => new Promise<boolean>(resolve => {
-        if (res.destroyed) { resolve(false); return; }
-        if (res.write(line)) { resolve(true); return; }
-        const drained = () => { cleanup(); resolve(true); };
-        const closed = () => { cleanup(); resolve(false); };
-        const cleanup = () => { res.off('drain', drained); res.off('close', closed); };
-        res.once('drain', drained);
-        res.once('close', closed);
-      }));
-      if (!res.destroyed) res.end();
-    } catch (error) {
-      log.error({ err: error instanceof Error ? error.message : error }, 'database export failed');
-      if (!res.headersSent) res.status(500).json({ error: 'Export failed' });
-      else res.destroy(error instanceof Error ? error : undefined);
-    } finally { release(); }
+      const client = await pool.connect();
+      const query = `COPY (SELECT * FROM ${table} ${whereStr}) TO STDOUT WITH CSV HEADER`;
+      const stream = client.query(copyTo(query));
+      
+      res.setHeader('Content-Type', 'text/csv');
+      res.setHeader('Content-Disposition', `attachment; filename="${table}.csv"`);
+      
+      stream.pipe(res);
+      stream.on('end', () => {
+        client.release();
+      });
+      stream.on('error', (err) => {
+        client.release();
+        log.error({ err }, 'export stream error');
+        if (!res.headersSent) res.status(500).send('export failed');
+      });
+    } catch (err) {
+      log.error({ err }, 'export setup error');
+      res.status(500).send('export failed');
+    }
   });
 
   const middleware = [
