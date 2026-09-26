@@ -19,7 +19,6 @@
  *   REGISTRY_NETWORK_PASSPHRASE — Network passphrase for registry simulation (default: Test SDF Network passphrase)
  */
 
-import { Networks } from '@stellar/stellar-sdk';
 import {
   createPool,
   getLatestIndexedEventLedger,
@@ -50,7 +49,6 @@ const log = subsystem('indexer');
 // `log`, which is never sampled.
 const routine = routineLogger('indexer');
 
-const HEALTH_PORT = parseInt(process.env.HEALTH_PORT ?? '9090', 10);
 
 /** Live state the health endpoint reports on. */
 const state: IndexerState = {
@@ -63,6 +61,7 @@ import { getAccount, getLatestLedgerSequence, getLedger, getLedgerOperations, ge
 import { getActiveContracts } from './registry';
 import { getEvents, getLatestLedgerSequence as getLatestRpcLedgerSequence, type ContractEvent } from './soroban';
 import { chunkContractIds, filterContractIds, recordFailure, recordSuccess } from './circuitBreaker';
+import { loadConfig, type Config } from './config';
 
 // Read version from package.json for logging
 import { readFileSync } from 'fs';
@@ -70,55 +69,9 @@ import { join } from 'path';
 const packageJson = JSON.parse(readFileSync(join(__dirname, '../package.json'), 'utf-8'));
 const VERSION = packageJson.version;
 
-const HORIZON_URL = process.env.HORIZON_URL ?? 'https://horizon.stellar.org';
-const DATABASE_URL = process.env.DATABASE_URL ?? 'postgresql://localhost:5432/lumina';
-const POLL_INTERVAL_MS = parseInt(process.env.POLL_INTERVAL_MS ?? '5000', 10);
-const START_LEDGER = process.env.START_LEDGER ? parseInt(process.env.START_LEDGER, 10) : undefined;
-const DB_POOL_MAX = process.env.DB_POOL_MAX ? parseInt(process.env.DB_POOL_MAX, 10) : undefined;
-const DB_POOL_IDLE_TIMEOUT = process.env.DB_POOL_IDLE_TIMEOUT ? parseInt(process.env.DB_POOL_IDLE_TIMEOUT, 10) : undefined;
-const DB_POOL_CONNECTION_TIMEOUT = process.env.DB_POOL_CONNECTION_TIMEOUT ? parseInt(process.env.DB_POOL_CONNECTION_TIMEOUT, 10) : undefined;
-
-// Soroban contract event indexing is opt-in — unset by default, the indexer
-// behaves exactly as it did before these were introduced.
-const SOROBAN_RPC_URL = process.env.SOROBAN_RPC_URL;
-const INDEXED_CONTRACT_IDS = (process.env.INDEXED_CONTRACT_IDS ?? '')
-  .split(',')
-  .map(id => id.trim())
-  .filter(Boolean);
-
-// Registry-based discovery is opt-in on top of the opt-in event indexing above —
-// unset, the indexer relies solely on the static INDEXED_CONTRACT_IDS list.
-const REGISTRY_CONTRACT_ID = process.env.REGISTRY_CONTRACT_ID;
-const REGISTRY_READ_ACCOUNT = process.env.REGISTRY_READ_ACCOUNT;
-const REGISTRY_NETWORK_PASSPHRASE = process.env.REGISTRY_NETWORK_PASSPHRASE ?? Networks.TESTNET;
-const REGISTRY_POLL_EVERY_N_TICKS = 12; // ~once/minute at the default 5s poll interval
-
-const LEDGER_RETRY_ATTEMPTS = 3;
-const LEDGER_RETRY_BASE_MS = 500;
-
-// How long an account's Horizon data is considered fresh enough to skip
-// re-fetching. Busy accounts (exchanges, bots) show up in most ledgers —
-// without this, the indexer re-fetches the same accounts every ~5s and
-// floods Horizon's per-IP rate limit, which then also breaks the GraphQL
-// server's own account lookups sharing that limit.
-const ACCOUNT_CACHE_TTL_MS = 5 * 60 * 1000;
-const ACCOUNT_CACHE_MAX_SIZE = 50_000;
-
-// getEvents' reported latestLedger is the RPC's chain-tip awareness, not a
-// guarantee that ledger's events have finished being indexed internally —
-// confirmed live: an event was missing from a response whose latestLedger
-// was already past it, then present moments later at the same startLedger.
-// Advancing the cursor straight to latestLedger + 1 can permanently skip
-// events landing right at that boundary. Re-scanning the last few ledgers
-// each poll is cheap and idempotent (insertContractEvents is ON CONFLICT
-// DO NOTHING), so hold the cursor back by a small margin instead.
-const EVENTS_SAFETY_LAG_LEDGERS = 3;
-
-const pool = createPool(DATABASE_URL, {
-  max: DB_POOL_MAX,
-  idleTimeoutMillis: DB_POOL_IDLE_TIMEOUT,
-  connectionTimeoutMillis: DB_POOL_CONNECTION_TIMEOUT,
-});
+// Configuration is loaded once at startup
+let config: Config | null = null;
+let pool: ReturnType<typeof createPool> | null = null;
 let discoveredContractIds: string[] = [];
 let loopTick = 0;
 let eventsCursor = 0;
@@ -128,18 +81,20 @@ let isShuttingDown = false;
 let isLoopRunning = false;
 
 function pruneAccountCache(now: number): void {
-  if (accountCache.size < ACCOUNT_CACHE_MAX_SIZE) return;
+  if (!config) return;
+  if (accountCache.size < config.accountCacheMaxSize) return;
   for (const [address, fetchedAt] of accountCache) {
-    if (now - fetchedAt > ACCOUNT_CACHE_TTL_MS) accountCache.delete(address);
+    if (now - fetchedAt > config.accountCacheTtlMs) accountCache.delete(address);
   }
 }
 
 async function fetchAndIndexLedger(sequence: number): Promise<void> {
+  if (!config || !pool) throw new Error('Configuration not loaded');
   log.debug({ ledger: sequence }, 'indexing ledger');
   const [ledger, transactions, operations] = await Promise.all([
-    getLedger(HORIZON_URL, sequence),
-    getLedgerTransactions(HORIZON_URL, sequence),
-    getLedgerOperations(HORIZON_URL, sequence),
+    getLedger(config.horizonUrl, sequence),
+    getLedgerTransactions(config.horizonUrl, sequence),
+    getLedgerOperations(config.horizonUrl, sequence),
   ]);
 
   const addresses = new Set<string>();
@@ -150,11 +105,11 @@ async function fetchAndIndexLedger(sequence: number): Promise<void> {
   pruneAccountCache(now);
   const addressesToFetch = [...addresses].filter(address => {
     const fetchedAt = accountCache.get(address);
-    return fetchedAt === undefined || now - fetchedAt > ACCOUNT_CACHE_TTL_MS;
+    return fetchedAt === undefined || now - fetchedAt > config!.accountCacheTtlMs;
   });
 
   const accounts = (
-    await Promise.all(addressesToFetch.map(address => getAccount(HORIZON_URL, address)))
+    await Promise.all(addressesToFetch.map(address => getAccount(config!.horizonUrl, address)))
   ).filter((a): a is HorizonAccount => a !== null);
   for (const address of addressesToFetch) accountCache.set(address, now);
 
@@ -174,22 +129,25 @@ async function fetchAndIndexLedger(sequence: number): Promise<void> {
 export async function fetchAndIndexLedgerWithRetry(
   sequence: number,
   indexOne: (sequence: number) => Promise<void> = fetchAndIndexLedger,
-  retryAttempts = LEDGER_RETRY_ATTEMPTS,
-  retryBaseMs = LEDGER_RETRY_BASE_MS
+  retryAttempts?: number,
+  retryBaseMs?: number
 ): Promise<boolean> {
-  for (let attempt = 1; attempt <= retryAttempts; attempt++) {
+  if (!config) throw new Error('Configuration not loaded');
+  const actualRetryAttempts = retryAttempts ?? config.ledgerRetryAttempts;
+  const actualRetryBaseMs = retryBaseMs ?? config.ledgerRetryBaseMs;
+  for (let attempt = 1; attempt <= actualRetryAttempts; attempt++) {
     try {
       await indexOne(sequence);
       return true;
     } catch (err) {
-      if (attempt === retryAttempts) {
+      if (attempt === actualRetryAttempts) {
         indexingErrors.inc({ loop: 'ledger' });
         log.error({ ledger: sequence, attempts: attempt, err: message(err) }, 'giving up on ledger');
         return false;
       }
-      const delay = retryBaseMs * 2 ** (attempt - 1);
+      const delay = actualRetryBaseMs * 2 ** (attempt - 1);
       log.warn(
-        { ledger: sequence, attempt, maxAttempts: retryAttempts, retryInMs: delay, err: message(err) },
+        { ledger: sequence, attempt, maxAttempts: actualRetryAttempts, retryInMs: delay, err: message(err) },
         'ledger failed, retrying'
       );
       await new Promise(r => setTimeout(r, delay));
@@ -227,13 +185,14 @@ function isContractAddress(address: string): boolean {
 
 /** Refreshes the set of contract IDs discovered from the Lumina Registry, if configured. */
 async function pollRegistry(): Promise<void> {
-  if (!SOROBAN_RPC_URL || !REGISTRY_CONTRACT_ID || !REGISTRY_READ_ACCOUNT) return;
+  if (!config) throw new Error('Configuration not loaded');
+  if (!config.sorobanRpcUrl || !config.registryContractId || !config.registryReadAccount) return;
   try {
     const entries = await getActiveContracts(
-      SOROBAN_RPC_URL,
-      REGISTRY_CONTRACT_ID,
-      REGISTRY_READ_ACCOUNT,
-      REGISTRY_NETWORK_PASSPHRASE
+      config.sorobanRpcUrl,
+      config.registryContractId,
+      config.registryReadAccount,
+      config.registryNetworkPassphrase
     );
     const invalid = entries.filter(id => !isContractAddress(id));
     if (invalid.length > 0) {
@@ -254,8 +213,9 @@ async function pollRegistry(): Promise<void> {
  * transactions/ledgers alongside a testnet-deployed registry contract).
  */
 async function pollContractEvents(): Promise<void> {
-  const contractIds = [...new Set([...INDEXED_CONTRACT_IDS, ...discoveredContractIds])];
-  if (!SOROBAN_RPC_URL || contractIds.length === 0) return;
+  if (!config || !pool) throw new Error('Configuration not loaded');
+  const contractIds = [...new Set([...config.indexedContractIds, ...discoveredContractIds])];
+  if (!config.sorobanRpcUrl || contractIds.length === 0) return;
   try {
     if (eventsCursor === 0) {
       const dbCursor = await getLatestIndexedEventLedger(pool);
@@ -266,7 +226,7 @@ async function pollContractEvents(): Promise<void> {
         // rather than guessing a backfill window — RPC getEvents silently returns
         // empty (no error) for startLedger values too far behind current, and how
         // far is "too far" is provider-specific and not worth hardcoding a guess at.
-        eventsCursor = await getLatestRpcLedgerSequence(SOROBAN_RPC_URL);
+        eventsCursor = await getLatestRpcLedgerSequence(config.sorobanRpcUrl);
         log.info({ ledger: eventsCursor }, 'contract event indexing starting from latest RPC ledger');
       }
     }
@@ -285,7 +245,7 @@ async function pollContractEvents(): Promise<void> {
 
     for (const batch of batches) {
       try {
-        const { events, latestLedger: batchLatest } = await getEvents(SOROBAN_RPC_URL, batch, eventsCursor);
+        const { events, latestLedger: batchLatest } = await getEvents(config!.sorobanRpcUrl, batch, eventsCursor);
         allEvents.push(...events);
         latestLedger = Math.max(latestLedger, batchLatest);
         recordSuccess(batch);
@@ -301,7 +261,7 @@ async function pollContractEvents(): Promise<void> {
       await insertContractEvents(pool, allEvents);
       await indexCustomEvents(allEvents);
     }
-    eventsCursor = Math.max(eventsCursor, latestLedger - EVENTS_SAFETY_LAG_LEDGERS + 1);
+    eventsCursor = Math.max(eventsCursor, latestLedger - config.eventsSafetyLagLedgers + 1);
   } catch (err) {
     indexingErrors.inc({ loop: 'contract-events' });
     log.error({ err: message(err) }, 'contract event polling failed');
@@ -321,6 +281,7 @@ async function pollContractEvents(): Promise<void> {
  * indexer could receive.
  */
 async function indexCustomEvents(events: ContractEvent[]): Promise<void> {
+  if (!pool) throw new Error('Configuration not loaded');
   try {
     const schemas = await loadContractSchemas(pool);
     if (schemas.size === 0) return;
@@ -349,17 +310,27 @@ async function indexCustomEvents(events: ContractEvent[]): Promise<void> {
 }
 
 async function run() {
+  // Load and validate configuration at startup
+  config = loadConfig();
+  
+  // Initialize pool with validated config
+  pool = createPool(config.databaseUrl, {
+    max: config.dbPoolMax,
+    idleTimeoutMillis: config.dbPoolIdleTimeoutMs,
+    connectionTimeoutMillis: config.dbPoolConnectionTimeoutMs,
+  });
+  
   initErrorTracking();
   initTracing();
-  log.info({ version: VERSION, horizon: HORIZON_URL, database: redactUrl(DATABASE_URL), healthPort: HEALTH_PORT, dbPoolMax: DB_POOL_MAX ?? 10, dbPoolIdleTimeout: DB_POOL_IDLE_TIMEOUT ?? 10000, dbPoolConnectionTimeout: DB_POOL_CONNECTION_TIMEOUT ?? 0 }, 'lumina indexer starting');
-  startHealthServer({ port: HEALTH_PORT, getState: () => state, pool });
+  log.info({ version: VERSION }, 'lumina indexer starting');
+  startHealthServer({ port: config.healthPort, getState: () => state, pool });
 
   let cursor = await getLatestIndexedLedger(pool);
-  if (cursor === 0 && START_LEDGER !== undefined) {
-    cursor = START_LEDGER - 1;
-    log.info({ ledger: START_LEDGER }, 'starting from configured START_LEDGER');
+  if (cursor === 0 && config.startLedger !== undefined) {
+    cursor = config.startLedger - 1;
+    log.info({ ledger: config.startLedger }, 'starting from configured START_LEDGER');
   } else if (cursor === 0) {
-    cursor = await getLatestLedgerSequence(HORIZON_URL);
+    cursor = await getLatestLedgerSequence(config.horizonUrl);
     log.info({ ledger: cursor + 1 }, 'starting from latest ledger');
   } else {
     log.info({ ledger: cursor + 1 }, 'resuming from ledger');
@@ -368,12 +339,12 @@ async function run() {
   isLoopRunning = true;
   while (!isShuttingDown) {
     try {
-      if (loopTick % REGISTRY_POLL_EVERY_N_TICKS === 0) {
+      if (loopTick % config.registryPollEveryNTicks === 0) {
         await pollRegistry();
       }
       loopTick++;
 
-      const latest = await getLatestLedgerSequence(HORIZON_URL);
+      const latest = await getLatestLedgerSequence(config.horizonUrl);
       state.latestHorizonLedger = latest;
       recordHorizonTip(latest, state.latestIndexedLedger || cursor);
 
@@ -390,7 +361,7 @@ async function run() {
     }
 
     if (isShuttingDown) break;
-    await new Promise(r => setTimeout(r, POLL_INTERVAL_MS));
+    await new Promise(r => setTimeout(r, config!.pollIntervalMs));
   }
   isLoopRunning = false;
 }
@@ -409,7 +380,7 @@ async function shutdown() {
     await new Promise(r => setTimeout(r, 100));
   }
 
-  await pool.end();
+  if (pool) await pool.end();
   await shutdownTracing();
   await shutdownErrorTracking();
   process.exit(0);
@@ -430,13 +401,3 @@ function message(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
-/** Never log a database URL with its password in it. */
-function redactUrl(url: string): string {
-  try {
-    const parsed = new URL(url);
-    if (parsed.password) parsed.password = '***';
-    return parsed.toString();
-  } catch {
-    return '(unparseable)';
-  }
-}
