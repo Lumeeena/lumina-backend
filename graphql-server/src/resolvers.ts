@@ -20,6 +20,7 @@ import { getAssetDetail } from './assets';
 import { getOperationsByAsset, searchTransactions } from './search';
 import type { LedgerNotifier } from './pubsub';
 import { ANONYMOUS_CALLER, type ApiCaller } from './auth';
+import type { subsystem } from './logger';
 
 export interface BaseContext {
   pool: Pool;
@@ -33,6 +34,11 @@ export interface BaseContext {
    * so they are always the anonymous caller until that path is built out.
    */
   caller?: ApiCaller;
+}
+
+export interface Context extends BaseContext {
+  correlationId?: string;
+  requestLogger?: ReturnType<typeof subsystem>;
 }
 
 export function createContext(

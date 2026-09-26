@@ -4,7 +4,6 @@ import { Resource } from '@opentelemetry/resources';
 import { SemanticResourceAttributes } from '@opentelemetry/semantic-conventions';
 import { trace, context as otelContext } from '@opentelemetry/api';
 import { PgInstrumentation } from '@opentelemetry/instrumentation-pg';
-import { BasicTracerProvider, BatchSpanProcessor } from '@opentelemetry/sdk-trace-node';
 
 const OTEL_ENABLED = process.env.OTEL_ENABLED === 'true';
 const OTEL_EXPORTER_OTLP_ENDPOINT = process.env.OTEL_EXPORTER_OTLP_ENDPOINT ?? 'http://localhost:4318';

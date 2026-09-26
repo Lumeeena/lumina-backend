@@ -13,7 +13,7 @@ import { Pool } from 'pg';
 import { resolvers } from './resolvers';
 import { createContext } from './resolvers';
 
-const DATABASE_URL = process.env.TEST_DATABASE_URL;
+const DATABASE_URL = process.env['TEST_DATABASE_URL'];
 const skip = DATABASE_URL ? false : 'TEST_DATABASE_URL is not set';
 
 const TEST_TIMEOUT_MS = 30_000;

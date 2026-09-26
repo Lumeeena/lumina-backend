@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { getLatestLedgerSequence, getLedger, getLedgerTransactions, PAGE_LIMIT } from './horizon';
-// @ts-ignore - JSON file imports
+// @ts-expect-error - JSON file imports are enabled at runtime for this test fixture.
 import fixtures from './__fixtures__/horizon.json' assert { type: 'json' };
 
 function mockFetchSequence(responses: Array<{ ok: boolean; status?: number; body: unknown }>) {

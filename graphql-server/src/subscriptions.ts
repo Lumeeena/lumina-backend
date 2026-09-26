@@ -10,12 +10,12 @@ import type { Pool } from 'pg';
 import { getAccountOperationsInLedger, getTransactionsByLedger } from './db';
 import type { IndexedNotification } from './notifications';
 import type { LedgerNotifier } from './pubsub';
-import type { subsystem } from './logger';
+import { subsystem } from './logger';
 
 export interface SubscriptionContext {
   pool: Pool;
   notifier: LedgerNotifier;
-  requestLogger: ReturnType<typeof subsystem>;
+  requestLogger?: ReturnType<typeof subsystem>;
 }
 
 /** Notifications about ledger writes; event-only notifications are not rows. */
@@ -57,8 +57,9 @@ async function* expandLedgers<T>(
 export function createSubscriptionResolvers() {
   return {
     newTransaction: {
-      subscribe(_: unknown, __: unknown, { pool, notifier }: SubscriptionContext) {
-        return expandLedgers(notifier.subscribe(), ledger => getTransactionsByLedger(pool, ledger), requestLogger);
+      subscribe(_: unknown, __: unknown, { pool, notifier, requestLogger }: SubscriptionContext) {
+        const logger = requestLogger ?? subsystem('subscription');
+        return expandLedgers(notifier.subscribe(), ledger => getTransactionsByLedger(pool, ledger), logger);
       },
       // The stream already yields Transaction objects; without this Apollo
       // would look for a `newTransaction` key on each one.
@@ -66,11 +67,12 @@ export function createSubscriptionResolvers() {
     },
 
     accountActivity: {
-      subscribe(_: unknown, args: { address: string }, { pool, notifier }: SubscriptionContext) {
+      subscribe(_: unknown, args: { address: string }, { pool, notifier, requestLogger }: SubscriptionContext) {
+        const logger = requestLogger ?? subsystem('subscription');
         return expandLedgers(
           notifier.subscribe(),
           ledger => getAccountOperationsInLedger(pool, ledger, args.address),
-          requestLogger
+          logger
         );
       },
       resolve: (payload: unknown) => payload,

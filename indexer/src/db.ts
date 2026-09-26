@@ -10,12 +10,28 @@ import { parseContractSchema, type ContractSchema } from './customSchema';
 import type { DecodedCustomEvent } from './customDecode';
 
 export function createPool(databaseUrl: string, options?: PoolConfig): Pool {
-  return new Pool({ connectionString: databaseUrl, ...options });
+  const pool = new Pool({ connectionString: databaseUrl, ...options });
+  pool.on('error', err => {
+    indexerPoolErrors.inc();
+    log.error({ err: err instanceof Error ? err.message : err }, 'idle database client error');
+  });
+  return pool;
 }
 
 export async function getLatestIndexedLedger(pool: Pool): Promise<number> {
   const { rows } = await pool.query<{ max: string | null }>('SELECT MAX(sequence) AS max FROM ledgers');
   return rows[0].max ? Number(rows[0].max) : 0;
+}
+
+/**
+ * Creates any missing `operations` partitions covering the ledger range up
+ * to `partitionsAhead` partitions past the current max indexed ledger. Safe
+ * to call repeatedly — it no-ops once the needed partitions already exist.
+ * See db/migrations/006_partition_operations.sql for the partition-sizing
+ * rationale and the ensure_operations_partitions() function this calls.
+ */
+export async function ensurePartitions(pool: Pool, partitionsAhead = 5): Promise<void> {
+  await pool.query('SELECT ensure_operations_partitions($1)', [partitionsAhead]);
 }
 
 /**
@@ -68,10 +84,15 @@ export async function indexLedger(
     }
 
     for (const op of operations) {
+      // ON CONFLICT target is (id, ledger), not just (id): operations is
+      // partitioned by ledger (see db/migrations/006_partition_operations.sql),
+      // and Postgres requires a partitioned table's unique constraints to
+      // include the partition key. This isn't a behavior change — a given
+      // operation id is only ever written with one ledger value.
       await client.query(
         `INSERT INTO operations (id, type, transaction_hash, ledger, created_at, source_account, details)
          VALUES ($1, $2, $3, $4, $5, $6, $7)
-         ON CONFLICT (id) DO NOTHING`,
+         ON CONFLICT (id, ledger) DO NOTHING`,
         [op.id, op.type, op.transaction_hash, ledger.sequence, op.created_at, op.source_account, JSON.stringify(op)]
       );
     }
