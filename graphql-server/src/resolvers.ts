@@ -16,6 +16,7 @@ import { createLoaders, type RequestLoaders } from './loaders';
 import { getAccount as getAccountFromHorizon, getLatestLedger as getLatestLedgerFromHorizon } from './horizon';
 import { createSubscriptionResolvers } from './subscriptions';
 import { getContractSchema, getCustomEvents, type CustomEventFilter } from './customEvents';
+import { getAssetDetail } from './assets';
 import { getOperationsByAsset, searchTransactions } from './search';
 import type { LedgerNotifier } from './pubsub';
 
@@ -198,6 +199,19 @@ export const resolvers = {
           fields: event.fields.map(field => ({ ...field, optional: field.optional ?? false })),
         })),
       };
+    },
+
+    async asset(
+      _: unknown,
+      args: { asset: string; from?: string | null; to?: string | null; bucketSeconds?: number | null },
+      { pool }: Context
+    ) {
+      return getAssetDetail(pool, {
+        asset: args.asset,
+        from: args.from,
+        to: args.to,
+        bucketSeconds: args.bucketSeconds,
+      });
     },
   },
 

@@ -187,6 +187,47 @@ query ListOperations($account: String, $type: OperationType, $asset: String) {
 
 The asset filter matches operations where the asset appears as a payment asset or either side of a trade.
 
+### Fetch asset detail with supply and volume series
+
+One query returns everything a detail page needs — no separate supply, holder and chart round trips:
+
+```graphql
+query GetAssetDetail($asset: String!) {
+  asset(
+    asset: $asset
+    from: "2026-01-01T00:00:00Z"
+    to: "2026-01-31T00:00:00Z"
+    bucketSeconds: 86400
+  ) {
+    asset
+    code
+    issuer
+    native
+    supply
+    holders
+    series {
+      bucketStart
+      bucketEnd
+      volume
+      operationCount
+    }
+  }
+}
+```
+
+- `asset` uses the same format as the operations filter: `"XLM"` (or `"native"`) or `"CODE:ISSUER"`.
+- `from`/`to` are ISO-8601 timestamps (defaults: trailing 30 days to now); `bucketSeconds` is the bucket width in seconds (default daily, minimum 60, at most 1000 buckets per call).
+- Amounts (`supply`, per-bucket `volume`) are decimal strings, not floats, so large values never lose precision. Empty buckets report `"0"` volume with `operationCount: 0`.
+
+**How supply is derived:** supply is `SUM(balance)` over every `accounts.balances` entry naming the asset, and holders is the count of those entries with balance greater than zero.
+
+**Limitations:**
+
+- Only indexed accounts count — the indexer writes accounts it has seen activity for, so a fresh or lagging database understates supply and holders.
+- Balances are a last-seen snapshot per account, not point-in-time ledger state.
+- Zero-balance trustlines are excluded from holders; unauthorized, frozen or clawed-back balances are included; buying/selling liabilities are not subtracted.
+- Volume sums `amount` on operations matching the `operations(asset:)` predicate (payment asset or either side of an offer) bucketed by `created_at`. Operations without a numeric amount count toward `operationCount` but not `volume`, and operations from failed transactions are included.
+
 ### Query Soroban contract events
 
 ```graphql
