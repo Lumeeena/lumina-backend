@@ -44,21 +44,66 @@ export async function hasExportPermission(pool: Pool, plaintextKey: string): Pro
   return result.rowCount === 1;
 }
 
-export async function writeDatabaseExport(pool: Pool, write: (line: string) => Promise<boolean>): Promise<void> {
+export interface ExportOptions {
+  sinceLedger?: number | null;
+}
+
+export interface ExportResult {
+  maxLedger: number | null;
+}
+
+const LEDGER_COLUMN_BY_TABLE: Record<string, string> = {
+  ledgers: 'sequence',
+  transactions: 'ledger',
+  operations: 'ledger',
+  accounts: 'last_modified_ledger',
+  contract_events: 'ledger',
+  custom_events: 'ledger',
+};
+
+export async function writeDatabaseExport(
+  pool: Pool,
+  write: (line: string) => Promise<boolean>,
+  options?: ExportOptions
+): Promise<ExportResult> {
   const batchSize = 500;
+  const sinceLedger = options?.sinceLedger != null && !Number.isNaN(options.sinceLedger)
+    ? options.sinceLedger
+    : null;
+  let maxLedger: number | null = null;
+
   for (const table of EXPORT_TABLES) {
+    const ledgerCol = LEDGER_COLUMN_BY_TABLE[table.name];
+    if (sinceLedger !== null && !ledgerCol) {
+      continue;
+    }
+
     let offset = 0;
     let hasMoreRows = true;
     while (hasMoreRows) {
-      const result = await pool.query(
-        `SELECT * FROM ${table.name} ORDER BY ${table.order} LIMIT $1 OFFSET $2`,
-        [batchSize, offset]
-      );
+      const query = sinceLedger !== null && ledgerCol
+        ? `SELECT * FROM ${table.name} WHERE ${ledgerCol} > $3 ORDER BY ${table.order} LIMIT $1 OFFSET $2`
+        : `SELECT * FROM ${table.name} ORDER BY ${table.order} LIMIT $1 OFFSET $2`;
+      const params = sinceLedger !== null && ledgerCol
+        ? [batchSize, offset, sinceLedger]
+        : [batchSize, offset];
+
+      const result = await pool.query(query, params);
       for (const row of result.rows) {
-        if (!await write(`${JSON.stringify({ table: table.name, record: row })}\n`)) return;
+        if (ledgerCol && row[ledgerCol] != null) {
+          const rowLedger = Number(row[ledgerCol]);
+          if (!Number.isNaN(rowLedger)) {
+            maxLedger = maxLedger === null ? rowLedger : Math.max(maxLedger, rowLedger);
+          }
+        }
+        if (!await write(`${JSON.stringify({ table: table.name, record: row })}\n`)) {
+          return { maxLedger };
+        }
       }
       hasMoreRows = result.rows.length === batchSize;
       offset += batchSize;
     }
   }
+
+  return { maxLedger };
 }
