@@ -11,6 +11,7 @@ import { Pool } from 'pg';
 import { GraphQLError } from 'graphql';
 import { useServer } from 'graphql-ws/lib/use/ws';
 import { WebSocketServer } from 'ws';
+import { to as copyTo } from 'pg-copy-streams';
 import { Context, createContext, resolvers } from './resolvers';
 import { LedgerNotifier, SubscriberLimitError } from './pubsub';
 import { subsystem } from './logger';
@@ -161,6 +162,61 @@ async function main() {
         log.error({ err: err instanceof Error ? err.message : err }, 'failed to render metrics');
         res.status(500).send('metrics unavailable');
       });
+  });
+
+  app.get('/export/:table', async (req, res) => {
+    const table = req.params.table;
+    if (!['transactions', 'operations', 'ledgers'].includes(table)) {
+      res.status(400).send('Invalid table');
+      return;
+    }
+
+    const { min_ledger, max_ledger, min_date, max_date } = req.query;
+
+    const whereClauses: string[] = [];
+    const ledgerCol = table === 'ledgers' ? 'sequence' : 'ledger';
+    const dateCol = table === 'ledgers' ? 'closed_at' : 'created_at';
+
+    if (min_ledger) {
+      const parsed = parseInt(min_ledger as string, 10);
+      if (!isNaN(parsed)) whereClauses.push(`${ledgerCol} >= ${parsed}`);
+    }
+    if (max_ledger) {
+      const parsed = parseInt(max_ledger as string, 10);
+      if (!isNaN(parsed)) whereClauses.push(`${ledgerCol} <= ${parsed}`);
+    }
+    if (min_date) {
+      const parsed = new Date(min_date as string);
+      if (!isNaN(parsed.getTime())) whereClauses.push(`${dateCol} >= '${parsed.toISOString()}'`);
+    }
+    if (max_date) {
+      const parsed = new Date(max_date as string);
+      if (!isNaN(parsed.getTime())) whereClauses.push(`${dateCol} <= '${parsed.toISOString()}'`);
+    }
+
+    const whereStr = whereClauses.length > 0 ? `WHERE ${whereClauses.join(' AND ')}` : '';
+
+    try {
+      const client = await pool.connect();
+      const query = `COPY (SELECT * FROM ${table} ${whereStr}) TO STDOUT WITH CSV HEADER`;
+      const stream = client.query(copyTo(query));
+      
+      res.setHeader('Content-Type', 'text/csv');
+      res.setHeader('Content-Disposition', `attachment; filename="${table}.csv"`);
+      
+      stream.pipe(res);
+      stream.on('end', () => {
+        client.release();
+      });
+      stream.on('error', (err) => {
+        client.release();
+        log.error({ err }, 'export stream error');
+        if (!res.headersSent) res.status(500).send('export failed');
+      });
+    } catch (err) {
+      log.error({ err }, 'export setup error');
+      res.status(500).send('export failed');
+    }
   });
 
   const middleware = [
