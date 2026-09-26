@@ -22,6 +22,7 @@ interface Context extends BaseContext {
   requestLogger: ReturnType<typeof subsystem>;
 }
 import {
+  dbPoolErrors,
   listenerConnected,
   metricsContentType,
   renderMetrics,
@@ -30,9 +31,7 @@ import {
 } from './metrics';
 import { initTracing, shutdownTracing } from './tracing';
 import { initErrorTracking, shutdownErrorTracking } from './errorTracking';
-import { loadMigrations, runMigrations } from './migrations';
-import { ExportLimiter, hasExportPermission, writeDatabaseExport } from './export';
-import { hashApiKey } from './keys';
+import { scheduledExportOptions, startScheduledExports } from './scheduledExport';
 
 const log = subsystem('server');
 const startedAt = Date.now();
@@ -52,6 +51,10 @@ const exportConcurrency = parseInt(process.env.MAX_CONCURRENT_EXPORTS ?? '2', 10
 const exportLimiter = new ExportLimiter(exportRateLimit, exportConcurrency);
 
 const pool = new Pool({ connectionString: DATABASE_URL });
+pool.on('error', err => {
+  dbPoolErrors.inc();
+  log.error({ err: err.message }, 'unexpected PostgreSQL pool client error; pool will replace the client');
+});
 const schema = makeExecutableSchema({ typeDefs, resolvers });
 
 const notifier = new LedgerNotifier({
@@ -60,6 +63,7 @@ const notifier = new LedgerNotifier({
   queueLimit: SUBSCRIPTION_QUEUE_LIMIT,
   log: (message, detail) => subsystem('pubsub').info({ detail }, message),
 });
+let stopScheduledExports: () => Promise<void> = async () => {};
 
 async function main() {
   if (process.env.RUN_MIGRATIONS_ON_STARTUP === 'true') {
@@ -119,6 +123,7 @@ async function main() {
         async serverWillStart() {
           return {
             async drainServer() {
+              await stopScheduledExports();
               await wsCleanup.dispose();
               await notifier.stop();
             },
@@ -130,6 +135,11 @@ async function main() {
 
   await server.start();
   await notifier.start();
+  const exportOptions = scheduledExportOptions();
+  if (exportOptions) {
+    stopScheduledExports = startScheduledExports(pool, exportOptions);
+    log.info({ bucket: exportOptions.bucket, intervalMs: exportOptions.intervalMs }, 'scheduled exports enabled');
+  }
 
   // Ahead of the GraphQL middleware so an operator can always reach them, even
   // while the schema layer is unhappy.

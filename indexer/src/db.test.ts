@@ -1,9 +1,20 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import type { Pool, PoolClient } from 'pg';
-import { getLatestIndexedEventLedger, getLatestIndexedLedger, indexLedger, insertContractEvents, upsertAccount } from './db';
+import { createPool, getLatestIndexedEventLedger, getLatestIndexedLedger, indexLedger, insertContractEvents, upsertAccount } from './db';
+import { registry } from './metrics';
 import type { HorizonAccount, HorizonLedger, HorizonOperation, HorizonTransaction } from './horizon';
 import type { ContractEvent } from './soroban';
+
+test('createPool logs and counts idle client errors instead of leaving them unhandled', async () => {
+  const pool = createPool('postgresql://localhost:5432/lumina');
+  const metric = registry.getSingleMetric('lumina_indexer_db_pool_errors_total')!;
+  const before = (await metric.get()).values[0]?.value ?? 0;
+  pool.emit('error', new Error('simulated idle client error'));
+  const after = (await metric.get()).values[0]?.value ?? 0;
+  assert.equal(after, before + 1);
+  await pool.end();
+});
 
 function makeFakeClient(opts: { failOn?: string } = {}) {
   const calls: string[] = [];

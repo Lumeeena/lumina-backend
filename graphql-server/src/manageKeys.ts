@@ -195,6 +195,7 @@ export async function runCli(args: string[], pool: Pool): Promise<void> {
 
 async function main(): Promise<void> {
   const pool = new Pool({ connectionString: DATABASE_URL });
+  pool.on('error', err => console.error('Unexpected PostgreSQL pool client error:', err.message));
   try {
     await runCli(process.argv.slice(2), pool);
   } finally {

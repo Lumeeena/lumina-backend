@@ -10,6 +10,9 @@
  * enable it (see indexer/src/index.ts).
  */
 import { scValToNative, xdr } from '@stellar/stellar-sdk';
+import { sorobanRequests } from './metrics';
+
+export const GET_LEDGER_ENTRIES_MAX_KEYS = 200;
 
 export interface ContractEvent {
   id: string;
@@ -44,6 +47,11 @@ export interface GetEventsResult {
   latestLedger: number;
 }
 
+export interface LedgerEntryResult {
+  entries: Array<{ key: string; xdr: string; lastModifiedLedgerSeq: number }>;
+  latestLedger: number;
+}
+
 function decodeScVal(base64: string): unknown {
   try {
     return scValToNative(xdr.ScVal.fromXDR(base64, 'base64'));
@@ -53,19 +61,36 @@ function decodeScVal(base64: string): unknown {
 }
 
 async function rpcCall<T>(rpcUrl: string, method: string, params: Record<string, unknown>): Promise<T> {
-  const res = await fetch(rpcUrl, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ jsonrpc: '2.0', id: 1, method, params }),
-  });
-  if (!res.ok) {
-    throw new Error(`Soroban RPC request failed (${res.status}): ${method}`);
+  try {
+    const res = await fetch(rpcUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ jsonrpc: '2.0', id: 1, method, params }),
+    });
+    if (!res.ok) throw new Error(`Soroban RPC request failed (${res.status}): ${method}`);
+    const body = (await res.json()) as { result?: T; error?: { message: string } };
+    if (body.error) throw new Error(`Soroban RPC error in ${method}: ${body.error.message}`);
+    sorobanRequests.inc({ method, outcome: 'success' });
+    return body.result as T;
+  } catch (error) {
+    sorobanRequests.inc({ method, outcome: 'error' });
+    throw error;
   }
-  const body = (await res.json()) as { result?: T; error?: { message: string } };
-  if (body.error) {
-    throw new Error(`Soroban RPC error in ${method}: ${body.error.message}`);
+}
+
+/** Fetch ledger keys in RPC-sized batches, preserving key order across responses. */
+export async function getLedgerEntries(rpcUrl: string, keys: string[]): Promise<LedgerEntryResult> {
+  if (keys.length === 0) return { entries: [], latestLedger: 0 };
+  const entries: LedgerEntryResult['entries'] = [];
+  let latestLedger = 0;
+  for (let offset = 0; offset < keys.length; offset += GET_LEDGER_ENTRIES_MAX_KEYS) {
+    const result = await rpcCall<LedgerEntryResult>(rpcUrl, 'getLedgerEntries', {
+      keys: keys.slice(offset, offset + GET_LEDGER_ENTRIES_MAX_KEYS),
+    });
+    entries.push(...(result.entries ?? []));
+    latestLedger = Math.max(latestLedger, result.latestLedger ?? 0);
   }
-  return body.result as T;
+  return { entries, latestLedger };
 }
 
 /**
