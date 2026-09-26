@@ -47,7 +47,7 @@ jobs:
     runs-on: ubuntu-latest
     services:
       postgres:
-        image: postgres:16-alpine
+        image: postgres:16-alpine@sha256:721873c34ceb9f8d8fc265984940dc982404c105f19ad51be9fdc5970a6080ea
         env:
           POSTGRES_DB: lumina_test
           POSTGRES_USER: lumina
@@ -63,6 +63,32 @@ jobs:
       - uses: actions/checkout@v4
       - run: psql postgresql://lumina:lumina_test@localhost:5432/lumina_test -f db/schema.sql
 
+  db-schema-parity:
+    name: Verify DB Schema Parity
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: lumina_test
+          POSTGRES_USER: lumina
+          POSTGRES_PASSWORD: lumina_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U lumina -d lumina_test"
+          --health-interval 2s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      # Builds one database from db/schema.sql and another by replaying
+      # every file in db/migrations/, then diffs the normalized dumps.
+      - run: ./db/check-schema-parity.sh
+        env:
+          PARITY_BASE_URL: postgresql://lumina:lumina_test@localhost:5432/postgres
+
   subscriptions:
     name: Integration (live Postgres)
     runs-on: ubuntu-latest
@@ -72,7 +98,7 @@ jobs:
     timeout-minutes: 10
     services:
       postgres:
-        image: postgres:16-alpine
+        image: postgres:16-alpine@sha256:721873c34ceb9f8d8fc265984940dc982404c105f19ad51be9fdc5970a6080ea
         env:
           POSTGRES_DB: lumina_test
           POSTGRES_USER: lumina

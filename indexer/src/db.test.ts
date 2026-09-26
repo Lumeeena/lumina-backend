@@ -4,6 +4,16 @@ import type { Pool, PoolClient } from 'pg';
 import { getLatestIndexedEventLedger, getLatestIndexedLedger, indexLedger, insertContractEvents, upsertAccount } from './db';
 import { makeAccount, makeContractEvent, makeLedger, makeOperation, makeTransaction } from '../../shared/test-factories';
 
+test('createPool logs and counts idle client errors instead of leaving them unhandled', async () => {
+  const pool = createPool('postgresql://localhost:5432/lumina');
+  const metric = registry.getSingleMetric('lumina_indexer_db_pool_errors_total')!;
+  const before = (await metric.get()).values[0]?.value ?? 0;
+  pool.emit('error', new Error('simulated idle client error'));
+  const after = (await metric.get()).values[0]?.value ?? 0;
+  assert.equal(after, before + 1);
+  await pool.end();
+});
+
 function makeFakeClient(opts: { failOn?: string } = {}) {
   const calls: string[] = [];
   const client = {

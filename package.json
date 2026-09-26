@@ -20,7 +20,8 @@
     "test": "npm run lint && npm run test:indexer && npm run test:graphql",
     "test:indexer": "cd indexer && npm test",
     "test:graphql": "cd graphql-server && npm test",
-    "manage-keys": "npm run --prefix graphql-server manage-keys --"
+    "manage-keys": "npm run --prefix graphql-server manage-keys --",
+    "migrate": "npm run --prefix graphql-server migrate --"
   },
   "engines": {
     "node": ">=18"

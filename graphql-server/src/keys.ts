@@ -194,3 +194,11 @@ export async function setApiKeyLimit(
   }
   return mapApiKeyRow(res.rows[0]);
 }
+
+export async function setApiKeyExportPermission(pool: Pool, identifier: number | string, enabled: boolean): Promise<void> {
+  const numeric = typeof identifier === 'number' || /^\d+$/.test(String(identifier).trim());
+  const result = numeric
+    ? await pool.query('UPDATE api_keys SET export_enabled = $2, updated_at = NOW() WHERE id = $1', [identifier, enabled])
+    : await pool.query('UPDATE api_keys SET export_enabled = $2, updated_at = NOW() WHERE key_hash = $1', [identifier, enabled]);
+  if (result.rowCount !== 1) throw new Error(`API key not found: ${identifier}`);
+}

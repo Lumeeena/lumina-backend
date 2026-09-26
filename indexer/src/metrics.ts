@@ -75,6 +75,12 @@ export const sorobanRequests = new Counter({
   registers: [registry],
 });
 
+export const indexerPoolErrors = new Counter({
+  name: 'lumina_indexer_db_pool_errors_total',
+  help: 'Unexpected idle PostgreSQL pool client errors.',
+  registers: [registry],
+});
+
 export const ledgerIndexDuration = new Histogram({
   name: 'lumina_ledger_index_duration_seconds',
   help: 'Time to fetch and write one ledger.',
