@@ -79,6 +79,29 @@ grant-export <id|hash>` and `revoke-export <id|hash>`. Export traffic has its
 own per-key window limit (`EXPORT_RATE_LIMIT_PER_MINUTE`, default 2) and
 per-process concurrency limit (`MAX_CONCURRENT_EXPORTS`, default 2).
 
+### Incremental sync pattern
+
+Downstream syncs (such as daily data warehouse ETL jobs) can avoid full historical
+re-exports by passing the `since_ledger` query parameter:
+
+```bash
+# Initial full sync (or first sync)
+curl -H "Authorization: Bearer $KEY" -i "http://localhost:4000/export"
+
+# Read the checkpoint header returned in response:
+# Lumina-Max-Exported-Ledger: 123456
+
+# Next incremental sync — returns only rows with ledger sequence > 123456
+curl -H "Authorization: Bearer $KEY" -i "http://localhost:4000/export?since_ledger=123456"
+```
+
+- **Query Parameter:** `since_ledger` (positive integer). When provided, only records
+  committed *after* the given ledger sequence are exported.
+- **Checkpoint Header:** `Lumina-Max-Exported-Ledger` (also provided as `X-Max-Exported-Ledger`).
+  Indicates the maximum ledger sequence contained in the export stream, or `0` if no new rows were exported.
+- **Incremental Sync Loop:** Save the returned `Lumina-Max-Exported-Ledger` checkpoint in your
+  downstream storage or warehouse metadata, and pass it as `since_ledger` for the subsequent sync run.
+
 ## Timestamp convention
 
 All persisted instants use PostgreSQL `TIMESTAMPTZ`; application values must be

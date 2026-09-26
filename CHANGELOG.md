@@ -19,6 +19,7 @@ Breaking changes are rare and advance the major version. Deprecation notices app
 ## [Unreleased]
 
 ### Added
+- Incremental bulk export: `since_ledger` parameter on bulk exports with max exported ledger checkpoint tracking for downstream syncs (#94)
 - `network` argument on every query and subscription (`Network` enum: `MAINNET`, `TESTNET`, `FUTURENET`). Omitted means the configured primary, so existing clients are unaffected; naming a network the deployment does not serve is a `BAD_USER_INPUT` error rather than a silent fallback. Nested fields inherit their parent's network, and subscriptions filter notifications before reading rows (#60)
 - `indexerStatus(network)` query: Horizon's tip, the indexed tip, the lag and a `stale` label for one network. An unreachable database or Horizon answers with `null` fields and `stale: true` instead of failing, because the interesting moment for this query is exactly when something is wrong (#53)
 - Automatic persisted queries, configurable with `PERSISTED_QUERIES` and `PERSISTED_QUERIES_TTL_SECONDS` (default: on, seven days). A value that cannot be understood fails at startup, and switching it off makes the server answer `PERSISTED_QUERY_NOT_SUPPORTED` so clients fall back to full documents. This is a cache, not a safelist (#54)
