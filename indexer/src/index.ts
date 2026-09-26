@@ -24,6 +24,8 @@
  *   DATABASE_URL          — PostgreSQL connection string
  *   START_LEDGER          — Ledger to begin indexing from if a network's DB is empty (default: that network's latest)
  *   POLL_INTERVAL_MS      — How often to poll for new ledgers (default: 5000)
+ *   LEDGER_RETRY_ATTEMPTS — Attempts per failing ledger before the cursor stops at it (default: 3)
+ *   LEDGER_RETRY_BASE_MS  — Base retry delay in ms, doubled each attempt (default: 500)
  *   INDEXED_CONTRACT_IDS  — Comma-separated contract IDs to index events for (requires a Soroban RPC URL)
  *   REGISTRY_CONTRACT_ID  — Lumina Registry contract to poll for additional contract IDs (primary network only; requires a Soroban RPC URL + REGISTRY_READ_ACCOUNT)
  *   REGISTRY_READ_ACCOUNT — Any funded account address used to simulate the registry's read calls (no secret key needed)
@@ -41,6 +43,7 @@ import {
   loadContractSchemas,
 } from './db';
 import { decodeEvents } from './customDecode';
+import { loadConfig } from './config';
 import { routineLogger, subsystem } from './logger';
 import {
   contractEventsIndexed,
@@ -61,6 +64,9 @@ const log = subsystem('indexer');
 // carries a `suppressed` count on every emitted line. Warnings and errors stay on
 // `log`, which is never sampled.
 const routine = routineLogger('indexer');
+
+// Parsed and validated once at startup; exported values are environment-driven.
+const config = loadConfig();
 
 const HEALTH_PORT = parseInt(process.env['HEALTH_PORT'] ?? '9090', 10);
 
@@ -101,9 +107,6 @@ const REGISTRY_CONTRACT_ID = process.env['REGISTRY_CONTRACT_ID'];
 const REGISTRY_READ_ACCOUNT = process.env['REGISTRY_READ_ACCOUNT'];
 const REGISTRY_NETWORK_PASSPHRASE = process.env['REGISTRY_NETWORK_PASSPHRASE'];
 const REGISTRY_POLL_EVERY_N_TICKS = 12; // ~once/minute at the default 5s poll interval
-
-const LEDGER_RETRY_ATTEMPTS = 3;
-const LEDGER_RETRY_BASE_MS = 500;
 
 // How long an account's Horizon data is considered fresh enough to skip
 // re-fetching. Busy accounts (exchanges, bots) show up in most ledgers —
@@ -233,10 +236,9 @@ async function fetchAndIndexLedger(loop: NetworkLoop, sequence: number): Promise
 export async function fetchAndIndexLedgerWithRetry(
   sequence: number,
   indexOne: (sequence: number) => Promise<void>,
-  retryAttempts = LEDGER_RETRY_ATTEMPTS,
-  retryBaseMs = LEDGER_RETRY_BASE_MS
+  retryAttempts?: number,
+  retryBaseMs?: number
 ): Promise<boolean> {
-  if (!config) throw new Error('Configuration not loaded');
   const actualRetryAttempts = retryAttempts ?? config.ledgerRetryAttempts;
   const actualRetryBaseMs = retryBaseMs ?? config.ledgerRetryBaseMs;
   for (let attempt = 1; attempt <= actualRetryAttempts; attempt++) {

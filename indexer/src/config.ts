@@ -140,8 +140,13 @@ export function loadConfig(): Config {
     registryNetworkPassphrase: stringWithDefault('REGISTRY_NETWORK_PASSPHRASE', Networks.TESTNET),
     registryPollIntervalMs: intWithDefault('REGISTRY_POLL_INTERVAL_MS', 60_000, 1000),
     healthPort: intWithDefault('HEALTH_PORT', 9090, 1, 65535),
-    ledgerRetryAttempts: 3,
-    ledgerRetryBaseMs: 500,
+    // Retry policy for a ledger whose fetch/index fails. More attempts ride
+    // out longer Horizon outages but hold the cursor back while they retry;
+    // the gap between attempts is LEDGER_RETRY_BASE_MS * 2^(attempt - 1), so
+    // the base also sets the maximum wait. Both are deployment decisions —
+    // see the indexer environment-variable table in the README.
+    ledgerRetryAttempts: intWithDefault('LEDGER_RETRY_ATTEMPTS', 3, 1),
+    ledgerRetryBaseMs: intWithDefault('LEDGER_RETRY_BASE_MS', 500, 1),
     accountCacheTtlMs: 5 * 60 * 1000,
     accountCacheMaxSize: 50_000,
     eventsSafetyLagLedgers: 3,
