@@ -60,7 +60,6 @@ import {
 import { aggregateNetworkStates, startHealthServer, type NetworkState } from './health';
 import { initTracing, shutdownTracing } from './tracing';
 import { initErrorTracking, captureException, shutdownErrorTracking } from './errorTracking';
-import { loadConfig } from './config';
 import { getRetentionInfo } from './soroban';
 
 const log = subsystem('indexer');
@@ -85,8 +84,6 @@ import { readFileSync } from 'fs';
 import { join } from 'path';
 const packageJson = JSON.parse(readFileSync(join(__dirname, '../package.json'), 'utf-8'));
 const VERSION = packageJson.version;
-
-const config = loadConfig();
 
 const DATABASE_URL = config.databaseUrl;
 const POLL_INTERVAL_MS = config.pollIntervalMs;

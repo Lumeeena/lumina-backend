@@ -48,10 +48,11 @@ CREATE INDEX idx_transactions_created_at ON transactions (created_at DESC);
 
 -- ─── Operations ───────────────────────────────────────────────────────────────
 --
--- Range-partitioned by ledger (see db/migrations/006_partition_operations.sql
--- for the full rationale and the migration path for a pre-existing table).
--- The primary key includes `ledger` because Postgres requires a partitioned
--- table's unique constraints to include the partition key.
+-- A plain table, not partitioned. It was range-partitioned by ledger for a
+-- while (see db/migrations/006_partition_operations.sql), but a partitioned
+-- table's primary key must include the partition key, and the multi-network
+-- key (id, network) cannot also carry `ledger` — so the partitioning was
+-- reverted and the primary key is (id, network).
 
 CREATE TABLE IF NOT EXISTS operations (
     id                  TEXT NOT NULL,
@@ -75,13 +76,11 @@ CREATE INDEX idx_operations_created_at    ON operations (created_at DESC);
 -- GIN index for JSONB queries (e.g. filter by "to" address in payment details)
 CREATE INDEX idx_operations_details       ON operations USING GIN (details);
 
--- Creates partitions covering [0, partitions_ahead * 2,000,000) so a fresh
--- database has somewhere to write immediately. The indexer keeps calling this
--- periodically afterward (see indexer/src/db.ts ensurePartitions) so future
--- partitions always exist before the chain reaches them. Idempotent: always
--- continues from whatever the current highest partition's upper bound
--- actually is, so repeated calls only create the newly-needed partitions
--- (see db/migrations/006_partition_operations.sql for the full rationale).
+-- Retained only so this file stays at parity with db/migrations/006_partition_operations.sql,
+-- which creates it. `operations` is no longer partitioned (see the note above),
+-- so the initial-partition call that used to run here would fail; the function
+-- is defined but not invoked. The indexer's ensurePartitions wrapper
+-- (indexer/src/db.ts) is currently unused.
 CREATE OR REPLACE FUNCTION ensure_operations_partitions(partitions_ahead INTEGER DEFAULT 3)
 RETURNS void AS $$
 DECLARE
@@ -118,8 +117,6 @@ BEGIN
   END LOOP;
 END;
 $$ LANGUAGE plpgsql;
-
-SELECT ensure_operations_partitions(3);
 
 -- ─── Accounts ─────────────────────────────────────────────────────────────────
 
