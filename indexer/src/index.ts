@@ -37,10 +37,13 @@ import {
   ensurePartitions,
   getLatestIndexedEventLedger,
   getLatestIndexedLedger,
+  getTrackedContractStorageKeys,
   indexLedger,
   insertContractEvents,
   insertCustomEvents,
   loadContractSchemas,
+  markContractStorageEntriesArchived,
+  upsertContractStorageEntries,
 } from './db';
 import { decodeEvents } from './customDecode';
 import { loadConfig } from './config';
@@ -76,7 +79,7 @@ const HEALTH_PORT = parseInt(process.env['HEALTH_PORT'] ?? '9090', 10);
 
 import { getAccount, getLatestLedgerSequence, getLedger, getLedgerOperations, getLedgerTransactions, HorizonAccount } from './horizon';
 import { getActiveContracts } from './registry';
-import { getEvents, getLatestLedgerSequence as getLatestRpcLedgerSequence, type ContractEvent } from './soroban';
+import { getContractStorageEntries, getEvents, getLatestLedgerSequence as getLatestRpcLedgerSequence, type ContractEvent } from './soroban';
 import { resolveNetworks, type NetworkConfig } from './networks';
 
 // Read version from package.json for logging
@@ -450,6 +453,49 @@ async function indexCustomEvents(loop: NetworkLoop, events: ContractEvent[]): Pr
   }
 }
 
+/**
+ * Fetches and stores contract storage entries, and detects archival.
+ *
+ * The watch list is the union of every key this network has already indexed
+ * (read back from the database, so a key is never silently dropped from it) and
+ * the configured seed. A watched key the RPC stops returning is the archival
+ * signal: Soroban archives a persistent entry once its TTL expires, so the entry
+ * becomes inaccessible rather than deleted. It is therefore marked `archived`
+ * rather than removed, which is what lets a client tell an archived entry (a row
+ * with `state = 'archived'`) from an absent one (no row at all).
+ *
+ * Archival is only ever inferred from disappearance plus a prior `active`
+ * observation — a seed key that has never been returned has no row and stays
+ * `absent`, never mislabelled `archived`.
+ */
+async function pollContractStorage(loop: NetworkLoop): Promise<void> {
+  if (!loop.sorobanRpcUrl) return;
+  const name = loop.network.name;
+  try {
+    const tracked = await getTrackedContractStorageKeys(pool, name);
+    const keys = [...new Set([...tracked, ...config.indexedContractStorageKeys])];
+    if (keys.length === 0) return;
+
+    const { entries } = await getContractStorageEntries(loop.sorobanRpcUrl, keys);
+    const returnedKeys = new Set(entries.map(entry => entry.key));
+
+    if (entries.length > 0) {
+      routine.success({ network: name, entries: entries.length }, 'indexed contract storage entries');
+      await upsertContractStorageEntries(pool, name, entries);
+    }
+
+    // Watched keys the RPC did not return. Only those previously observed as
+    // `active` are marked; the UPDATE's state guard makes the rest no-ops.
+    const missing = keys.filter(key => !returnedKeys.has(key));
+    if (missing.length > 0) {
+      await markContractStorageEntriesArchived(pool, name, missing);
+    }
+  } catch (err) {
+    indexingErrors.inc({ loop: 'contract-storage' });
+    log.error({ network: name, err: message(err) }, 'contract storage polling failed');
+  }
+}
+
 /** Run one network's polling loop until the process shuts down. */
 async function runNetworkLoop(loop: NetworkLoop, isPrimary: boolean): Promise<void> {
   const name = loop.network.name;
@@ -485,6 +531,7 @@ async function runNetworkLoop(loop: NetworkLoop, isPrimary: boolean): Promise<vo
 
       if (isShuttingDown) break;
       await pollContractEvents(loop);
+      await pollContractStorage(loop);
     } catch (err) {
       indexingErrors.inc({ loop: 'main' });
       log.error({ network: name, err: message(err) }, 'indexer loop error');

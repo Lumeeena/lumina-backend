@@ -6,11 +6,15 @@ import {
   ensurePartitions,
   getLatestIndexedEventLedger,
   getLatestIndexedLedger,
+  getTrackedContractStorageKeys,
   indexLedger,
   insertContractEvents,
   isCheckViolation,
+  markContractStorageEntriesArchived,
   upsertAccount,
+  upsertContractStorageEntries,
 } from './db';
+import type { ContractStorageEntry } from './soroban';
 import { indexerPoolErrors } from './metrics';
 import { makeAccount, makeContractEvent, makeLedger, makeOperation, makeTransaction } from '../../shared/test-factories';
 
@@ -311,4 +315,144 @@ test('a ledger notification carries the network it was indexed on', async () => 
 
   assert.equal(payloads.length, 1);
   assert.equal(JSON.parse(payloads[0]!).network, 'testnet');
+});
+
+// ─── Contract storage entries ──────────────────────────────────────────────
+
+const STORAGE_KEY = 'AAAAZAAAAGQAAAA==';
+
+function storageEntry(overrides: Partial<ContractStorageEntry> = {}): ContractStorageEntry {
+  return {
+    contractId: 'CAYUDQPV3RKPM3EXDFGI3457FV677JLUCJ4OLKWGCUBPRIHYKXK3WFAZ',
+    key: STORAGE_KEY,
+    durability: 'persistent',
+    value: { count: '42' },
+    valueXdr: 'AAAAEQAAAAE',
+    liveUntilLedgerSeq: 900,
+    lastModifiedLedgerSeq: 500,
+    ...overrides,
+  };
+}
+
+test('upsertContractStorageEntries writes a row per entry as active', async () => {
+  const queries: { sql: string; params: unknown[] }[] = [];
+  const pool = {
+    query: async (sql: string, params: unknown[] = []) => { queries.push({ sql, params }); return { rows: [] }; },
+  } as unknown as Pool;
+
+  await upsertContractStorageEntries(pool, 'mainnet', [storageEntry(), storageEntry({ key: 'other' })]);
+
+  assert.equal(queries.length, 2);
+  for (const query of queries) {
+    assert.match(query.sql, /INSERT INTO contract_storage_entries/);
+    assert.match(query.sql, /'active'/);
+  }
+  assert.equal(queries[0]?.params[0], storageEntry().contractId);
+  assert.equal(queries[0]?.params[1], STORAGE_KEY);
+  assert.equal(queries[0]?.params[2], 'persistent');
+  assert.equal(queries[0]?.params[6], 500);
+  assert.equal(queries[0]?.params[7], 'mainnet');
+});
+
+test('upsertContractStorageEntries is a no-op for an empty list', async () => {
+  let calls = 0;
+  const pool = { query: async () => { calls++; return { rows: [] }; } } as unknown as Pool;
+  await upsertContractStorageEntries(pool, 'mainnet', []);
+  assert.equal(calls, 0);
+});
+
+test('a bigint storage value is stored as canonical decimal text, not a float', async () => {
+  const queries: { sql: string; params: unknown[] }[] = [];
+  const pool = {
+    query: async (sql: string, params: unknown[] = []) => { queries.push({ sql, params }); return { rows: [] }; },
+  } as unknown as Pool;
+
+  // An i128 token amount does not fit a JSON number; JSON.stringify would throw
+  // on a bare bigint, and a float would silently round it.
+  await upsertContractStorageEntries(pool, 'mainnet', [
+    storageEntry({ value: { amount: 1208925819614629174706176n } }),
+  ]);
+
+  assert.equal(queries[0]?.params[3], '{"amount":"1208925819614629174706176"}');
+});
+
+test('a null storage value is stored as SQL NULL', async () => {
+  const queries: { sql: string; params: unknown[] }[] = [];
+  const pool = {
+    query: async (querySql: string, params: unknown[] = []) => { queries.push({ sql: querySql, params }); return { rows: [] }; },
+  } as unknown as Pool;
+
+  await upsertContractStorageEntries(pool, 'mainnet', [storageEntry({ value: null })]);
+  assert.equal(queries[0]?.params[3], null);
+});
+
+test('re-fetching a live entry updates it and can flip an archived entry back to active', async () => {
+  const queries: string[] = [];
+  const pool = {
+    query: async (sql: string) => { queries.push(sql); return { rows: [] }; },
+  } as unknown as Pool;
+
+  await upsertContractStorageEntries(pool, 'mainnet', [storageEntry()]);
+
+  // DO UPDATE, not DO NOTHING: the value must track the chain, and a restored
+  // (un-archived) entry has to become active again.
+  assert.match(queries[0]!, /ON CONFLICT \(contract_id, key, network\) DO UPDATE SET/);
+  assert.match(queries[0]!, /state = 'active'/);
+  assert.match(queries[0]!, /value = EXCLUDED.value/);
+});
+
+test('markContractStorageEntriesArchived marks rows rather than deleting them', async () => {
+  const queries: { sql: string; params: unknown[] }[] = [];
+  const pool = {
+    query: async (sql: string, params: unknown[] = []) => { queries.push({ sql, params }); return { rows: [] }; },
+  } as unknown as Pool;
+
+  await markContractStorageEntriesArchived(pool, 'mainnet', [STORAGE_KEY, 'other']);
+
+  const [query] = queries;
+  assert.ok(query);
+  // An UPDATE, never a DELETE: deleting would report a contract as having lost
+  // state it still has.
+  assert.match(query.sql, /UPDATE contract_storage_entries/);
+  assert.doesNotMatch(query.sql, /DELETE/);
+  assert.match(query.sql, /state = 'archived'/);
+  assert.deepEqual(query.params, ['mainnet', [STORAGE_KEY, 'other']]);
+});
+
+test('markContractStorageEntriesArchived only touches rows that are currently active', async () => {
+  const queries: string[] = [];
+  const pool = {
+    query: async (sql: string) => { queries.push(sql); return { rows: [] }; },
+  } as unknown as Pool;
+
+  await markContractStorageEntriesArchived(pool, 'mainnet', [STORAGE_KEY]);
+
+  // The state guard makes re-archiving an already-archived entry a no-op rather
+  // than a repeated write, and keeps an archived row's history intact.
+  assert.match(queries[0]!, /AND state = 'active'/);
+});
+
+test('markContractStorageEntriesArchived is a no-op for an empty key list', async () => {
+  let calls = 0;
+  const pool = { query: async () => { calls++; return { rows: [] }; } } as unknown as Pool;
+  await markContractStorageEntriesArchived(pool, 'mainnet', []);
+  assert.equal(calls, 0);
+});
+
+test('getTrackedContractStorageKeys reads every key for one network, active or archived', async () => {
+  const queries: { sql: string; params: unknown[] }[] = [];
+  const pool = {
+    query: async (sql: string, params: unknown[] = []) => {
+      queries.push({ sql, params });
+      return { rows: [{ key: STORAGE_KEY }, { key: 'other' }] };
+    },
+  } as unknown as Pool;
+
+  const keys = await getTrackedContractStorageKeys(pool, 'testnet');
+
+  assert.deepEqual(keys, [STORAGE_KEY, 'other']);
+  // Tracked across both states, and scoped to one network.
+  assert.match(queries[0]!.sql, /FROM contract_storage_entries WHERE network = \$1/);
+  assert.doesNotMatch(queries[0]!.sql, /state/);
+  assert.deepEqual(queries[0]?.params, ['testnet']);
 });

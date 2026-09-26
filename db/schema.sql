@@ -232,6 +232,40 @@ CREATE INDEX IF NOT EXISTS idx_custom_events_ledger
 CREATE INDEX IF NOT EXISTS idx_custom_events_fields
     ON custom_events USING GIN (fields);
 
+-- ─── Contract storage entries (Soroban) ────────────────────────────────────
+--
+-- One row per contract storage entry the indexer has fetched, addressed by the
+-- full LedgerKey XDR that `getLedgerEntries` was called with. `state` is the
+-- archival distinction: Soroban archives a persistent entry once its TTL
+-- expires (it becomes inaccessible, not deleted), so an archived entry keeps
+-- its row with `state = 'archived'` rather than being removed — which is what
+-- lets a client tell "archived" apart from "absent" (no row at all).
+--
+-- `key` is the base64 XDR LedgerKey, so it round-trips back into a
+-- getLedgerEntries call and is what the `keyPrefix` filter matches against.
+-- `value` is the decoded native value (JSONB); `value_xdr` is the raw
+-- LedgerEntryData XDR. Both are null when the entry is not currently live.
+CREATE TABLE IF NOT EXISTS contract_storage_entries (
+    contract_id          TEXT NOT NULL,
+    key                  TEXT NOT NULL,
+    durability           TEXT NOT NULL,
+    state                TEXT NOT NULL DEFAULT 'active',
+    value                JSONB,
+    value_xdr            TEXT,
+    live_until_ledger    BIGINT,
+    last_modified_ledger BIGINT NOT NULL,
+    indexed_at           TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    network              TEXT NOT NULL DEFAULT 'mainnet',
+    PRIMARY KEY (contract_id, key, network),
+    CONSTRAINT contract_storage_entries_durability_check CHECK (durability IN ('persistent', 'temporary')),
+    CONSTRAINT contract_storage_entries_state_check      CHECK (state IN ('active', 'archived')),
+    CONSTRAINT contract_storage_entries_ledger_check     CHECK (last_modified_ledger > 0)
+);
+-- Keyset pagination orders by (last_modified_ledger, key); this index serves
+-- the contract-scoped, durability-filtered, cursor-paginated read.
+CREATE INDEX IF NOT EXISTS idx_contract_storage_entries_lookup
+    ON contract_storage_entries (contract_id, network, last_modified_ledger DESC, key DESC);
+
 -- ─── Search and asset-filter indexes ──────────────────────────────────────
 --
 -- Trigram rather than tsvector for memos: Stellar memos are order references

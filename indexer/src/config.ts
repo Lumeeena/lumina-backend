@@ -20,6 +20,8 @@ export interface Config {
   dbPoolConnectionTimeoutMs: number | undefined;
   sorobanRpcUrl: string | undefined;
   indexedContractIds: string[];
+  /** Seed LedgerKey XDRs (base64) to poll contract storage for, before any are discovered. */
+  indexedContractStorageKeys: string[];
   registryContractId: string | undefined;
   registryReadAccount: string | undefined;
   registryNetworkPassphrase: string;
@@ -138,6 +140,10 @@ export function loadConfig(): Config {
       .split(',')
       .map(id => id.trim())
       .filter(Boolean),
+    indexedContractStorageKeys: (process.env['INDEXED_CONTRACT_STORAGE_KEYS'] ?? '')
+      .split(',')
+      .map(key => key.trim())
+      .filter(Boolean),
     registryContractId: optionalString('REGISTRY_CONTRACT_ID'),
     registryReadAccount: optionalString('REGISTRY_READ_ACCOUNT'),
     registryNetworkPassphrase: stringWithDefault('REGISTRY_NETWORK_PASSPHRASE', Networks.TESTNET),
@@ -195,6 +201,7 @@ export function loadConfig(): Config {
       dbPoolConnectionTimeoutMs: config.dbPoolConnectionTimeoutMs,
       sorobanRpcUrl: config.sorobanRpcUrl,
       indexedContractIds: config.indexedContractIds,
+      indexedContractStorageKeys: config.indexedContractStorageKeys,
       registryContractId: config.registryContractId,
       registryReadAccount: config.registryReadAccount,
       registryNetworkPassphrase: config.registryNetworkPassphrase,
