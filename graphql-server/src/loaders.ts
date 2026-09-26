@@ -9,6 +9,26 @@ import {
 } from './db';
 import { getAccount as getAccountFromHorizon } from './horizon';
 import type { NetworkConfig } from './networks';
+import { horizonAccountFallbacks } from './metrics';
+
+const ACCOUNT_FALLBACK_CONCURRENCY = 4;
+const NEGATIVE_ACCOUNT_TTL_MS = 30_000;
+let activeAccountFallbacks = 0;
+const queuedAccountFallbacks: Array<() => void> = [];
+const negativeAccountCache = new Map<string, number>();
+
+async function withAccountFallbackBudget<T>(work: () => Promise<T>): Promise<T> {
+  if (activeAccountFallbacks >= ACCOUNT_FALLBACK_CONCURRENCY) {
+    await new Promise<void>(resolve => queuedAccountFallbacks.push(resolve));
+  }
+  activeAccountFallbacks++;
+  try {
+    return await work();
+  } finally {
+    activeAccountFallbacks--;
+    queuedAccountFallbacks.shift()?.();
+  }
+}
 
 export interface RequestLoaders {
   account: DataLoader<string, ReturnType<typeof mapAccount> | null>;
@@ -34,8 +54,20 @@ export function createLoaders(pool: Pool, network: NetworkConfig): RequestLoader
         const fromDb = rows.get(address);
         if (fromDb) return fromDb;
 
-        const horizonAccount = await getAccountFromHorizon(address, network.horizonUrl);
-        if (!horizonAccount) return null;
+        const cacheKey = `${network.horizonUrl}:${address}`;
+        const cachedMissingAt = negativeAccountCache.get(cacheKey);
+        if (cachedMissingAt && Date.now() - cachedMissingAt < NEGATIVE_ACCOUNT_TTL_MS) {
+          horizonAccountFallbacks.inc({ result: 'negative_cache' });
+          return null;
+        }
+        if (cachedMissingAt) negativeAccountCache.delete(cacheKey);
+
+        const horizonAccount = await withAccountFallbackBudget(() => getAccountFromHorizon(address, network.horizonUrl));
+        horizonAccountFallbacks.inc({ result: horizonAccount ? 'hit' : 'miss' });
+        if (!horizonAccount) {
+          negativeAccountCache.set(cacheKey, Date.now());
+          return null;
+        }
         return mapAccount({
           network: network.name,
           address: horizonAccount.account_id,

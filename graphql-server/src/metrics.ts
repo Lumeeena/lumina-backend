@@ -52,6 +52,13 @@ export const authAttempts = new Counter({
   registers: [registry],
 });
 
+export const horizonAccountFallbacks = new Counter({
+  name: 'lumina_graphql_horizon_account_fallbacks_total',
+  help: 'Account lookups that fell back to Horizon, by result.',
+  labelNames: ['result'] as const,
+  registers: [registry],
+});
+
 // Pool saturation is the metric that explains a latency cliff nothing else
 // accounts for: queries queue invisibly once every connection is checked out.
 export const dbPoolTotal = new Gauge({

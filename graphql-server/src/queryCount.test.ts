@@ -113,3 +113,20 @@ test('representative nested transaction fields stay batched', async () => {
     return 'unknown';
   }), ['transactions', 'accounts', 'ledgers', 'operations']);
 });
+
+test('latestLedger caches a database result within the configured window', async () => {
+  const calls: QueryCall[] = [];
+  const pool = {
+    query: async (sql: string, params: unknown[] = []) => {
+      calls.push({ sql, params });
+      return { rows: [ledgerRow(123)] };
+    },
+  } as unknown as Pool;
+  const context = createContext(pool);
+
+  const first = await resolvers.Query.latestLedger({}, {}, context);
+  const second = await resolvers.Query.latestLedger({}, {}, context);
+
+  assert.deepEqual(second, first);
+  assert.equal(calls.length, 1);
+});

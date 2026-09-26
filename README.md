@@ -293,6 +293,13 @@ indexer from starting.
 | `PRIMARY_NETWORK` | first of `NETWORKS` — which network serves a request that does not name one |
 | `PERSISTED_QUERIES` | `true` — automatic persisted queries; set `false` to refuse hash-only requests |
 | `PERSISTED_QUERIES_TTL_SECONDS` | `604800` | How long a registered hash stays cached (in-memory; a restart empties it) |
+| `LATEST_LEDGER_CACHE_TTL_MS` | `4000` | Milliseconds to cache an indexed `latestLedger` result; Horizon fallback results are never cached |
+| `HORIZON_REQUEST_TIMEOUT_MS` | `2000` | Per-request timeout for GraphQL Horizon fallbacks |
+
+GraphQL account fallbacks are limited to four concurrent Horizon requests and
+negative account results are cached in-process for 30 seconds. The
+`lumina_graphql_horizon_account_fallbacks_total` metric reports Horizon hits,
+misses, and negative-cache responses.
 
 `MAX_SUBSCRIPTIONS` is a ceiling, not a lifetime budget: closing a subscription
 frees its slot. Past it, a new subscription is refused with a clear error rather

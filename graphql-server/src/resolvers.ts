@@ -22,7 +22,6 @@ import { getIndexerStatus } from './freshness';
 import { getNetworks, resolveNetworkArgument, type NetworkConfig, type NetworkRegistry } from './networks';
 import type { LedgerNotifier } from './pubsub';
 import { ANONYMOUS_CALLER, type ApiCaller } from './auth';
-import type { subsystem } from './logger';
 
 export interface BaseContext {
   pool: Pool;
@@ -54,6 +53,9 @@ export interface BaseContext {
 }
 
 export type Context = BaseContext;
+
+const latestLedgerCacheTtlMs = parseInt(process.env['LATEST_LEDGER_CACHE_TTL_MS'] ?? '4000', 10);
+const latestLedgerCache = new Map<string, { value: Awaited<ReturnType<typeof getLatestLedgerFromDb>>; cachedAt: number }>();
 
 export function createContext(
   pool: Pool,
@@ -251,8 +253,14 @@ export const resolvers = {
 
     async latestLedger(_: unknown, args: { network?: string | null }, ctx: Context) {
       const network = networkArgument(args, ctx);
+      const cached = latestLedgerCache.get(network.name);
+      if (cached && Date.now() - cached.cachedAt < latestLedgerCacheTtlMs) return cached.value;
+
       const fromDb = await getLatestLedgerFromDb(ctx.pool, network.name);
-      if (fromDb) return fromDb;
+      if (fromDb) {
+        latestLedgerCache.set(network.name, { value: fromDb, cachedAt: Date.now() });
+        return fromDb;
+      }
 
       const horizonLedger = await getLatestLedgerFromHorizon(network.horizonUrl);
       if (!horizonLedger) return null;
