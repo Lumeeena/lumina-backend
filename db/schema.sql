@@ -199,7 +199,6 @@ CREATE TABLE IF NOT EXISTS api_keys (
     updated_at          TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
-CREATE INDEX IF NOT EXISTS idx_api_keys_key_hash ON api_keys (key_hash);
 CREATE INDEX IF NOT EXISTS idx_api_keys_revoked_at ON api_keys (revoked_at);
 
 -- Lower insert-triggered vacuum/analyze thresholds for the append-heavy tables.
