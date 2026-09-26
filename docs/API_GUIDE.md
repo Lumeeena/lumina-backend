@@ -12,6 +12,41 @@ The Lumina API is a GraphQL endpoint that exposes indexed Stellar network data �
 
 **Authentication:** send an API key as `Authorization: Bearer lum_...`. See [`AUTHENTICATION.md`](AUTHENTICATION.md).
 
+## Choosing a network
+
+Every query and subscription takes an optional `network` argument as its **first**
+argument. Omitted, it is the deployment's primary network — the behaviour every
+client saw before the argument existed.
+
+```graphql
+query {
+  transactions(network: TESTNET, limit: 10) {
+    items { hash ledger }
+    pageInfo { hasNextPage cursor }
+  }
+}
+```
+
+- Values are the uppercase `Network` enum: `MAINNET`, `TESTNET`, `FUTURENET`.
+  Which of them exist depends on what the deployment configured — see
+  [`MULTI_NETWORK.md`](MULTI_NETWORK.md).
+- Naming a network the deployment does not serve is an error, not a silent
+  fallback to the primary:
+
+  ```json
+  {
+    "message": "Network \"RANKENET\" is not configured on this deployment. Configured networks: MAINNET, TESTNET.",
+    "extensions": { "code": "BAD_USER_INPUT" }
+  }
+  ```
+
+- Nested fields inherit the network from their parent: a transaction read for
+  `TESTNET` resolves its `ledgerData`, `operations` and account against testnet,
+  with no argument to repeat. Rows know which network they came from.
+- Subscriptions take the same argument, and a notification for a different
+  network is dropped before any rows are read — see
+  [Subscriptions](#subscriptions).
+
 ## Pagination
 
 Every list query in Lumina uses **keyset pagination**, not offset pagination. Keyset pagination is stable across concurrent writes — a page boundary does not shift as new data lands, and you will not see duplicate or missing rows across page boundaries.
@@ -322,6 +357,68 @@ query GetLedger($sequence: Int!) {
 }
 ```
 
+### Check how current the data is
+
+A cached index answers faster than the chain can, and is wrong the moment it
+falls behind. `indexerStatus` is the number that lets a client say that out loud
+— "12 ledgers behind", "showing cached data" — instead of presenting a stale
+ledger as current.
+
+```graphql
+query {
+  indexerStatus(network: TESTNET) {
+    network
+    latestIndexedLedger
+    latestIndexedAt
+    horizonLedger
+    lagLedgers
+    stale
+    checkedAt
+  }
+}
+```
+
+- `lagLedgers` is Horizon's tip minus ours for **that** network; `stale` is true
+  when the gap exceeds 20 ledgers, when nothing has been indexed yet, or when
+  either side could not be read.
+- `stale` is a label, not a gate: withholding data because it says so would turn
+  a lagging indexer into a total outage. Labelled stale data beats no data.
+- Neither side failing is an error. An unreachable Horizon or database comes
+  back as `null` fields plus `stale: true` — the interesting moment for this
+  query is exactly when something is wrong, and that is when a client most wants
+  an answer rather than an error.
+
+## Persisted queries
+
+The server accepts automatic persisted queries (APQ): send the SHA-256 of your
+document with the document itself the first time, and the hash alone afterwards.
+
+```json
+{
+  "query": "{ latestLedger { sequence } }",
+  "extensions": {
+    "persistedQuery": {
+      "version": 1,
+      "sha256Hash": "af2c2c0d9e2a5b0f0f0f…"
+    }
+  }
+}
+```
+
+| Response | Meaning | What to do |
+| --- | --- | --- |
+| `Persisted query not found` (`PERSISTED_QUERY_NOT_FOUND`) | The hash is not in the server's cache — a new process, a restarted cache, or a client that skipped the register step | Retry with the full document and the same `persistedQuery` extension; the server stores it under the hash |
+| `Persisted queries are not supported` (`PERSISTED_QUERY_NOT_SUPPORTED`) | The deployment has APQ switched off | Send full documents; the hash will never be accepted |
+
+Notes:
+
+- The cache is in-memory and keyed by hash, so every server restart empties it
+  and clients re-register on their next request. Registrations live seven days
+  by default (`PERSISTED_QUERIES_TTL_SECONDS`).
+- This is a cache, **not** a safelist. The server answers "I have seen this
+  document", never "this document is allowed" — an allow-listed-persisted-queries
+  deployment is a different feature and not what this is.
+
 ## Subscriptions
 
 Subscribe to changes over WebSocket at the same endpoint. Subscriptions are available for new transactions and account activity.
@@ -401,6 +498,7 @@ The GraphQL API returns errors in the standard GraphQL error format. Each error 
 | `GRAPHQL_PARSE_FAILED` | Query syntax is invalid | Unmatched braces, invalid tokens |
 | `INTERNAL_SERVER_ERROR` | Server error | Database connection failure |
 | `BAD_REQUEST` | Client request error | Invalid asset format, empty search query |
+| `BAD_USER_INPUT` | The request named something the server does not serve | `network: RANKENET` when only `MAINNET`, `TESTNET` are configured |
 | `UNAUTHENTICATED` | API key is malformed, unknown, or revoked | See [`AUTHENTICATION.md`](AUTHENTICATION.md#authentication-errors) |
 | `RATE_LIMITED` | Rate limit exceeded; wait `extensions.retryAfter` seconds | See [`AUTHENTICATION.md`](AUTHENTICATION.md#when-you-are-throttled) |
 
