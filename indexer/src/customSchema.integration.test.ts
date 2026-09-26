@@ -17,7 +17,7 @@ import { parseContractSchema } from './customSchema';
 import { deleteContractSchema, insertCustomEvents, loadContractSchemas, upsertContractSchema } from './db';
 import type { ContractEvent } from './soroban';
 
-const DATABASE_URL = process.env.TEST_DATABASE_URL;
+const DATABASE_URL = process.env['TEST_DATABASE_URL'];
 const skip = DATABASE_URL ? false : 'TEST_DATABASE_URL is not set';
 
 /**
@@ -27,6 +27,10 @@ const skip = DATABASE_URL ? false : 'TEST_DATABASE_URL is not set';
  */
 const TEST_TIMEOUT_MS = 30_000;
 
+// Deliberately not the default `mainnet`: if any read or write forgot its
+// network filter it would land in the other bucket and the assertions below
+// would see nothing.
+const NETWORK = 'testnet';
 const CONTRACT = 'CAYUDQPV3RKPM3EXDFGI3457FV677JLUCJ4OLKWGCUBPRIHYKXK3WFAZ';
 const FROM = 'GFROMAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA';
 const TO = 'GTOAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA';
@@ -68,25 +72,31 @@ function event(id: string, amount: bigint): ContractEvent {
 before(async () => {
   if (skip) return;
   pool = new Pool({ connectionString: DATABASE_URL });
-  await pool.query('DELETE FROM custom_events WHERE contract_id = $1', [CONTRACT]);
-  await deleteContractSchema(pool, CONTRACT);
+  await pool.query('DELETE FROM custom_events WHERE contract_id = $1 AND network = $2', [
+    CONTRACT,
+    NETWORK,
+  ]);
+  await deleteContractSchema(pool, NETWORK, CONTRACT);
 });
 
 after(async () => {
   if (skip) return;
-  await pool.query('DELETE FROM custom_events WHERE contract_id = $1', [CONTRACT]);
-  await deleteContractSchema(pool, CONTRACT);
+  await pool.query('DELETE FROM custom_events WHERE contract_id = $1 AND network = $2', [
+    CONTRACT,
+    NETWORK,
+  ]);
+  await deleteContractSchema(pool, NETWORK, CONTRACT);
   await pool.end();
 });
 
 test('register → index → read back typed', { skip, timeout: TEST_TIMEOUT_MS }, async () => {
   const schema = parseContractSchema(schemaDoc);
-  await upsertContractSchema(pool, schema);
+  await upsertContractSchema(pool, NETWORK, schema);
 
   // Reloading from the database is part of the round trip: the indexer reads
   // schemas back each cycle rather than holding the one it was handed.
-  const loaded = await loadContractSchemas(pool);
-  assert.equal(loaded.get(CONTRACT)?.events[0].fields.length, 3);
+  const loaded = await loadContractSchemas(pool, NETWORK);
+  assert.equal(loaded.get(CONTRACT)?.events[0]?.fields.length, 3);
 
   const { decoded, failures } = decodeEvents(loaded, [
     event('evt_small', 500n),
@@ -94,11 +104,11 @@ test('register → index → read back typed', { skip, timeout: TEST_TIMEOUT_MS 
   ]);
   assert.equal(failures.length, 0);
 
-  await insertCustomEvents(pool, decoded);
+  await insertCustomEvents(pool, NETWORK, decoded);
 
   const { rows } = await pool.query(
-    'SELECT event_id, fields FROM custom_events WHERE contract_id = $1 ORDER BY event_id',
-    [CONTRACT]
+    'SELECT event_id, fields FROM custom_events WHERE contract_id = $1 AND network = $2 ORDER BY event_id',
+    [CONTRACT, NETWORK]
   );
   assert.equal(rows.length, 2);
   assert.equal(rows[0].fields.amount, HUGE_AMOUNT, 'the i128 survived the round trip exactly');
@@ -113,9 +123,10 @@ test('the numeric predicate the query layer builds compares an i128 exactly', { 
   const { rows } = await pool.query(
     `SELECT event_id FROM custom_events
       WHERE contract_id = $1
-        AND event_name = $2
-        AND (fields->>$3)::numeric > $4::numeric`,
-    [CONTRACT, 'transfer', 'amount', boundary]
+        AND network = $2
+        AND event_name = $3
+        AND (fields->>$4)::numeric > $5::numeric`,
+    [CONTRACT, NETWORK, 'transfer', 'amount', boundary]
   );
 
   assert.deepEqual(rows.map(r => r.event_id), ['evt_huge']);
@@ -124,8 +135,8 @@ test('the numeric predicate the query layer builds compares an i128 exactly', { 
 test('an exact-match filter finds the right rows', { skip, timeout: TEST_TIMEOUT_MS }, async () => {
   const { rows } = await pool.query(
     `SELECT event_id FROM custom_events
-      WHERE contract_id = $1 AND event_name = $2 AND fields->>$3 = $4`,
-    [CONTRACT, 'transfer', 'from', FROM]
+      WHERE contract_id = $1 AND network = $2 AND event_name = $3 AND fields->>$4 = $5`,
+    [CONTRACT, NETWORK, 'transfer', 'from', FROM]
   );
 
   assert.equal(rows.length, 2);
@@ -146,15 +157,16 @@ test('re-indexing after a schema revision replaces the decoded row', { skip, tim
       },
     ],
   });
-  await upsertContractSchema(pool, revised);
+  await upsertContractSchema(pool, NETWORK, revised);
 
-  const loaded = await loadContractSchemas(pool);
+  const loaded = await loadContractSchemas(pool, NETWORK);
   const { decoded } = decodeEvents(loaded, [event('evt_small', 777n)]);
-  await insertCustomEvents(pool, decoded);
+  await insertCustomEvents(pool, NETWORK, decoded);
 
   const { rows } = await pool.query(
-    'SELECT schema_version, fields FROM custom_events WHERE event_id = $1 AND event_name = $2',
-    ['evt_small', 'transfer']
+    `SELECT schema_version, fields FROM custom_events
+      WHERE event_id = $1 AND event_name = $2 AND network = $3`,
+    ['evt_small', 'transfer', NETWORK]
   );
 
   assert.equal(rows.length, 1, 'the revision updated in place rather than adding a row');
@@ -165,11 +177,24 @@ test('re-indexing after a schema revision replaces the decoded row', { skip, tim
 
 test('a contract without a schema is untouched by any of this', { skip, timeout: TEST_TIMEOUT_MS }, async () => {
   const other = 'CBYUDQPV3RKPM3EXDFGI3457FV677JLUCJ4OLKWGCUBPRIHYKXK3WFAZ';
-  const loaded = await loadContractSchemas(pool);
+  const loaded = await loadContractSchemas(pool, NETWORK);
 
   const { decoded } = decodeEvents(loaded, [{ ...event('evt_other', 1n), contractId: other }]);
 
   assert.equal(decoded.length, 0);
-  const { rows } = await pool.query('SELECT 1 FROM custom_events WHERE contract_id = $1', [other]);
+  const { rows } = await pool.query(
+    'SELECT 1 FROM custom_events WHERE contract_id = $1 AND network = $2',
+    [other, NETWORK]
+  );
   assert.equal(rows.length, 0);
+});
+
+test('a schema belongs to the network it was registered for', { skip, timeout: TEST_TIMEOUT_MS }, async () => {
+  // The same contract id can decode differently on two chains, and the indexer
+  // only ever loads the schemas for the network it is indexing.
+  const registered = await loadContractSchemas(pool, NETWORK);
+  const other = await loadContractSchemas(pool, 'mainnet');
+
+  assert.equal(registered.has(CONTRACT), true);
+  assert.equal(other.has(CONTRACT), false);
 });
