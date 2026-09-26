@@ -13,7 +13,7 @@ import { Pool } from 'pg';
 import { resolvers } from './resolvers';
 import { createContext } from './resolvers';
 
-const DATABASE_URL = process.env.TEST_DATABASE_URL;
+const DATABASE_URL = process.env['TEST_DATABASE_URL'];
 const skip = DATABASE_URL ? false : 'TEST_DATABASE_URL is not set';
 
 const TEST_TIMEOUT_MS = 30_000;
@@ -130,7 +130,7 @@ test('operations query with account filter works', { skip, timeout: TEST_TIMEOUT
 
 test('latestLedger query returns ledger data', { skip, timeout: TEST_TIMEOUT_MS }, async () => {
   const ctx = createContext(pool);
-  const result = await resolvers.Query.latestLedger(undefined, undefined, ctx);
+  const result = await resolvers.Query.latestLedger(undefined, {}, ctx);
 
   assert.ok(result);
   assert.ok(typeof result.sequence === 'number');
