@@ -92,7 +92,8 @@ CREATE TABLE IF NOT EXISTS accounts (
     flags               JSONB NOT NULL DEFAULT '{}',
     thresholds          JSONB NOT NULL DEFAULT '{}',
     indexed_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at          TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    updated_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    export_enabled      BOOLEAN NOT NULL DEFAULT FALSE
 );
 
 -- ─── Contract Events (Soroban) ────────────────────────────────────────────────
