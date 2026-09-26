@@ -10,6 +10,8 @@ The Lumina API is a GraphQL endpoint that exposes indexed Stellar network data �
 
 **Subscriptions:** WebSocket at the same path: `wss://lumina-api.stellar.org/graphql`
 
+**Authentication:** send an API key as `Authorization: Bearer lum_...`. See [`AUTHENTICATION.md`](AUTHENTICATION.md).
+
 ## Pagination
 
 Every list query in Lumina uses **keyset pagination**, not offset pagination. Keyset pagination is stable across concurrent writes — a page boundary does not shift as new data lands, and you will not see duplicate or missing rows across page boundaries.
@@ -358,6 +360,8 @@ The GraphQL API returns errors in the standard GraphQL error format. Each error 
 | `GRAPHQL_PARSE_FAILED` | Query syntax is invalid | Unmatched braces, invalid tokens |
 | `INTERNAL_SERVER_ERROR` | Server error | Database connection failure |
 | `BAD_REQUEST` | Client request error | Invalid asset format, empty search query |
+| `UNAUTHENTICATED` | API key is malformed, unknown, or revoked | See [`AUTHENTICATION.md`](AUTHENTICATION.md#authentication-errors) |
+| `RATE_LIMITED` | Rate limit exceeded; wait `extensions.retryAfter` seconds | See [`AUTHENTICATION.md`](AUTHENTICATION.md#when-you-are-throttled) |
 
 ### Example error response
 
@@ -386,9 +390,11 @@ The GraphQL API returns errors in the standard GraphQL error format. Each error 
 - **Invalid operator:** The operator does not match the field type (e.g., `GT` on a string field)
 - **Invalid value:** The value cannot be parsed as the declared type
 
-## Rate Limiting
+## Authentication and Rate Limiting
 
-There are no explicit rate limits on the public API, but queries are served sequentially — running many concurrent queries may hit your own client limits before hitting any server limit. For high-volume use, run queries serially or with modest concurrency (2–5 concurrent requests).
+The API is moving to API keys with per-key rate limits, rolled out in announced phases so existing clients have time to migrate. Requests without a key keep working under a smaller anonymous tier.
+
+See [`AUTHENTICATION.md`](AUTHENTICATION.md) for how to get and send a key, the `X-RateLimit-*` headers, what to do when throttled, the anonymous tier's limits, and the migration timeline.
 
 ## Schema Introspection
 
@@ -425,5 +431,6 @@ For the currently running version, check the startup logs or query the server's 
 
 For issues or questions:
 - **GitHub:** https://github.com/Lumeeena/lumina-backend/issues
+- **Authentication and API keys:** `docs/AUTHENTICATION.md`
 - **Schema reference:** `docs/CUSTOM_SCHEMAS.md`
 - **Examples:** this guide

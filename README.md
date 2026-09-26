@@ -8,6 +8,9 @@ Part of the Lumina project, split across three repos:
 - [lumina-backend](https://github.com/Lumeeena/lumina-backend) — this repo
 - [lumina-contracts](https://github.com/Lumeeena/lumina-contracts) — Soroban Registry contract
 
+API consumers: start with [docs/API_GUIDE.md](docs/API_GUIDE.md), and see
+[docs/AUTHENTICATION.md](docs/AUTHENTICATION.md) for API keys and rate limits.
+
 ## Structure
 
 ```
