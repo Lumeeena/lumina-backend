@@ -1,21 +1,53 @@
-"""
-Lumina GraphQL Schema — Stellar Network Event Index
-"""
+# Lumina GraphQL Schema — Stellar Network Event Index
 
+"""
+Networks this deployment serves.
+
+The set is fixed rather than derived from configuration because an enum is
+part of the API contract: naming a network that is not here has to be a
+question a client can ask and get a definite answer to, not a string that
+silently resolves to a different dataset. Declaring a network in `NETWORKS`
+that this enum does not carry fails at startup — see docs/MULTI_NETWORK.md.
+"""
+enum Network {
+  MAINNET
+  TESTNET
+  FUTURENET
+}
+
+"""
+Root queries.
+
+Every field takes an optional `network` argument:
+
+- **Omitted** — the primary network configured for this deployment. That is
+  exactly the data every client saw before the argument existed, which is why
+  adding it is additive rather than breaking.
+- **Named** — that network and only that network. A network the deployment
+  does not serve is a `BAD_USER_INPUT` error, never a silent fall back to the
+  primary: "I asked for testnet and got mainnet" is the data-mixing failure
+  this argument exists to prevent.
+"""
 type Query {
   """Fetch recent transactions, newest first."""
-  transactions(limit: Int = 20, cursor: String): TransactionPage!
+  transactions(
+    """Network to read; defaults to the primary network configured for this deployment."""
+    network: Network
+    limit: Int = 20
+    cursor: String
+  ): TransactionPage!
 
   """Get a single transaction by hash."""
-  transaction(hash: String!): Transaction
+  transaction(network: Network, hash: String!): Transaction
 
   """Fetch an account by Stellar address."""
-  account(address: String!): Account
+  account(network: Network, address: String!): Account
 
   """
   Fetch operations, optionally filtered by account address and type.
   """
   operations(
+    network: Network
     account: String
     type: OperationType
     """Filter to operations involving one asset: "CODE:ISSUER", or "XLM" for native."""
@@ -31,13 +63,14 @@ type Query {
   order references and short codes rather than prose, and stemming an
   identifier is wrong. An exact case-insensitive match always ranks first.
   """
-  search(query: String!, limit: Int = 20, cursor: String): TransactionPage!
+  search(network: Network, query: String!, limit: Int = 20, cursor: String): TransactionPage!
 
   """
   Fetch Soroban contract events by contract ID.
   Requires Soroban RPC indexing to be enabled.
   """
   events(
+    network: Network
     contractId: String!
     topic: String
     limit: Int = 20
@@ -45,16 +78,17 @@ type Query {
   ): ContractEventPage!
 
   """Get a specific ledger by sequence number."""
-  ledger(sequence: Int!): Ledger
+  ledger(network: Network, sequence: Int!): Ledger
 
   """Get the latest ledger."""
-  latestLedger: Ledger
+  latestLedger(network: Network): Ledger
 
   """
   Events decoded against a contract's registered custom schema, with named,
   typed fields rather than a raw JSON blob.
   """
   customEvents(
+    network: Network
     contractId: String!
     event: String!
     where: [CustomEventFilter!]
@@ -63,7 +97,7 @@ type Query {
   ): CustomEventPage!
 
   """The custom schema registered for a contract, if any."""
-  contractSchema(contractId: String!): ContractSchema
+  contractSchema(network: Network, contractId: String!): ContractSchema
 
   """
   Asset detail in one call: current supply and holder count plus a bucketed
@@ -73,6 +107,7 @@ type Query {
   buckets always agree with the operation list.
   """
   asset(
+    network: Network
     """Asset to inspect: "CODE:ISSUER", or "XLM" for native."""
     asset: String!
     """Range start (ISO-8601). Defaults to 30 days before `to`."""
@@ -82,14 +117,62 @@ type Query {
     """Bucket width in seconds (min 60). Defaults to 86400 (daily)."""
     bucketSeconds: Int = 86400
   ): AssetDetail!
+
+  """
+  How far behind the chain this API data is. Advisory — see IndexerStatus for
+  what it does and does not promise.
+  """
+  indexerStatus(network: Network): IndexerStatus!
 }
 
 type Subscription {
   """Subscribe to new transactions as they are confirmed."""
-  newTransaction: Transaction!
+  newTransaction(network: Network): Transaction!
 
   """Subscribe to new operations for a specific account."""
-  accountActivity(address: String!): Operation!
+  accountActivity(network: Network, address: String!): Operation!
+}
+
+# ─── Indexer freshness ────────────────────────────────────────────────────────
+
+"""
+How current the indexed data is, for one network.
+
+**Advisory.** It is a measurement of lag, not a guarantee: `stale` is derived
+from Horizon tip read at the moment of the call and a lag threshold, and the
+numbers move between calls. Use it to render "data is N ledgers behind" or
+"showing cached data", not as an SLA and not as a gate on showing data at all
+— stale data with an honest label beats no data.
+
+The query is built to answer "how stale?" rather than fail when the indexer
+is down: the indexed side comes from Postgres, the tip comes from Horizon,
+and either being unreachable is reported as a field (`null` plus
+`stale: true`) rather than as an error.
+"""
+type IndexerStatus {
+  """Network these numbers describe."""
+  network: Network!
+
+  """Highest ledger sequence indexed for this network, or null if none yet."""
+  latestIndexedLedger: Int
+
+  """When that ledger was indexed (ISO-8601), or null if none yet."""
+  latestIndexedAt: String
+
+  """Horizon current tip for this network, or null if it could not be read."""
+  horizonLedger: Int
+
+  """`horizonLedger - latestIndexedLedger`, or null if the tip is unknown."""
+  lagLedgers: Int
+
+  """
+  True when the data cannot be assumed current: the tip could not be read, or
+  the indexer is more than a few ledgers behind it.
+  """
+  stale: Boolean!
+
+  """When this status was computed (ISO-8601)."""
+  checkedAt: String!
 }
 
 # ─── Pagination ──────────────────────────────────────────────────────────────

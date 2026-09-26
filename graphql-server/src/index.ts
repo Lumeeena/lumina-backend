@@ -13,7 +13,10 @@ import { GraphQLError } from 'graphql';
 import { useServer } from 'graphql-ws/lib/use/ws';
 import { WebSocketServer } from 'ws';
 import { to as copyTo } from 'pg-copy-streams';
-import { createContext, resolvers, type Context } from './resolvers';
+import { createContext, resolvers, type BaseContext } from './resolvers';
+import { getNetworks, networkEnumValue } from './networks';
+import { persistedQueryOption } from './persistedQueries';
+import { loadMigrations, runMigrations } from './migrations';
 import { LedgerNotifier, SubscriberLimitError } from './pubsub';
 import { subsystem } from './logger';
 import { loadMigrations, runMigrations } from './migrations';
@@ -24,6 +27,11 @@ import {
   parseAllowAnonymous,
 } from './auth';
 import { buildServerHealth, metricsPlugin, samplePool, serverHealthStatusCode } from './observability';
+
+interface Context extends BaseContext {
+  correlationId?: string;
+  requestLogger?: ReturnType<typeof subsystem>;
+}
 import {
   listenerConnected,
   metricsContentType,
@@ -53,20 +61,19 @@ const VERSION = packageJson.version;
 
 const typeDefs = readFileSync(join(__dirname, 'schema.graphql'), 'utf-8');
 
-const DATABASE_URL = process.env.DATABASE_URL ?? 'postgresql://localhost:5432/lumina';
-// Optional read-only connection string. When set, HTTP queries are served from
-// the replica; writes, migrations, health/metrics sampling, the export COPY
-// stream and LISTEN all stay on the primary below. See
-// docs/DATABASE_OPERATIONS.md for the replication-lag caveats.
-const READ_DATABASE_URL = process.env.READ_DATABASE_URL?.trim() || null;
-const PORT = parseInt(process.env.PORT ?? '4000', 10);
-const MAX_SUBSCRIPTIONS = parseInt(process.env.MAX_SUBSCRIPTIONS ?? '500', 10);
-const SUBSCRIPTION_QUEUE_LIMIT = parseInt(process.env.SUBSCRIPTION_QUEUE_LIMIT ?? '64', 10);
-const API_KEY_HEADER = (process.env.API_KEY_HEADER ?? DEFAULT_API_KEY_HEADER).toLowerCase();
-const ALLOW_ANONYMOUS_ACCESS = parseAllowAnonymous(process.env.ALLOW_ANONYMOUS_ACCESS);
-const DB_POOL_MAX = parseInt(process.env.DB_POOL_MAX ?? '10', 10);
-const DB_POOL_IDLE_TIMEOUT = parseInt(process.env.DB_POOL_IDLE_TIMEOUT ?? '10000', 10);
-const DB_POOL_CONNECTION_TIMEOUT = parseInt(process.env.DB_POOL_CONNECTION_TIMEOUT ?? '0', 10);
+const DATABASE_URL = process.env['DATABASE_URL'] ?? 'postgresql://localhost:5432/lumina';
+const PORT = parseInt(process.env['PORT'] ?? '4000', 10);
+const MAX_SUBSCRIPTIONS = parseInt(process.env['MAX_SUBSCRIPTIONS'] ?? '500', 10);
+const SUBSCRIPTION_QUEUE_LIMIT = parseInt(process.env['SUBSCRIPTION_QUEUE_LIMIT'] ?? '64', 10);
+const API_KEY_HEADER = (process.env['API_KEY_HEADER'] ?? DEFAULT_API_KEY_HEADER).toLowerCase();
+const ALLOW_ANONYMOUS_ACCESS = parseAllowAnonymous(process.env['ALLOW_ANONYMOUS_ACCESS']);
+const DB_POOL_MAX = parseInt(process.env['DB_POOL_MAX'] ?? '10', 10);
+const DB_POOL_IDLE_TIMEOUT = parseInt(process.env['DB_POOL_IDLE_TIMEOUT'] ?? '10000', 10);
+const DB_POOL_CONNECTION_TIMEOUT = parseInt(process.env['DB_POOL_CONNECTION_TIMEOUT'] ?? '0', 10);
+
+// Parsed before anything starts, so a bad value is a startup failure rather
+// than a request that behaves differently from what the operator configured.
+const persistedQueries = persistedQueryOption();
 
 const DB_POOL_MAX = process.env.DB_POOL_MAX ? parseInt(process.env.DB_POOL_MAX, 10) : undefined;
 const DB_POOL_IDLE_TIMEOUT = process.env.DB_POOL_IDLE_TIMEOUT ? parseInt(process.env.DB_POOL_IDLE_TIMEOUT, 10) : undefined;
@@ -102,7 +109,11 @@ const notifier = new LedgerNotifier({
 let stopScheduledExports: () => Promise<void> = async () => {};
 
 async function main() {
-  if (process.env.RUN_MIGRATIONS_ON_STARTUP === 'true') {
+  // Resolved before the first request and before the listener binds: a
+  // deployment with a network it cannot serve must not come up looking healthy.
+  const networks = getNetworks();
+
+  if (process.env['RUN_MIGRATIONS_ON_STARTUP'] === 'true') {
     const status = await runMigrations(pool, loadMigrations());
     log.info({ applied: status.applied, pending: status.pending }, 'database migrations ready');
   }
@@ -158,10 +169,7 @@ async function main() {
 
   const server = new ApolloServer<Context>({
     schema,
-    // Introspection and the landing page are development conveniences: off in
-    // production unless GRAPHQL_INTROSPECTION=true.
-    introspection: security.introspection,
-    formatError: formatTimeoutError,
+    persistedQueries,
     plugins: [
       queryLimitsPlugin(security),
       ...(security.introspection ? [] : [ApolloServerPluginLandingPageDisabled()]),
@@ -323,10 +331,12 @@ async function main() {
       apiKeyHeader: API_KEY_HEADER,
       anonymousAccess: ALLOW_ANONYMOUS_ACCESS,
       database: redactUrl(DATABASE_URL),
-      readReplica: READ_DATABASE_URL ? redactUrl(READ_DATABASE_URL) : 'primary',
-      dbPoolMax: DB_POOL_MAX ?? 10,
-      dbPoolIdleTimeout: DB_POOL_IDLE_TIMEOUT ?? 10000,
-      dbPoolConnectionTimeout: DB_POOL_CONNECTION_TIMEOUT ?? 0,
+      dbPoolMax: DB_POOL_MAX,
+      dbPoolIdleTimeout: DB_POOL_IDLE_TIMEOUT,
+      dbPoolConnectionTimeout: DB_POOL_CONNECTION_TIMEOUT,
+      networks: networks.networks.map(network => networkEnumValue(network.name)),
+      primaryNetwork: networkEnumValue(networks.primary.name),
+      persistedQueries: persistedQueries === false ? 'disabled' : `enabled, ttl ${persistedQueries.ttl}s`,
     },
     'lumina graphql server listening'
   );

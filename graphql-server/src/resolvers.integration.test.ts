@@ -29,7 +29,7 @@ async function seed(): Promise<void> {
   // Insert test ledger
   await pool.query(
     `INSERT INTO ledgers (sequence, closed_at, transaction_count, operation_count)
-     VALUES ($1, NOW(), $2, $2) ON CONFLICT (sequence) DO NOTHING`,
+     VALUES ($1, NOW(), $2, $2) ON CONFLICT (sequence, network) DO NOTHING`,
     [LEDGER, 1]
   );
 
@@ -37,7 +37,7 @@ async function seed(): Promise<void> {
   await pool.query(
     `INSERT INTO transactions (hash, ledger, created_at, source_account, fee_charged, operation_count, successful, memo_type, memo)
      VALUES ($1, $2, NOW(), $3, 100, 1, true, 'text', 'test memo')
-     ON CONFLICT (hash) DO UPDATE SET memo = EXCLUDED.memo`,
+     ON CONFLICT (hash, network) DO UPDATE SET memo = EXCLUDED.memo`,
     [TX_HASH, LEDGER, ACCOUNT]
   );
 
@@ -45,7 +45,7 @@ async function seed(): Promise<void> {
   await pool.query(
     `INSERT INTO accounts (address, sequence, subentry_count, last_modified_ledger, num_sponsored, num_sponsoring, flags, thresholds)
      VALUES ($1, '100', 0, $2, 0, 0, '{}', '{}')
-     ON CONFLICT (address) DO UPDATE SET sequence = EXCLUDED.sequence`,
+     ON CONFLICT (address, network) DO UPDATE SET sequence = EXCLUDED.sequence`,
     [ACCOUNT, LEDGER]
   );
 
@@ -53,7 +53,7 @@ async function seed(): Promise<void> {
   await pool.query(
     `INSERT INTO operations (id, type, transaction_hash, ledger, created_at, source_account, details)
      VALUES ($1, 'payment', $2, $3, NOW(), $4, $5)
-     ON CONFLICT (id) DO UPDATE SET details = EXCLUDED.details`,
+     ON CONFLICT (id, network) DO UPDATE SET details = EXCLUDED.details`,
     [OPERATION_ID, TX_HASH, LEDGER, ACCOUNT, JSON.stringify({ asset_type: 'native', amount: '100' })]
   );
 }
@@ -61,19 +61,19 @@ async function seed(): Promise<void> {
 before(async () => {
   if (skip) return;
   pool = new Pool({ connectionString: DATABASE_URL });
-  await pool.query('DELETE FROM operations WHERE ledger = $1', [LEDGER]);
-  await pool.query('DELETE FROM transactions WHERE ledger = $1', [LEDGER]);
-  await pool.query('DELETE FROM accounts WHERE last_modified_ledger = $1', [LEDGER]);
-  await pool.query('DELETE FROM ledgers WHERE sequence = $1', [LEDGER]);
+  await pool.query("DELETE FROM operations WHERE ledger = $1 AND network = 'mainnet'", [LEDGER]);
+  await pool.query("DELETE FROM transactions WHERE ledger = $1 AND network = 'mainnet'", [LEDGER]);
+  await pool.query("DELETE FROM accounts WHERE last_modified_ledger = $1 AND network = 'mainnet'", [LEDGER]);
+  await pool.query("DELETE FROM ledgers WHERE sequence = $1 AND network = 'mainnet'", [LEDGER]);
   await seed();
 });
 
 after(async () => {
   if (skip) return;
-  await pool.query('DELETE FROM operations WHERE ledger = $1', [LEDGER]);
-  await pool.query('DELETE FROM transactions WHERE ledger = $1', [LEDGER]);
-  await pool.query('DELETE FROM accounts WHERE last_modified_ledger = $1', [LEDGER]);
-  await pool.query('DELETE FROM ledgers WHERE sequence = $1', [LEDGER]);
+  await pool.query("DELETE FROM operations WHERE ledger = $1 AND network = 'mainnet'", [LEDGER]);
+  await pool.query("DELETE FROM transactions WHERE ledger = $1 AND network = 'mainnet'", [LEDGER]);
+  await pool.query("DELETE FROM accounts WHERE last_modified_ledger = $1 AND network = 'mainnet'", [LEDGER]);
+  await pool.query("DELETE FROM ledgers WHERE sequence = $1 AND network = 'mainnet'", [LEDGER]);
   await pool.end();
 });
 
@@ -130,7 +130,7 @@ test('operations query with account filter works', { skip, timeout: TEST_TIMEOUT
 
 test('latestLedger query returns ledger data', { skip, timeout: TEST_TIMEOUT_MS }, async () => {
   const ctx = createContext(pool);
-  const result = await resolvers.Query.latestLedger(undefined, undefined, ctx);
+  const result = await resolvers.Query.latestLedger(undefined, {}, ctx);
 
   assert.ok(result);
   assert.ok(typeof result.sequence === 'number');
@@ -250,39 +250,39 @@ test('asset query returns supply, holders and a matching volume series', { skip,
 
   await pool.query(
     `INSERT INTO ledgers (sequence, closed_at, transaction_count, operation_count)
-     VALUES ($1, NOW(), 2, 2) ON CONFLICT (sequence) DO NOTHING`,
+     VALUES ($1, NOW(), 2, 2) ON CONFLICT (sequence, network) DO NOTHING`,
     [assetLedger]
   );
   await pool.query(
     `INSERT INTO accounts (address, sequence, subentry_count, last_modified_ledger, num_sponsored, num_sponsoring, balances, flags, thresholds)
      VALUES ($1, '1', 1, $2, 0, 0, $3, '{}', '{}')
-     ON CONFLICT (address) DO UPDATE SET balances = EXCLUDED.balances`,
+     ON CONFLICT (address, network) DO UPDATE SET balances = EXCLUDED.balances`,
     [holderA, assetLedger, JSON.stringify([{ asset_type: 'credit_alphanum4', asset_code: 'USDC', asset_issuer: ISSUER, balance: '100' }])]
   );
   await pool.query(
     `INSERT INTO accounts (address, sequence, subentry_count, last_modified_ledger, num_sponsored, num_sponsoring, balances, flags, thresholds)
      VALUES ($1, '1', 1, $2, 0, 0, $3, '{}', '{}')
-     ON CONFLICT (address) DO UPDATE SET balances = EXCLUDED.balances`,
+     ON CONFLICT (address, network) DO UPDATE SET balances = EXCLUDED.balances`,
     [holderB, assetLedger, JSON.stringify([{ asset_type: 'credit_alphanum4', asset_code: 'USDC', asset_issuer: ISSUER, balance: '150.5' }])]
   );
   for (const [hash, createdAt] of [[txA, '2026-01-01T12:00:00Z'], [txB, '2026-01-02T12:00:00Z']] as const) {
     await pool.query(
       `INSERT INTO transactions (hash, ledger, created_at, source_account, fee_charged, operation_count, successful)
        VALUES ($1, $2, $3, $4, 100, 1, true)
-       ON CONFLICT (hash) DO UPDATE SET created_at = EXCLUDED.created_at`,
+       ON CONFLICT (hash, network) DO UPDATE SET created_at = EXCLUDED.created_at`,
       [hash, assetLedger, createdAt, holderA]
     );
   }
   await pool.query(
     `INSERT INTO operations (id, type, transaction_hash, ledger, created_at, source_account, details)
      VALUES ('op_asset_test_a', 'payment', $1, $2, '2026-01-01T12:00:00Z', $3, $4)
-     ON CONFLICT (id) DO UPDATE SET details = EXCLUDED.details`,
+     ON CONFLICT (id, network) DO UPDATE SET details = EXCLUDED.details`,
     [txA, assetLedger, holderA, JSON.stringify({ asset_type: 'credit_alphanum4', asset_code: 'USDC', asset_issuer: ISSUER, amount: '60', from: holderA, to: holderB })]
   );
   await pool.query(
     `INSERT INTO operations (id, type, transaction_hash, ledger, created_at, source_account, details)
      VALUES ('op_asset_test_b', 'payment', $1, $2, '2026-01-02T12:00:00Z', $3, $4)
-     ON CONFLICT (id) DO UPDATE SET details = EXCLUDED.details`,
+     ON CONFLICT (id, network) DO UPDATE SET details = EXCLUDED.details`,
     [txB, assetLedger, holderA, JSON.stringify({ asset_type: 'credit_alphanum4', asset_code: 'USDC', asset_issuer: ISSUER, amount: '40', from: holderA, to: holderB })]
   );
 
@@ -311,9 +311,9 @@ test('asset query returns supply, holders and a matching volume series', { skip,
       [1, 1, 0]
     );
   } finally {
-    await pool.query('DELETE FROM operations WHERE id IN ($1, $2)', ['op_asset_test_a', 'op_asset_test_b']);
-    await pool.query('DELETE FROM transactions WHERE hash IN ($1, $2)', [txA, txB]);
-    await pool.query('DELETE FROM accounts WHERE address IN ($1, $2)', [holderA, holderB]);
-    await pool.query('DELETE FROM ledgers WHERE sequence = $1', [assetLedger]);
+    await pool.query("DELETE FROM operations WHERE id IN ($1, $2) AND network = 'mainnet'", ['op_asset_test_a', 'op_asset_test_b']);
+    await pool.query("DELETE FROM transactions WHERE hash IN ($1, $2) AND network = 'mainnet'", [txA, txB]);
+    await pool.query("DELETE FROM accounts WHERE address IN ($1, $2) AND network = 'mainnet'", [holderA, holderB]);
+    await pool.query("DELETE FROM ledgers WHERE sequence = $1 AND network = 'mainnet'", [assetLedger]);
   }
 });

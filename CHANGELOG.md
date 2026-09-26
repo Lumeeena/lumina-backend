@@ -19,6 +19,12 @@ Breaking changes are rare and advance the major version. Deprecation notices app
 ## [Unreleased]
 
 ### Added
+- `network` argument on every query and subscription (`Network` enum: `MAINNET`, `TESTNET`, `FUTURENET`). Omitted means the configured primary, so existing clients are unaffected; naming a network the deployment does not serve is a `BAD_USER_INPUT` error rather than a silent fallback. Nested fields inherit their parent's network, and subscriptions filter notifications before reading rows (#60)
+- `indexerStatus(network)` query: Horizon's tip, the indexed tip, the lag and a `stale` label for one network. An unreachable database or Horizon answers with `null` fields and `stale: true` instead of failing, because the interesting moment for this query is exactly when something is wrong (#53)
+- Automatic persisted queries, configurable with `PERSISTED_QUERIES` and `PERSISTED_QUERIES_TTL_SECONDS` (default: on, seven days). A value that cannot be understood fails at startup, and switching it off makes the server answer `PERSISTED_QUERY_NOT_SUPPORTED` so clients fall back to full documents. This is a cache, not a safelist (#54)
+- Multi-network configuration: `NETWORKS` plus `<NAME>_HORIZON_URL`, `<NAME>_SOROBAN_RPC_URL`, `<NAME>_NETWORK_PASSPHRASE` and `PRIMARY_NETWORK`, shared by both services. Flat variables keep working unchanged for a single network, and a half-configured or unknown network fails at startup with `NetworkConfigError` rather than indexing the wrong chain (#58)
+- The indexer runs one polling loop per declared network, each with its own cursors, account cache and network-stamped rows; `lumina_latest_indexed_ledger`, `lumina_latest_horizon_ledger`, `lumina_indexing_lag_ledgers` and `lumina_last_successful_index_timestamp_seconds` carry a `network` label, and `/health` reports a per-network breakdown alongside flat numbers taken from the worst-off network (#58)
+- `register-schema --network <name>`, for schemas registered against one chain (#58)
 - API key authentication middleware: a key in the `x-api-key` header is resolved to a caller identity and attached to the GraphQL context. Anonymous access stays the default and is controlled by `ALLOW_ANONYMOUS_ACCESS`. Rejections are answered with 401 before a query is parsed, the key is never logged or echoed, and the stored hash is compared in constant time
 - Resolver integration tests against real database (#122)
 - Consumer-facing GraphQL API documentation (#121)

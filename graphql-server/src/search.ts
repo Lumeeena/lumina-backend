@@ -74,6 +74,8 @@ export function decodeCursor(raw: string): SearchCursor | null {
 }
 
 export interface SearchOptions {
+  /** Network to search — ranking and cursors are scoped to it. */
+  network: string;
   query: string;
   limit: number;
   cursor?: string | null;
@@ -103,8 +105,9 @@ export async function searchTransactions(pool: Pool, options: SearchOptions) {
   // memo means looking for that transaction, not for things resembling it.
   const rankExpression = `GREATEST(similarity(memo, $1), CASE WHEN lower(memo) = lower($1) THEN 1 ELSE 0 END)`;
 
-  const params: unknown[] = [query, MIN_SIMILARITY];
+  const params: unknown[] = [query, MIN_SIMILARITY, options.network];
   const conditions = [
+    'network = $3',
     'memo IS NOT NULL',
     // `%` uses the GIN trigram index; the explicit threshold keeps the
     // behaviour independent of the session's pg_trgm.similarity_threshold.
@@ -209,6 +212,8 @@ export function assetConditions(asset: ParsedAsset, params: unknown[]): string {
 }
 
 export interface AssetOperationsOptions {
+  /** Network whose operations to filter. */
+  network: string;
   asset: string;
   account?: string | null;
   type?: string | null;
@@ -219,8 +224,8 @@ export interface AssetOperationsOptions {
 /** Operations involving one asset, newest first. */
 export async function getOperationsByAsset(pool: Pool, options: AssetOperationsOptions) {
   const parsed = parseAsset(options.asset);
-  const params: unknown[] = [];
-  const conditions = [assetConditions(parsed, params)];
+  const params: unknown[] = [options.network];
+  const conditions = ['network = $1', assetConditions(parsed, params)];
 
   if (options.account) {
     params.push(options.account);

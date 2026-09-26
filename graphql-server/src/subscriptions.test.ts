@@ -123,9 +123,10 @@ test('newTransaction yields each transaction in the announced ledger', async () 
   const received = (await take(stream, 2)) as { hash: string }[];
 
   assert.deepEqual(received.map(t => t.hash), ['tx_a', 'tx_b']);
-  // The notification carried only a ledger number; the rows come from the DB.
-  assert.match(calls[0].sql, /FROM transactions WHERE ledger = \$1/);
-  assert.deepEqual(calls[0].params, [100]);
+  // The notification carried only a ledger number; the rows come from the DB,
+  // scoped to this subscription's network — ledger 100 exists on every chain.
+  assert.match(calls[0]?.sql ?? '', /FROM transactions WHERE ledger = \$1 AND network = \$2/);
+  assert.deepEqual(calls[0]?.params, [100, 'mainnet']);
 });
 
 test('newTransaction maps rows into the GraphQL shape, not raw columns', async () => {
@@ -135,11 +136,11 @@ test('newTransaction maps rows into the GraphQL shape, not raw columns', async (
   const stream = resolvers.newTransaction.subscribe({}, {}, { pool, notifier } as SubscriptionContext);
   push({ kind: 'ledger', ledger: 100 });
 
-  const [tx] = (await take(stream, 1)) as Record<string, unknown>[];
+  const tx = (await take(stream, 1))[0] as Record<string, unknown>;
 
-  assert.equal(tx.sourceAccount, 'GSOURCE');
-  assert.equal(tx.createdAt, '2026-01-01T00:00:00.000Z');
-  assert.equal(tx.source_account, undefined, 'snake_case columns must not leak through');
+  assert.equal(tx['sourceAccount'], 'GSOURCE');
+  assert.equal(tx['createdAt'], '2026-01-01T00:00:00.000Z');
+  assert.equal(tx['source_account'], undefined, 'snake_case columns must not leak through');
 });
 
 test('newTransaction ignores event-only notifications', async () => {
@@ -156,7 +157,7 @@ test('newTransaction ignores event-only notifications', async () => {
 
   assert.equal(received.length, 1);
   assert.equal(calls.length, 1, 'only the ledger notification should have hit the DB');
-  assert.deepEqual(calls[0].params, [101]);
+  assert.deepEqual(calls[0]?.params, [101, 'mainnet']);
 });
 
 test('a ledger with no transactions yields nothing and does not stall the stream', async () => {
@@ -212,12 +213,12 @@ test('accountActivity filters to operations touching the address', async () => {
 
   await take(stream, 1);
 
-  assert.deepEqual(calls[0].params, [100, 'GWATCHED']);
+  assert.deepEqual(calls[0]?.params, [100, 'GWATCHED', 'mainnet']);
   // Source-account alone would miss the case people care about most: being
   // paid. The counterparty fields live in the details JSONB.
-  assert.match(calls[0].sql, /source_account = \$2/);
-  assert.match(calls[0].sql, /details->>'from'\s*= \$2/);
-  assert.match(calls[0].sql, /details->>'to'\s*= \$2/);
+  assert.match(calls[0]?.sql ?? '', /source_account = \$2/);
+  assert.match(calls[0]?.sql ?? '', /details->>'from'\s*= \$2/);
+  assert.match(calls[0]?.sql ?? '', /details->>'to'\s*= \$2/);
 });
 
 test('accountActivity yields nothing for a ledger that does not touch the address', async () => {
@@ -264,6 +265,20 @@ test('two subscribers to different addresses each get their own query', async ()
     calls.map(c => c.params[1]).sort(),
     ['GALICE', 'GBOB']
   );
+});
+
+test('a notification for another network is dropped before it is read', async () => {
+  const { notifier, push } = fakeNotifier();
+  const { pool, calls } = fakePool(() => [txRow('tx_testnet_only')]);
+
+  const stream = resolvers.newTransaction.subscribe({}, {}, { pool, notifier } as SubscriptionContext);
+  // Ledger 500 on testnet is a different ledger than 500 on the primary
+  // network. Reading rows by sequence alone would return whichever network's
+  // rows are in the table.
+  push({ kind: 'ledger', ledger: 500, network: 'testnet' });
+
+  assert.deepEqual(await take(stream, 0), []);
+  assert.equal(calls.length, 0, 'another network\'s notification must not hit the database');
 });
 
 test('the stream ends when the notifier closes', async () => {

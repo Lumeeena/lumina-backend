@@ -36,7 +36,7 @@ const MEMOS: [string, string][] = [
 async function seed(): Promise<void> {
   await pool.query(
     `INSERT INTO ledgers (sequence, closed_at, transaction_count, operation_count)
-     VALUES ($1, NOW(), $2, $2) ON CONFLICT (sequence) DO NOTHING`,
+     VALUES ($1, NOW(), $2, $2) ON CONFLICT (sequence, network) DO NOTHING`,
     [LEDGER, MEMOS.length]
   );
 
@@ -44,7 +44,7 @@ async function seed(): Promise<void> {
     await pool.query(
       `INSERT INTO transactions (hash, ledger, created_at, source_account, fee_charged, operation_count, successful, memo_type, memo)
        VALUES ($1, $2, NOW(), 'GSOURCE', 100, 1, true, 'text', $3)
-       ON CONFLICT (hash) DO UPDATE SET memo = EXCLUDED.memo`,
+       ON CONFLICT (hash, network) DO UPDATE SET memo = EXCLUDED.memo`,
       [hash, LEDGER, memo]
     );
   }
@@ -62,7 +62,7 @@ async function seed(): Promise<void> {
     await pool.query(
       `INSERT INTO operations (id, type, transaction_hash, ledger, created_at, source_account, details)
        VALUES ($1, 'payment', $2, $3, NOW(), 'GSOURCE', $4)
-       ON CONFLICT (id) DO UPDATE SET details = EXCLUDED.details`,
+       ON CONFLICT (id, network) DO UPDATE SET details = EXCLUDED.details`,
       [id, 'tx_exact', LEDGER, JSON.stringify(details)]
     );
   }
@@ -71,22 +71,22 @@ async function seed(): Promise<void> {
 before(async () => {
   if (skip) return;
   pool = new Pool({ connectionString: DATABASE_URL });
-  await pool.query('DELETE FROM operations WHERE ledger = $1', [LEDGER]);
-  await pool.query('DELETE FROM transactions WHERE ledger = $1', [LEDGER]);
-  await pool.query('DELETE FROM ledgers WHERE sequence = $1', [LEDGER]);
+  await pool.query("DELETE FROM operations WHERE ledger = $1 AND network = 'mainnet'", [LEDGER]);
+  await pool.query("DELETE FROM transactions WHERE ledger = $1 AND network = 'mainnet'", [LEDGER]);
+  await pool.query("DELETE FROM ledgers WHERE sequence = $1 AND network = 'mainnet'", [LEDGER]);
   await seed();
 });
 
 after(async () => {
   if (skip) return;
-  await pool.query('DELETE FROM operations WHERE ledger = $1', [LEDGER]);
-  await pool.query('DELETE FROM transactions WHERE ledger = $1', [LEDGER]);
-  await pool.query('DELETE FROM ledgers WHERE sequence = $1', [LEDGER]);
+  await pool.query("DELETE FROM operations WHERE ledger = $1 AND network = 'mainnet'", [LEDGER]);
+  await pool.query("DELETE FROM transactions WHERE ledger = $1 AND network = 'mainnet'", [LEDGER]);
+  await pool.query("DELETE FROM ledgers WHERE sequence = $1 AND network = 'mainnet'", [LEDGER]);
   await pool.end();
 });
 
 test('an exact memo match ranks first', { skip, timeout: TEST_TIMEOUT_MS }, async () => {
-  const { items } = await searchTransactions(pool, { query: 'ORDER-4471', limit: 10 });
+  const { items } = await searchTransactions(pool, { network: 'mainnet', query: 'ORDER-4471', limit: 10 });
 
   assert.equal(items[0]?.hash, 'tx_exact', 'the exact match should lead');
   // And the near-misses are still found, which is the point of trigram over
@@ -96,7 +96,7 @@ test('an exact memo match ranks first', { skip, timeout: TEST_TIMEOUT_MS }, asyn
 });
 
 test('search is case-insensitive', { skip, timeout: TEST_TIMEOUT_MS }, async () => {
-  const { items } = await searchTransactions(pool, { query: 'order-4471', limit: 10 });
+  const { items } = await searchTransactions(pool, { network: 'mainnet', query: 'order-4471', limit: 10 });
 
   assert.equal(items[0]?.hash, 'tx_exact');
 });
@@ -104,19 +104,19 @@ test('search is case-insensitive', { skip, timeout: TEST_TIMEOUT_MS }, async () 
 test('a typo still finds the transaction', { skip, timeout: TEST_TIMEOUT_MS }, async () => {
   // The reason for trigram: `to_tsvector` would not match a misspelled
   // identifier at all.
-  const { items } = await searchTransactions(pool, { query: 'ORDR-4471', limit: 10 });
+  const { items } = await searchTransactions(pool, { network: 'mainnet', query: 'ORDR-4471', limit: 10 });
 
   assert.ok(items.some(i => i.hash === 'tx_typo'));
 });
 
 test('a partial memo finds the full one', { skip, timeout: TEST_TIMEOUT_MS }, async () => {
-  const { items } = await searchTransactions(pool, { query: 'INVOICE', limit: 10 });
+  const { items } = await searchTransactions(pool, { network: 'mainnet', query: 'INVOICE', limit: 10 });
 
   assert.ok(items.some(i => i.hash === 'tx_other'));
 });
 
 test('unrelated memos are excluded by the similarity floor', { skip, timeout: TEST_TIMEOUT_MS }, async () => {
-  const { items } = await searchTransactions(pool, { query: 'ORDER-4471', limit: 10 });
+  const { items } = await searchTransactions(pool, { network: 'mainnet', query: 'ORDER-4471', limit: 10 });
 
   assert.ok(
     !items.some(i => i.hash === 'tx_unrelated'),
@@ -129,7 +129,7 @@ test('paging never repeats or skips a row', { skip, timeout: TEST_TIMEOUT_MS }, 
   let cursor: string | null = null;
 
   for (let page = 0; page < 10; page++) {
-    const result = await searchTransactions(pool, { query: 'ORDER', limit: 1, cursor });
+    const result = await searchTransactions(pool, { network: 'mainnet', query: 'ORDER', limit: 1, cursor });
     if (result.items.length === 0) break;
     seen.push(...result.items.map(i => i.hash));
     cursor = result.nextCursor;
@@ -144,29 +144,31 @@ test('a page boundary survives a new matching row landing mid-scroll', { skip, t
   // The scenario keyset paging exists for: with OFFSET, inserting a row that
   // sorts earlier shifts every later page by one and duplicates a row across
   // the seam.
-  const first = await searchTransactions(pool, { query: 'ORDER', limit: 1 });
+  const first = await searchTransactions(pool, { network: 'mainnet', query: 'ORDER', limit: 1 });
   assert.equal(first.items.length, 1);
 
   await pool.query(
     `INSERT INTO transactions (hash, ledger, created_at, source_account, fee_charged, operation_count, successful, memo_type, memo)
      VALUES ('tx_inserted', $1, NOW(), 'GSOURCE', 100, 1, true, 'text', 'ORDER-4471')
-     ON CONFLICT (hash) DO NOTHING`,
+     ON CONFLICT (hash, network) DO NOTHING`,
     [LEDGER]
   );
 
   try {
-    const second = await searchTransactions(pool, { query: 'ORDER', limit: 5, cursor: first.nextCursor });
+    const second = await searchTransactions(pool, { network: 'mainnet', query: 'ORDER', limit: 5, cursor: first.nextCursor });
+    const firstRowHash = first.items[0]?.hash;
+    assert.ok(firstRowHash !== undefined, 'the first page should return rows');
     assert.ok(
-      !second.items.some(i => i.hash === first.items[0].hash),
+      !second.items.some(i => i.hash === firstRowHash),
       'the first page’s row must not reappear on the second'
     );
   } finally {
-    await pool.query("DELETE FROM transactions WHERE hash = 'tx_inserted'");
+    await pool.query("DELETE FROM transactions WHERE hash = 'tx_inserted' AND network = 'mainnet'");
   }
 });
 
 test('the cursor carries the rank, not just a row id', { skip, timeout: TEST_TIMEOUT_MS }, async () => {
-  const { nextCursor } = await searchTransactions(pool, { query: 'ORDER-4471', limit: 1 });
+  const { nextCursor } = await searchTransactions(pool, { network: 'mainnet', query: 'ORDER-4471', limit: 1 });
   const decoded = decodeCursor(nextCursor!);
 
   assert.ok(decoded);
@@ -175,7 +177,7 @@ test('the cursor carries the rank, not just a row id', { skip, timeout: TEST_TIM
 });
 
 test('an asset filter finds the asset in all three roles', { skip, timeout: TEST_TIMEOUT_MS }, async () => {
-  const items = await getOperationsByAsset(pool, { asset: `USDC:${ISSUER}`, limit: 20 });
+  const items = await getOperationsByAsset(pool, { network: 'mainnet', asset: `USDC:${ISSUER}`, limit: 20 });
   const ids = items.map(i => i.id);
 
   assert.ok(ids.includes('op_usdc_payment'));
@@ -184,7 +186,7 @@ test('an asset filter finds the asset in all three roles', { skip, timeout: TEST
 });
 
 test('an asset filter excludes the same code from another issuer', { skip, timeout: TEST_TIMEOUT_MS }, async () => {
-  const items = await getOperationsByAsset(pool, { asset: `USDC:${ISSUER}`, limit: 20 });
+  const items = await getOperationsByAsset(pool, { network: 'mainnet', asset: `USDC:${ISSUER}`, limit: 20 });
 
   assert.ok(
     !items.some(i => i.id === 'op_usdc_impostor'),
@@ -193,7 +195,7 @@ test('an asset filter excludes the same code from another issuer', { skip, timeo
 });
 
 test('the native filter finds XLM operations', { skip, timeout: TEST_TIMEOUT_MS }, async () => {
-  const items = await getOperationsByAsset(pool, { asset: 'XLM', limit: 20 });
+  const items = await getOperationsByAsset(pool, { network: 'mainnet', asset: 'XLM', limit: 20 });
   const ids = items.map(i => i.id);
 
   assert.ok(ids.includes('op_native'));

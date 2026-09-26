@@ -37,38 +37,38 @@ function fakePool(handler: (sql: string, params: unknown[]) => unknown[]) {
 // ── Range validation ─────────────────────────────────────────────────────────
 
 test('a missing range defaults to daily buckets', () => {
-  const range = resolveRange({ asset: ASSET });
+  const range = resolveRange({ network: 'mainnet', asset: ASSET });
   assert.equal(range.bucketSeconds, DEFAULT_BUCKET_SECONDS);
   assert.ok(range.start < range.end);
 });
 
 test('an invalid asset is rejected before any query runs', async () => {
   const { pool, calls } = fakePool(() => []);
-  await assert.rejects(() => getAssetDetail(pool, { asset: 'USDC', from: FROM, to: TO }));
+  await assert.rejects(() => getAssetDetail(pool, { network: 'mainnet', asset: 'USDC', from: FROM, to: TO }));
   assert.equal(calls.length, 0);
 });
 
 test('an unparseable timestamp is rejected', () => {
-  assert.throws(() => resolveRange({ asset: ASSET, from: 'not-a-date', to: TO }), AssetError);
+  assert.throws(() => resolveRange({ network: 'mainnet', asset: ASSET, from: 'not-a-date', to: TO }), AssetError);
 });
 
 test('a range running backwards is rejected', () => {
-  assert.throws(() => resolveRange({ asset: ASSET, from: TO, to: FROM }), AssetError);
+  assert.throws(() => resolveRange({ network: 'mainnet', asset: ASSET, from: TO, to: FROM }), AssetError);
 });
 
 test('a sub-minute bucket is rejected', () => {
-  assert.throws(() => resolveRange({ asset: ASSET, from: FROM, to: TO, bucketSeconds: 30 }), AssetError);
-  assert.throws(() => resolveRange({ asset: ASSET, from: FROM, to: TO, bucketSeconds: 1.5 }), AssetError);
+  assert.throws(() => resolveRange({ network: 'mainnet', asset: ASSET, from: FROM, to: TO, bucketSeconds: 30 }), AssetError);
+  assert.throws(() => resolveRange({ network: 'mainnet', asset: ASSET, from: FROM, to: TO, bucketSeconds: 1.5 }), AssetError);
 });
 
 test('a range needing more buckets than the cap is rejected', () => {
   // Two days at 60s buckets = 2880 buckets, above the cap.
   assert.throws(
-    () => resolveRange({ asset: ASSET, from: FROM, to: TO, bucketSeconds: 60 }),
+    () => resolveRange({ network: 'mainnet', asset: ASSET, from: FROM, to: TO, bucketSeconds: 60 }),
     /above the limit/
   );
   // Same range at daily buckets fits.
-  assert.doesNotThrow(() => resolveRange({ asset: ASSET, from: FROM, to: TO, bucketSeconds: 86400 }));
+  assert.doesNotThrow(() => resolveRange({ network: 'mainnet', asset: ASSET, from: FROM, to: TO, bucketSeconds: 86400 }));
   assert.ok(MAX_BUCKETS >= 1000);
 });
 
@@ -76,33 +76,34 @@ test('a range needing more buckets than the cap is rejected', () => {
 
 test('an issued-asset supply query matches code and issuer together', async () => {
   const { pool, calls } = fakePool(() => [{ holders: 2, supply: '250.5' }]);
-  const result = await getAssetSupply(pool, parseAsset(ASSET));
+  const result = await getAssetSupply(pool, 'mainnet', parseAsset(ASSET));
 
   assert.match(calls[0]?.sql ?? '', /jsonb_array_elements\(balances\)/);
-  assert.match(calls[0]?.sql ?? '', /b->>'asset_code' = \$1 AND b->>'asset_issuer' = \$2/);
-  assert.deepEqual(calls[0]?.params, ['USDC', ISSUER]);
+  assert.match(calls[0]?.sql ?? '', /network = \$1/);
+  assert.match(calls[0]?.sql ?? '', /b->>'asset_code' = \$2 AND b->>'asset_issuer' = \$3/);
+  assert.deepEqual(calls[0]?.params, ['mainnet', 'USDC', ISSUER]);
   assert.deepEqual(result, { supply: '250.5', holders: 2 });
 });
 
 test('a native supply query matches on asset_type', async () => {
   const { pool, calls } = fakePool(() => [{ holders: 1, supply: '1000' }]);
-  const result = await getAssetSupply(pool, parseAsset('XLM'));
+  const result = await getAssetSupply(pool, 'mainnet', parseAsset('XLM'));
 
-  assert.match(calls[0]?.sql ?? '', /b->>'asset_type' = \$1/);
-  assert.deepEqual(calls[0]?.params, ['native']);
+  assert.match(calls[0]?.sql ?? '', /b->>'asset_type' = \$2/);
+  assert.deepEqual(calls[0]?.params, ['mainnet', 'native']);
   assert.equal(result.supply, '1000');
 });
 
 test('zero-balance trustlines do not count as holders', async () => {
   const { pool, calls } = fakePool(() => []);
-  await getAssetSupply(pool, parseAsset(ASSET));
+  await getAssetSupply(pool, 'mainnet', parseAsset(ASSET));
 
   assert.match(calls[0]?.sql ?? '', /\(b->>'balance'\)::numeric > 0/);
 });
 
 test('an asset nobody holds reports zero supply, not null', async () => {
   const { pool } = fakePool(() => []);
-  const result = await getAssetSupply(pool, parseAsset(ASSET));
+  const result = await getAssetSupply(pool, 'mainnet', parseAsset(ASSET));
 
   assert.deepEqual(result, { supply: '0', holders: 0 });
 });
@@ -118,14 +119,16 @@ test('balanceConditions binds code and issuer as parameters, never interpolated'
 
 test('the series reuses the operations asset predicate', async () => {
   const { pool, calls } = fakePool(() => []);
-  await getAssetVolumeSeries(pool, parseAsset(ASSET), {
+  await getAssetVolumeSeries(pool, 'mainnet', parseAsset(ASSET), {
     start: new Date(FROM),
     end: new Date(TO),
     bucketSeconds: 86400,
   });
 
   // Same three-role predicate the operations(asset:) filter uses, so the
-  // series always agrees with the operation list.
+  // series always agrees with the operation list — and it counts one network's
+  // operations, not every chain's.
+  assert.match(calls[0]?.sql ?? '', /operations.network = \$4/);
   assert.match(calls[0]?.sql ?? '', /details->>'asset_code'/);
   assert.match(calls[0]?.sql ?? '', /details->>'selling_asset_code'/);
   assert.match(calls[0]?.sql ?? '', /details->>'buying_asset_code'/);
@@ -146,7 +149,7 @@ test('the series zero-fills empty buckets in ascending order', async () => {
       operation_count: 0,
     },
   ]);
-  const series = await getAssetVolumeSeries(pool, parseAsset(ASSET), {
+  const series = await getAssetVolumeSeries(pool, 'mainnet', parseAsset(ASSET), {
     start: new Date(FROM),
     end: new Date(TO),
     bucketSeconds: 86400,
@@ -170,7 +173,7 @@ test('the series zero-fills empty buckets in ascending order', async () => {
 
 test('the bucket width reaches SQL only as a number, never interpolated', async () => {
   const { pool, calls } = fakePool(() => []);
-  await getAssetVolumeSeries(pool, parseAsset(ASSET), {
+  await getAssetVolumeSeries(pool, 'mainnet', parseAsset(ASSET), {
     start: new Date(FROM),
     end: new Date(TO),
     bucketSeconds: 3600,
@@ -196,7 +199,7 @@ test('one detail call returns supply, holders and the series', async () => {
     ];
   });
 
-  const detail = await getAssetDetail(pool, { asset: ASSET, from: FROM, to: TO, bucketSeconds: 86400 });
+  const detail = await getAssetDetail(pool, { network: 'mainnet', asset: ASSET, from: FROM, to: TO, bucketSeconds: 86400 });
 
   assert.equal(calls.length, 2);
   assert.equal(detail.asset, ASSET);
@@ -215,7 +218,7 @@ test('a native detail normalizes the asset display string', async () => {
     return [];
   });
 
-  const detail = await getAssetDetail(pool, { asset: 'xlm', from: FROM, to: TO });
+  const detail = await getAssetDetail(pool, { network: 'mainnet', asset: 'xlm', from: FROM, to: TO });
   assert.equal(detail.asset, 'XLM');
   assert.equal(detail.native, true);
   assert.equal(detail.code, null);

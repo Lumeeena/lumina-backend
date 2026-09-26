@@ -27,6 +27,7 @@ function fakePool(rows: unknown[]): { pool: Pool; queries: { sql: string; params
 
 test('mapLedger converts BIGINT strings and Date to GraphQL shape', () => {
   const result = mapLedger({
+    network: 'mainnet',
     sequence: '52481234',
     closed_at: new Date('2026-05-06T10:22:14Z'),
     transaction_count: 5,
@@ -35,6 +36,7 @@ test('mapLedger converts BIGINT strings and Date to GraphQL shape', () => {
     base_reserve: '5000000',
   });
   assert.deepEqual(result, {
+    network: 'mainnet',
     sequence: 52481234,
     closedAt: '2026-05-06T10:22:14.000Z',
     transactionCount: 5,
@@ -44,21 +46,23 @@ test('mapLedger converts BIGINT strings and Date to GraphQL shape', () => {
   });
 });
 
-test('PostgreSQL TIMESTAMPTZ round-trips an offset instant as UTC', { skip: !process.env.TEST_DATABASE_URL }, async () => {
-  const pool = new PgPool({ connectionString: process.env.TEST_DATABASE_URL });
+test('PostgreSQL TIMESTAMPTZ round-trips an offset instant as UTC', { skip: !process.env['TEST_DATABASE_URL'] }, async () => {
+  const pool = new PgPool({ connectionString: process.env['TEST_DATABASE_URL'] });
   const client = await pool.connect();
   try {
     await client.query("SET TIME ZONE 'America/Los_Angeles'");
     const { rows } = await client.query<{ value: Date }>(
       'SELECT $1::timestamptz AS value', ['2026-06-14T09:30:00.123+05:30']
     );
-    assert.ok(rows[0].value instanceof Date);
-    assert.equal(rows[0].value.toISOString(), '2026-06-14T04:00:00.123Z');
+    const value = rows[0]?.value;
+    assert.ok(value instanceof Date);
+    assert.equal(value.toISOString(), '2026-06-14T04:00:00.123Z');
   } finally { client.release(); await pool.end(); }
 });
 
 test('mapTransaction keeps feeCharged as a string (no precision loss)', () => {
   const result = mapTransaction({
+    network: 'mainnet',
     hash: 'abc',
     ledger: '100',
     created_at: new Date('2026-01-01T00:00:00Z'),
@@ -75,6 +79,7 @@ test('mapTransaction keeps feeCharged as a string (no precision loss)', () => {
 
 test('mapOperation collapses asset_type/code/issuer into a single asset string', () => {
   const payment = mapOperation({
+    network: 'mainnet',
     id: 'op1',
     type: 'payment',
     transaction_hash: 'tx1',
@@ -88,6 +93,7 @@ test('mapOperation collapses asset_type/code/issuer into a single asset string',
   assert.equal(payment.from, 'GABC');
 
   const trustline = mapOperation({
+    network: 'testnet',
     id: 'op2',
     type: 'change_trust',
     transaction_hash: 'tx2',
@@ -102,6 +108,7 @@ test('mapOperation collapses asset_type/code/issuer into a single asset string',
 
 test('mapAccount converts snake_case balances/flags/thresholds to GraphQL shape', () => {
   const result = mapAccount({
+    network: 'mainnet',
     address: 'GABC',
     sequence: '1',
     subentry_count: 2,
@@ -123,6 +130,7 @@ test('mapAccount converts snake_case balances/flags/thresholds to GraphQL shape'
 
 test('mapEvent JSON-encodes the value column for the String scalar', () => {
   const result = mapEvent({
+    network: 'mainnet',
     id: 'evt1',
     type: 'contract',
     contract_id: 'CABC',
@@ -139,34 +147,38 @@ test('getTransactions maps rows and passes limit/cursor params', async () => {
   const { pool, queries } = fakePool([
     { hash: 'a', ledger: '1', created_at: new Date(), source_account: 'G', fee_charged: '100', operation_count: 1, successful: true, memo_type: null, memo: null },
   ]);
-  const items = await getTransactions(pool, 20, 'cursor-hash');
+  const items = await getTransactions(pool, 'mainnet', 20, 'cursor-hash');
   assert.equal(items.length, 1);
-  assert.equal(items[0].hash, 'a');
-  assert.deepEqual(queries[0].params, [20, 'cursor-hash']);
+  assert.equal(items[0]?.hash, 'a');
+  // The network is bound first and repeated in the cursor subquery: the same
+  // hash exists on every network, so the keyset has to know which one.
+  assert.deepEqual(queries[0]?.params, ['mainnet', 20, 'cursor-hash']);
 });
 
 test('getOperations builds WHERE clause only for provided filters', async () => {
   const { pool, queries } = fakePool([]);
-  await getOperations(pool, { account: 'GABC', limit: 10 });
-  assert.match(queries[0].sql, /WHERE source_account = \$1/);
-  assert.deepEqual(queries[0].params, ['GABC', 10]);
+  await getOperations(pool, { network: 'mainnet', account: 'GABC', limit: 10 });
+  assert.match(queries[0]?.sql ?? '', /WHERE network = \$1 AND source_account = \$2/);
+  assert.deepEqual(queries[0]?.params, ['mainnet', 'GABC', 10]);
 });
 
-test('getOperations omits WHERE entirely with no filters', async () => {
+test('getOperations is scoped to one network even with no filters', async () => {
   const { pool, queries } = fakePool([]);
-  await getOperations(pool, { limit: 10 });
-  assert.doesNotMatch(queries[0].sql, /WHERE/);
+  await getOperations(pool, { network: 'testnet', limit: 10 });
+  assert.match(queries[0]?.sql ?? '', /WHERE network = \$1/);
+  assert.deepEqual(queries[0]?.params, ['testnet', 10]);
 });
 
 test('getAccountFromDb returns null when no row is found', async () => {
   const { pool } = fakePool([]);
-  assert.equal(await getAccountFromDb(pool, 'GABC'), null);
+  assert.equal(await getAccountFromDb(pool, 'mainnet', 'GABC'), null);
 });
 
 test('getEventsByContract filters by contract_id and optional topic', async () => {
   const { pool, queries } = fakePool([]);
-  await getEventsByContract(pool, { contractId: 'CABC', topic: 'swap', limit: 5 });
-  assert.match(queries[0].sql, /contract_id = \$1/);
-  assert.match(queries[0].sql, /\$2 = ANY\(topics\)/);
-  assert.deepEqual(queries[0].params, ['CABC', 'swap', 5]);
+  await getEventsByContract(pool, { network: 'mainnet', contractId: 'CABC', topic: 'swap', limit: 5 });
+  assert.match(queries[0]?.sql ?? '', /contract_id = \$1/);
+  assert.match(queries[0]?.sql ?? '', /network = \$2/);
+  assert.match(queries[0]?.sql ?? '', /\$3 = ANY\(topics\)/);
+  assert.deepEqual(queries[0]?.params, ['CABC', 'mainnet', 'swap', 5]);
 });

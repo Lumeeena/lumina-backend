@@ -1,7 +1,12 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import type { Pool } from 'pg';
-import { buildHealthReport, healthStatusCode, type IndexerState } from './health';
+import {
+  aggregateNetworkStates,
+  buildHealthReport,
+  healthStatusCode,
+  type IndexerState,
+} from './health';
 
 const THRESHOLDS = { maxSecondsSinceIndex: 60, maxLagLedgers: 20, startToleranceSeconds: 300 };
 const NOW = 1_700_000_000_000;
@@ -135,4 +140,68 @@ test('thresholds are honoured as configured', async () => {
   );
 
   assert.equal(report.status, 'ok');
+});
+
+// ─── Multiple networks ─────────────────────────────────────────────────────
+
+test('the flat numbers describe the network that is worst off', async () => {
+  // Averaging two chains — or reporting whichever loop wrote last — hides the
+  // one that is stuck behind a healthy one.
+  const aggregated = aggregateNetworkStates(NOW, [
+    { network: 'mainnet', latestIndexedLedger: 5000, latestHorizonLedger: 5000, lastIndexedAt: NOW - 2_000 },
+    { network: 'testnet', latestIndexedLedger: 100, latestHorizonLedger: 400, lastIndexedAt: NOW - 30_000 },
+  ]);
+
+  assert.equal(aggregated.latestIndexedLedger, 100);
+  assert.equal(aggregated.latestHorizonLedger, 400);
+  assert.equal(aggregated.lastIndexedAt, NOW - 30_000);
+
+  const report = await buildHealthReport(aggregated, okPool, THRESHOLDS, NOW);
+  assert.equal(report.status, 'degraded');
+  assert.equal(report.lagLedgers, 300);
+  assert.deepEqual(report.networks, [
+    {
+      network: 'mainnet',
+      latestIndexedLedger: 5000,
+      latestHorizonLedger: 5000,
+      lagLedgers: 0,
+      secondsSinceLastIndex: 2,
+    },
+    {
+      network: 'testnet',
+      latestIndexedLedger: 100,
+      latestHorizonLedger: 400,
+      lagLedgers: 300,
+      secondsSinceLastIndex: 30,
+    },
+  ]);
+});
+
+test('a network that has never indexed is never averaged away', () => {
+  const aggregated = aggregateNetworkStates(NOW, [
+    { network: 'mainnet', latestIndexedLedger: 5000, latestHorizonLedger: 5000, lastIndexedAt: NOW - 1_000 },
+    { network: 'futurenet', latestIndexedLedger: 0, latestHorizonLedger: 0, lastIndexedAt: null },
+  ]);
+
+  // The healthy chain must not paper over one that has produced nothing.
+  assert.equal(aggregated.lastIndexedAt, null);
+  assert.equal(aggregated.latestIndexedLedger, 0);
+  assert.deepEqual(
+    aggregated.networks?.map(entry => entry.network),
+    ['mainnet', 'futurenet']
+  );
+});
+
+test('a single-network deployment reports no per-network breakdown', async () => {
+  const report = await buildHealthReport(state(), okPool, THRESHOLDS, NOW);
+
+  assert.equal(report.networks, undefined);
+});
+
+test('aggregating no networks at all is an idle report, not a crash', () => {
+  const aggregated = aggregateNetworkStates(NOW, []);
+
+  assert.equal(aggregated.lastIndexedAt, null);
+  assert.equal(aggregated.latestIndexedLedger, 0);
+  assert.equal(aggregated.startedAt, NOW);
 });

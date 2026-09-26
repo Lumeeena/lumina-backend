@@ -52,6 +52,8 @@ export const MIN_BUCKET_SECONDS = 60;
 export const MAX_BUCKETS = 1000;
 
 export interface AssetDetailQuery {
+  /** Network whose holders and volume to count. */
+  network: string;
   asset: string;
   from?: string | null;
   to?: string | null;
@@ -155,13 +157,14 @@ export function balanceConditions(asset: ParsedAsset, params: unknown[]): string
 
 export async function getAssetSupply(
   pool: Pool,
+  network: string,
   asset: ParsedAsset
 ): Promise<{ supply: string; holders: number }> {
-  const params: unknown[] = [];
+  const params: unknown[] = [network];
   const { rows } = await pool.query<SupplyRow>(
     `SELECT COUNT(*)::int AS holders, COALESCE(SUM((b->>'balance')::numeric), 0)::text AS supply
        FROM accounts, LATERAL jsonb_array_elements(balances) AS b
-      WHERE ${balanceConditions(asset, params)}`,
+      WHERE network = $1 AND ${balanceConditions(asset, params)}`,
     params
   );
   const row = rows[0];
@@ -173,10 +176,11 @@ export async function getAssetSupply(
 
 export async function getAssetVolumeSeries(
   pool: Pool,
+  network: string,
   asset: ParsedAsset,
   range: ResolvedRange
 ): Promise<VolumeBucket[]> {
-  const params: unknown[] = [range.start.toISOString(), range.end.toISOString(), range.bucketSeconds];
+  const params: unknown[] = [range.start.toISOString(), range.end.toISOString(), range.bucketSeconds, network];
   const assetClause = assetConditions(asset, params);
 
   const { rows } = await pool.query<SeriesRow>(
@@ -197,6 +201,7 @@ export async function getAssetVolumeSeries(
         AND operations.created_at < buckets.bucket_start + $3 * INTERVAL '1 second'
         AND operations.created_at >= $1::timestamptz
         AND operations.created_at <= $2::timestamptz
+        AND operations.network = $4
         AND ${assetClause}
       GROUP BY buckets.bucket_start
       ORDER BY buckets.bucket_start ASC`,
@@ -224,8 +229,8 @@ export async function getAssetDetail(pool: Pool, query: AssetDetailQuery): Promi
   const range = resolveRange(query);
 
   const [{ supply, holders }, series] = await Promise.all([
-    getAssetSupply(pool, parsed),
-    getAssetVolumeSeries(pool, parsed, range),
+    getAssetSupply(pool, query.network, parsed),
+    getAssetVolumeSeries(pool, query.network, parsed, range),
   ]);
 
   return {

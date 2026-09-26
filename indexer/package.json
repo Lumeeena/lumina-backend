@@ -9,7 +9,7 @@
     "start": "node dist/index.js",
     "lint": "eslint src --ext .ts",
     "lint:fix": "eslint src --ext .ts --fix",
-    "test": "node --require ts-node/register --test src/horizon.test.ts src/db.test.ts src/soroban.test.ts src/notify.test.ts src/customSchema.test.ts src/customDecode.test.ts src/health.test.ts src/metrics.test.ts src/indexLoop.test.ts src/circuitBreaker.test.ts src/config.test.ts src/registryPolling.test.ts",
+    "test": "node --require ts-node/register --test src/horizon.test.ts src/db.test.ts src/soroban.test.ts src/notify.test.ts src/customSchema.test.ts src/customDecode.test.ts src/health.test.ts src/metrics.test.ts src/indexLoop.test.ts src/networks.test.ts",
     "test:integration": "node --require ts-node/register --test src/customSchema.integration.test.ts",
     "register-schema": "node --require ts-node/register src/registerSchema.ts"
   },

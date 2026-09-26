@@ -10,6 +10,7 @@ interface QueryCall {
 
 function txRow(n: number) {
   return {
+    network: 'mainnet',
     hash: `tx_${n}`,
     ledger: String(100 + (n % 4)),
     created_at: new Date('2026-01-01T00:00:00Z'),
@@ -24,6 +25,7 @@ function txRow(n: number) {
 
 function ledgerRow(sequence: number) {
   return {
+    network: 'mainnet',
     sequence: String(sequence),
     closed_at: new Date('2026-01-01T00:00:00Z'),
     transaction_count: 1,
@@ -35,6 +37,7 @@ function ledgerRow(sequence: number) {
 
 function accountRow(address: string) {
   return {
+    network: 'mainnet',
     address,
     sequence: '1',
     subentry_count: 0,
@@ -49,6 +52,7 @@ function accountRow(address: string) {
 
 function opRow(hash: string, n: number) {
   return {
+    network: 'mainnet',
     id: `${hash}_op_${n}`,
     type: 'payment',
     transaction_hash: hash,
@@ -65,7 +69,7 @@ function countingPool() {
   const pool = {
     query: async (sql: string, params: unknown[] = []) => {
       calls.push({ sql, params });
-      if (/FROM transactions\s+WHERE \$2::text IS NULL/.test(sql)) return { rows: txs };
+      if (/FROM transactions\s+WHERE network = \$1/.test(sql)) return { rows: txs };
       if (/FROM accounts WHERE address = ANY/.test(sql)) return { rows: (params[0] as string[]).map(accountRow) };
       if (/FROM ledgers WHERE sequence = ANY/.test(sql)) return { rows: (params[0] as number[]).map(ledgerRow) };
       if (/FROM operations WHERE transaction_hash = ANY/.test(sql)) {
@@ -85,8 +89,8 @@ test('a page of 20 transactions with accounts uses a constant number of queries'
   await Promise.all(page.items.map(tx => resolvers.Transaction.account(tx, {}, context)));
 
   assert.equal(calls.length, 2);
-  assert.match(calls[0].sql, /FROM transactions/);
-  assert.match(calls[1].sql, /FROM accounts WHERE address = ANY/);
+  assert.match(calls[0]?.sql ?? '', /FROM transactions/);
+  assert.match(calls[1]?.sql ?? '', /FROM accounts WHERE address = ANY/);
 });
 
 test('representative nested transaction fields stay batched', async () => {

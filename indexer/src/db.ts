@@ -9,18 +9,35 @@ const log = subsystem('db');
 import { parseContractSchema, type ContractSchema } from './customSchema';
 import type { DecodedCustomEvent } from './customDecode';
 
+/**
+ * Pool factory with the idle-client error handled.
+ *
+ * Postgres emits `error` on the pool when a client dies while idle. With no
+ * listener that is an unhandled `'error'` event — the process dies — so the
+ * handler logs it and counts it; the pool replaces the client itself.
+ */
 export function createPool(databaseUrl: string, options?: PoolConfig): Pool {
   const pool = new Pool({ connectionString: databaseUrl, ...options });
   pool.on('error', err => {
     indexerPoolErrors.inc();
-    log.error({ err: err instanceof Error ? err.message : err }, 'idle database client error');
+    log.error({ err: err.message }, 'unexpected PostgreSQL pool client error; pool will replace the client');
   });
   return pool;
 }
 
-export async function getLatestIndexedLedger(pool: Pool): Promise<number> {
-  const { rows } = await pool.query<{ max: string | null }>('SELECT MAX(sequence) AS max FROM ledgers');
-  return rows[0].max ? Number(rows[0].max) : 0;
+/**
+ * Highest ledger indexed for one network.
+ *
+ * Every read here is scoped by `network`: the tables are keyed by
+ * (sequence, network), so `MAX(sequence)` unfiltered would happily return the
+ * other chain's tip and make a fresh network look like it had nothing to do.
+ */
+export async function getLatestIndexedLedger(pool: Pool, network: string): Promise<number> {
+  const { rows } = await pool.query<{ max: string | null }>(
+    'SELECT MAX(sequence) AS max FROM ledgers WHERE network = $1',
+    [network]
+  );
+  return rows[0]?.max ? Number(rows[0].max) : 0;
 }
 
 /**
@@ -41,6 +58,7 @@ export async function ensurePartitions(pool: Pool, partitionsAhead = 5): Promise
  */
 export async function indexLedger(
   pool: Pool,
+  network: string,
   ledger: HorizonLedger,
   transactions: HorizonTransaction[],
   operations: HorizonOperation[],
@@ -51,9 +69,9 @@ export async function indexLedger(
     await client.query('BEGIN');
 
     await client.query(
-      `INSERT INTO ledgers (sequence, closed_at, transaction_count, operation_count, base_fee, base_reserve)
-       VALUES ($1, $2, $3, $4, $5, $6)
-       ON CONFLICT (sequence) DO NOTHING`,
+      `INSERT INTO ledgers (sequence, closed_at, transaction_count, operation_count, base_fee, base_reserve, network)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)
+       ON CONFLICT (sequence, network) DO NOTHING`,
       [
         ledger.sequence,
         ledger.closed_at,
@@ -61,14 +79,15 @@ export async function indexLedger(
         ledger.operation_count,
         ledger.base_fee_in_stroops,
         ledger.base_reserve_in_stroops,
+        network,
       ]
     );
 
     for (const tx of transactions) {
       await client.query(
-        `INSERT INTO transactions (hash, ledger, created_at, source_account, fee_charged, operation_count, successful, memo_type, memo)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-         ON CONFLICT (hash) DO NOTHING`,
+        `INSERT INTO transactions (hash, ledger, created_at, source_account, fee_charged, operation_count, successful, memo_type, memo, network)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+         ON CONFLICT (hash, network) DO NOTHING`,
         [
           tx.hash,
           tx.ledger,
@@ -79,6 +98,7 @@ export async function indexLedger(
           tx.successful,
           tx.memo_type,
           tx.memo ?? null,
+          network,
         ]
       );
     }
@@ -90,15 +110,15 @@ export async function indexLedger(
       // include the partition key. This isn't a behavior change — a given
       // operation id is only ever written with one ledger value.
       await client.query(
-        `INSERT INTO operations (id, type, transaction_hash, ledger, created_at, source_account, details)
-         VALUES ($1, $2, $3, $4, $5, $6, $7)
-         ON CONFLICT (id, ledger) DO NOTHING`,
-        [op.id, op.type, op.transaction_hash, ledger.sequence, op.created_at, op.source_account, JSON.stringify(op)]
+        `INSERT INTO operations (id, type, transaction_hash, ledger, created_at, source_account, details, network)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+         ON CONFLICT (id, network) DO NOTHING`,
+        [op.id, op.type, op.transaction_hash, ledger.sequence, op.created_at, op.source_account, JSON.stringify(op), network]
       );
     }
 
     for (const account of accounts) {
-      await upsertAccount(client, account);
+      await upsertAccount(client, network, account);
     }
 
     // Queued inside the transaction on purpose: Postgres delivers notifications
@@ -106,6 +126,7 @@ export async function indexLedger(
     // ever told about rows that did not land.
     await notifyIndexed(client, {
       kind: 'ledger',
+      network,
       ledger: ledger.sequence,
       transactions: transactions.length,
       operations: operations.length,
@@ -120,11 +141,22 @@ export async function indexLedger(
   }
 }
 
-export async function upsertAccount(client: PoolClient, account: HorizonAccount): Promise<void> {
+/**
+ * Upsert one account's current state.
+ *
+ * Scoped by `network` on both sides of the conflict: the same address exists
+ * on every chain it has ever funded, and overwriting mainnet's balances with
+ * testnet's is not a bug anyone would notice from the data alone.
+ */
+export async function upsertAccount(
+  client: PoolClient,
+  network: string,
+  account: HorizonAccount
+): Promise<void> {
   await client.query(
-    `INSERT INTO accounts (address, sequence, subentry_count, last_modified_ledger, num_sponsored, num_sponsoring, balances, flags, thresholds, updated_at)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW())
-     ON CONFLICT (address) DO UPDATE SET
+    `INSERT INTO accounts (address, sequence, subentry_count, last_modified_ledger, num_sponsored, num_sponsoring, balances, flags, thresholds, updated_at, network)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW(), $10)
+     ON CONFLICT (address, network) DO UPDATE SET
        sequence = EXCLUDED.sequence,
        subentry_count = EXCLUDED.subentry_count,
        last_modified_ledger = EXCLUDED.last_modified_ledger,
@@ -144,11 +176,16 @@ export async function upsertAccount(client: PoolClient, account: HorizonAccount)
       JSON.stringify(account.balances),
       JSON.stringify(account.flags),
       JSON.stringify(account.thresholds),
+      network,
     ]
   );
 }
 
-export async function insertContractEvents(pool: Pool, events: ContractEvent[]): Promise<void> {
+export async function insertContractEvents(
+  pool: Pool,
+  network: string,
+  events: ContractEvent[]
+): Promise<void> {
   if (events.length === 0) return;
 
   // Events arrive from Soroban RPC on their own cadence, keyed by the ledger
@@ -158,9 +195,9 @@ export async function insertContractEvents(pool: Pool, events: ContractEvent[]):
 
   for (const event of events) {
     await pool.query(
-      `INSERT INTO contract_events (id, type, contract_id, ledger, created_at, paging_token, topics, value)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-       ON CONFLICT (id) DO NOTHING`,
+      `INSERT INTO contract_events (id, type, contract_id, ledger, created_at, paging_token, topics, value, network)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+       ON CONFLICT (id, network) DO NOTHING`,
       [
         event.id,
         event.type,
@@ -170,6 +207,7 @@ export async function insertContractEvents(pool: Pool, events: ContractEvent[]):
         event.pagingToken,
         event.topics,
         event.value === undefined ? null : JSON.stringify(event.value),
+        network,
       ]
     );
     if (event.ledger > highestLedger) highestLedger = event.ledger;
@@ -177,14 +215,18 @@ export async function insertContractEvents(pool: Pool, events: ContractEvent[]):
 
   await notifyIndexed(pool, {
     kind: 'events',
+    network,
     ledger: highestLedger,
     events: events.length,
   });
 }
 
-export async function getLatestIndexedEventLedger(pool: Pool): Promise<number> {
-  const { rows } = await pool.query<{ max: string | null }>('SELECT MAX(ledger) AS max FROM contract_events');
-  return rows[0].max ? Number(rows[0].max) : 0;
+export async function getLatestIndexedEventLedger(pool: Pool, network: string): Promise<number> {
+  const { rows } = await pool.query<{ max: string | null }>(
+    'SELECT MAX(ledger) AS max FROM contract_events WHERE network = $1',
+    [network]
+  );
+  return rows[0]?.max ? Number(rows[0].max) : 0;
 }
 
 // ─── Custom per-contract event schemas ─────────────────────────────────────
@@ -197,9 +239,13 @@ export async function getLatestIndexedEventLedger(pool: Pool): Promise<number> {
  * registration is a CLI operation against the database, not a signal the
  * indexer can receive.
  */
-export async function loadContractSchemas(pool: Pool): Promise<Map<string, ContractSchema>> {
+export async function loadContractSchemas(
+  pool: Pool,
+  network: string
+): Promise<Map<string, ContractSchema>> {
   const { rows } = await pool.query<{ contract_id: string; definition: unknown }>(
-    'SELECT contract_id, definition FROM contract_schemas'
+    'SELECT contract_id, definition FROM contract_schemas WHERE network = $1',
+    [network]
   );
 
   const schemas = new Map<string, ContractSchema>();
@@ -219,20 +265,31 @@ export async function loadContractSchemas(pool: Pool): Promise<Map<string, Contr
 }
 
 /** Register or replace a contract's schema. Validated before it is stored. */
-export async function upsertContractSchema(pool: Pool, schema: ContractSchema): Promise<void> {
+export async function upsertContractSchema(
+  pool: Pool,
+  network: string,
+  schema: ContractSchema
+): Promise<void> {
   await pool.query(
-    `INSERT INTO contract_schemas (contract_id, version, definition, updated_at)
-     VALUES ($1, $2, $3, NOW())
-     ON CONFLICT (contract_id) DO UPDATE SET
+    `INSERT INTO contract_schemas (contract_id, version, definition, updated_at, network)
+     VALUES ($1, $2, $3, NOW(), $4)
+     ON CONFLICT (contract_id, network) DO UPDATE SET
        version = EXCLUDED.version,
        definition = EXCLUDED.definition,
        updated_at = NOW()`,
-    [schema.contractId, schema.version, JSON.stringify(schema)]
+    [schema.contractId, schema.version, JSON.stringify(schema), network]
   );
 }
 
-export async function deleteContractSchema(pool: Pool, contractId: string): Promise<void> {
-  await pool.query('DELETE FROM contract_schemas WHERE contract_id = $1', [contractId]);
+export async function deleteContractSchema(
+  pool: Pool,
+  network: string,
+  contractId: string
+): Promise<void> {
+  await pool.query('DELETE FROM contract_schemas WHERE contract_id = $1 AND network = $2', [
+    contractId,
+    network,
+  ]);
 }
 
 /**
@@ -242,15 +299,19 @@ export async function deleteContractSchema(pool: Pool, contractId: string): Prom
  * insert: re-indexing the same event after a schema revision should produce the
  * new decoding, and the old row would otherwise survive forever.
  */
-export async function insertCustomEvents(pool: Pool, events: DecodedCustomEvent[]): Promise<void> {
+export async function insertCustomEvents(
+  pool: Pool,
+  network: string,
+  events: DecodedCustomEvent[]
+): Promise<void> {
   if (events.length === 0) return;
 
   for (const event of events) {
     await pool.query(
       `INSERT INTO custom_events
-         (event_id, contract_id, event_name, ledger, created_at, schema_version, fields)
-       VALUES ($1, $2, $3, $4, $5, $6, $7)
-       ON CONFLICT (event_id, event_name) DO UPDATE SET
+         (event_id, contract_id, event_name, ledger, created_at, schema_version, fields, network)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+       ON CONFLICT (event_id, event_name, network) DO UPDATE SET
          schema_version = EXCLUDED.schema_version,
          fields = EXCLUDED.fields,
          indexed_at = NOW()`,
@@ -264,6 +325,7 @@ export async function insertCustomEvents(pool: Pool, events: DecodedCustomEvent[
         // The whole point of the JSONB payload: field names travel as data,
         // never as SQL identifiers.
         JSON.stringify(event.fields),
+        network,
       ]
     );
   }

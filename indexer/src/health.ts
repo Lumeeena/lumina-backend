@@ -38,10 +38,19 @@ export interface HealthThresholds {
 }
 
 export const DEFAULT_THRESHOLDS: HealthThresholds = {
-  maxSecondsSinceIndex: Number(process.env.HEALTH_MAX_SECONDS_SINCE_INDEX ?? 60),
-  maxLagLedgers: Number(process.env.HEALTH_MAX_LAG_LEDGERS ?? 20),
-  startToleranceSeconds: Number(process.env.HEALTH_START_TOLERANCE_SECONDS ?? 300),
+  maxSecondsSinceIndex: Number(process.env['HEALTH_MAX_SECONDS_SINCE_INDEX'] ?? 60),
+  maxLagLedgers: Number(process.env['HEALTH_MAX_LAG_LEDGERS'] ?? 20),
+  startToleranceSeconds: Number(process.env['HEALTH_START_TOLERANCE_SECONDS'] ?? 300),
 };
+
+/** One network's position, as a loop maintains it. */
+export interface NetworkState {
+  network: string;
+  latestIndexedLedger: number;
+  latestHorizonLedger: number;
+  /** Unix ms of the last successful index on this network, or null if none yet. */
+  lastIndexedAt: number | null;
+}
 
 export interface IndexerState {
   latestIndexedLedger: number;
@@ -49,6 +58,23 @@ export interface IndexerState {
   /** Unix ms of the last successful index, or null if none yet. */
   lastIndexedAt: number | null;
   startedAt: number;
+  /**
+   * Per-network detail when this process indexes more than one chain.
+   *
+   * The flat fields above describe the network that is worst off — see
+   * `aggregateNetworkStates` — so a single stuck chain cannot be hidden behind
+   * a healthy one. Absent for a single-network deployment.
+   */
+  networks?: NetworkState[] | undefined;
+}
+
+/** Per-network line in a health report. */
+export interface NetworkHealth {
+  network: string;
+  latestIndexedLedger: number;
+  latestHorizonLedger: number;
+  lagLedgers: number;
+  secondsSinceLastIndex: number | null;
 }
 
 export interface HealthReport {
@@ -59,7 +85,52 @@ export interface HealthReport {
   lagLedgers: number;
   secondsSinceLastIndex: number | null;
   database: 'ok' | 'unreachable';
-  checks: { name: string; ok: boolean; detail?: string }[];
+  checks: { name: string; ok: boolean; detail?: string | undefined }[];
+  /** Present when more than one network is indexed. */
+  networks?: NetworkHealth[] | undefined;
+}
+
+/**
+ * Fold per-network states into the single `IndexerState` the rest of the
+ * health code already works with.
+ *
+ * The flat numbers describe *the worst network*, chosen by never-indexed
+ * first, then the oldest last index, then the largest lag. Averaging or taking
+ * the max over unrelated chains is the bug this avoids: two networks behind by
+ * 100 ledgers each must not look like one network behind by 50, and a chain
+ * that has never indexed must not be papered over by one that indexes every
+ * five seconds.
+ */
+export function aggregateNetworkStates(
+  startedAt: number,
+  entries: NetworkState[]
+): IndexerState {
+  if (entries.length === 0) {
+    return { latestIndexedLedger: 0, latestHorizonLedger: 0, lastIndexedAt: null, startedAt };
+  }
+
+  const lag = (entry: NetworkState): number =>
+    Math.max(0, entry.latestHorizonLedger - entry.latestIndexedLedger);
+
+  const worst = entries.reduce((acc, entry) => {
+    if (entry.lastIndexedAt === null && acc.lastIndexedAt !== null) return entry;
+    if (entry.lastIndexedAt !== null && acc.lastIndexedAt === null) return acc;
+    if (entry.lastIndexedAt !== null && acc.lastIndexedAt !== null && entry.lastIndexedAt < acc.lastIndexedAt) {
+      return entry;
+    }
+    if (entry.lastIndexedAt !== null && acc.lastIndexedAt !== null && entry.lastIndexedAt > acc.lastIndexedAt) {
+      return acc;
+    }
+    return lag(entry) > lag(acc) ? entry : acc;
+  });
+
+  return {
+    latestIndexedLedger: worst.latestIndexedLedger,
+    latestHorizonLedger: worst.latestHorizonLedger,
+    lastIndexedAt: worst.lastIndexedAt,
+    startedAt,
+    networks: entries,
+  };
 }
 
 /**
@@ -130,6 +201,17 @@ export async function buildHealthReport(
   const failing = checks.some(check => !check.ok);
   const status: HealthReport['status'] = failing ? 'degraded' : starting ? 'starting' : 'ok';
 
+  const networks = state.networks?.map((entry): NetworkHealth => {
+    const age = entry.lastIndexedAt === null ? null : (now - entry.lastIndexedAt) / 1000;
+    return {
+      network: entry.network,
+      latestIndexedLedger: entry.latestIndexedLedger,
+      latestHorizonLedger: entry.latestHorizonLedger,
+      lagLedgers: Math.max(0, entry.latestHorizonLedger - entry.latestIndexedLedger),
+      secondsSinceLastIndex: age,
+    };
+  });
+
   return {
     status,
     uptimeSeconds: Math.round(uptimeSeconds),
@@ -139,6 +221,7 @@ export async function buildHealthReport(
     secondsSinceLastIndex,
     database,
     checks,
+    ...(networks === undefined ? {} : { networks }),
   };
 }
 
