@@ -95,15 +95,28 @@ export const indexingErrors = new Counter({
   registers: [registry],
 });
 
+/**
+ * The three gauges below are labelled `network`.
+ *
+ * Two chains do not share a tip, a cursor or a lag: mainnet at 5,000 and
+ * testnet at 100 are not the same number in different places, they are two
+ * unrelated facts that happen to share a metric name. Aggregating them into a
+ * single unlabeled series (a max, an average, whichever the scrape picks)
+ * would report a healthy-looking value while one network sits stuck.
+ *
+ * Counters stay unlabeled — a rate summed across networks is still a rate.
+ */
 export const latestIndexedLedger = new Gauge({
   name: 'lumina_latest_indexed_ledger',
-  help: 'Highest ledger sequence written to Postgres.',
+  help: 'Highest ledger sequence written to Postgres, by network.',
+  labelNames: ['network'] as const,
   registers: [registry],
 });
 
 export const latestHorizonLedger = new Gauge({
   name: 'lumina_latest_horizon_ledger',
-  help: 'Highest ledger sequence Horizon reports.',
+  help: 'Highest ledger sequence Horizon reports, by network.',
+  labelNames: ['network'] as const,
   registers: [registry],
 });
 
@@ -113,29 +126,36 @@ export const latestHorizonLedger = new Gauge({
  */
 export const indexingLag = new Gauge({
   name: 'lumina_indexing_lag_ledgers',
-  help: 'Ledgers behind Horizon (latest Horizon ledger minus latest indexed).',
+  help: 'Ledgers behind Horizon (latest Horizon ledger minus latest indexed), by network.',
+  labelNames: ['network'] as const,
   registers: [registry],
 });
 
 export const lastSuccessfulIndexTimestamp = new Gauge({
   name: 'lumina_last_successful_index_timestamp_seconds',
-  help: 'Unix time of the last successfully indexed ledger.',
+  help: 'Unix time of the last successfully indexed ledger, by network.',
+  labelNames: ['network'] as const,
   registers: [registry],
 });
 
 /** Record a completed ledger and move the freshness gauges with it. */
-export function recordIndexedLedger(sequence: number, transactions: number, operations: number): void {
+export function recordIndexedLedger(
+  network: string,
+  sequence: number,
+  transactions: number,
+  operations: number
+): void {
   ledgersIndexed.inc();
   transactionsIndexed.inc(transactions);
   operationsIndexed.inc(operations);
-  latestIndexedLedger.set(sequence);
-  lastSuccessfulIndexTimestamp.set(Date.now() / 1000);
+  latestIndexedLedger.set({ network }, sequence);
+  lastSuccessfulIndexTimestamp.set({ network }, Date.now() / 1000);
 }
 
 /** Update the lag gauges from Horizon's reported tip. */
-export function recordHorizonTip(sequence: number, latestIndexed: number): void {
-  latestHorizonLedger.set(sequence);
-  indexingLag.set(Math.max(0, sequence - latestIndexed));
+export function recordHorizonTip(network: string, sequence: number, latestIndexed: number): void {
+  latestHorizonLedger.set({ network }, sequence);
+  indexingLag.set({ network }, Math.max(0, sequence - latestIndexed));
 }
 
 export function metricsContentType(): string {
