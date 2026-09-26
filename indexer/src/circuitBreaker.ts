@@ -4,7 +4,7 @@
  * Prevents a single bad contract ID from breaking event indexing for all other
  * contracts by tracking consecutive failures and temporarily dropping problematic
  * IDs after a threshold, with periodic retries to handle transient issues.
- */
+ */ 
 
 import { subsystem } from './logger';
 
