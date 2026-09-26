@@ -23,13 +23,13 @@ export interface Config {
   registryContractId: string | undefined;
   registryReadAccount: string | undefined;
   registryNetworkPassphrase: string;
+  registryPollIntervalMs: number;
   healthPort: number;
   ledgerRetryAttempts: number;
   ledgerRetryBaseMs: number;
   accountCacheTtlMs: number;
   accountCacheMaxSize: number;
   eventsSafetyLagLedgers: number;
-  registryPollEveryNTicks: number;
 }
 
 /**
@@ -138,13 +138,13 @@ export function loadConfig(): Config {
     registryContractId: optionalString('REGISTRY_CONTRACT_ID'),
     registryReadAccount: optionalString('REGISTRY_READ_ACCOUNT'),
     registryNetworkPassphrase: stringWithDefault('REGISTRY_NETWORK_PASSPHRASE', Networks.TESTNET),
+    registryPollIntervalMs: intWithDefault('REGISTRY_POLL_INTERVAL_MS', 60_000, 1000),
     healthPort: intWithDefault('HEALTH_PORT', 9090, 1, 65535),
     ledgerRetryAttempts: 3,
     ledgerRetryBaseMs: 500,
     accountCacheTtlMs: 5 * 60 * 1000,
     accountCacheMaxSize: 50_000,
     eventsSafetyLagLedgers: 3,
-    registryPollEveryNTicks: 12,
   };
 
   // Validate that if registry is configured, all required fields are present
@@ -187,13 +187,13 @@ export function loadConfig(): Config {
       registryContractId: config.registryContractId,
       registryReadAccount: config.registryReadAccount,
       registryNetworkPassphrase: config.registryNetworkPassphrase,
+      registryPollIntervalMs: config.registryPollIntervalMs,
       healthPort: config.healthPort,
       ledgerRetryAttempts: config.ledgerRetryAttempts,
       ledgerRetryBaseMs: config.ledgerRetryBaseMs,
       accountCacheTtlMs: config.accountCacheTtlMs,
       accountCacheMaxSize: config.accountCacheMaxSize,
       eventsSafetyLagLedgers: config.eventsSafetyLagLedgers,
-      registryPollEveryNTicks: config.registryPollEveryNTicks,
     },
     'configuration loaded'
   );

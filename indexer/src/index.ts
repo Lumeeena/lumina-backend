@@ -37,6 +37,7 @@ import {
   ledgerIndexDuration,
   recordHorizonTip,
   recordIndexedLedger,
+  lastSuccessfulRegistryDiscoveryTimestamp,
 } from './metrics';
 import { startHealthServer, type IndexerState } from './health';
 import { initTracing, shutdownTracing } from './tracing';
@@ -73,8 +74,8 @@ const VERSION = packageJson.version;
 let config: Config | null = null;
 let pool: ReturnType<typeof createPool> | null = null;
 let discoveredContractIds: string[] = [];
-let loopTick = 0;
 let eventsCursor = 0;
+let lastRegistryPollTime = 0;
 const accountCache = new Map<string, number>(); // address -> last-fetched-at
 
 let isShuttingDown = false;
@@ -200,6 +201,7 @@ async function pollRegistry(): Promise<void> {
     }
     discoveredContractIds = entries.filter(isContractAddress);
     routine.success({ contracts: discoveredContractIds.length }, 'registry discovery complete');
+    lastSuccessfulRegistryDiscoveryTimestamp.set(Date.now() / 1000);
   } catch (err) {
     indexingErrors.inc({ loop: 'registry' });
     log.error({ err: message(err) }, 'registry polling failed');
@@ -339,10 +341,11 @@ async function run() {
   isLoopRunning = true;
   while (!isShuttingDown) {
     try {
-      if (loopTick % config.registryPollEveryNTicks === 0) {
+      const now = Date.now();
+      if (now - lastRegistryPollTime >= config.registryPollIntervalMs) {
         await pollRegistry();
+        lastRegistryPollTime = now;
       }
-      loopTick++;
 
       const latest = await getLatestLedgerSequence(config.horizonUrl);
       state.latestHorizonLedger = latest;

@@ -123,6 +123,12 @@ export const lastSuccessfulIndexTimestamp = new Gauge({
   registers: [registry],
 });
 
+export const lastSuccessfulRegistryDiscoveryTimestamp = new Gauge({
+  name: 'lumina_last_successful_registry_discovery_timestamp_seconds',
+  help: 'Unix time of the last successful registry contract discovery.',
+  registers: [registry],
+});
+
 /** Record a completed ledger and move the freshness gauges with it. */
 export function recordIndexedLedger(sequence: number, transactions: number, operations: number): void {
   ledgersIndexed.inc();
