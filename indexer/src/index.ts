@@ -32,6 +32,7 @@
 
 import {
   createPool,
+  ensurePartitions,
   getLatestIndexedEventLedger,
   getLatestIndexedLedger,
   indexLedger,
@@ -48,6 +49,7 @@ import {
   ledgerIndexDuration,
   recordHorizonTip,
   recordIndexedLedger,
+  lastSuccessfulRegistryDiscoveryTimestamp,
 } from './metrics';
 import { aggregateNetworkStates, startHealthServer, type NetworkState } from './health';
 import { initTracing, shutdownTracing } from './tracing';
@@ -234,19 +236,22 @@ export async function fetchAndIndexLedgerWithRetry(
   retryAttempts = LEDGER_RETRY_ATTEMPTS,
   retryBaseMs = LEDGER_RETRY_BASE_MS
 ): Promise<boolean> {
-  for (let attempt = 1; attempt <= retryAttempts; attempt++) {
+  if (!config) throw new Error('Configuration not loaded');
+  const actualRetryAttempts = retryAttempts ?? config.ledgerRetryAttempts;
+  const actualRetryBaseMs = retryBaseMs ?? config.ledgerRetryBaseMs;
+  for (let attempt = 1; attempt <= actualRetryAttempts; attempt++) {
     try {
       await indexOne(sequence);
       return true;
     } catch (err) {
-      if (attempt === retryAttempts) {
+      if (attempt === actualRetryAttempts) {
         indexingErrors.inc({ loop: 'ledger' });
         log.error({ ledger: sequence, attempts: attempt, err: message(err) }, 'giving up on ledger');
         return false;
       }
-      const delay = retryBaseMs * 2 ** (attempt - 1);
+      const delay = actualRetryBaseMs * 2 ** (attempt - 1);
       log.warn(
-        { ledger: sequence, attempt, maxAttempts: retryAttempts, retryInMs: delay, err: message(err) },
+        { ledger: sequence, attempt, maxAttempts: actualRetryAttempts, retryInMs: delay, err: message(err) },
         'ledger failed, retrying'
       );
       await new Promise(r => setTimeout(r, delay));
@@ -429,7 +434,7 @@ async function runNetworkLoop(loop: NetworkLoop, isPrimary: boolean): Promise<vo
     }
 
     if (isShuttingDown) break;
-    await new Promise(r => setTimeout(r, POLL_INTERVAL_MS));
+    await new Promise(r => setTimeout(r, config!.pollIntervalMs));
   }
 }
 
@@ -486,7 +491,7 @@ async function shutdown() {
     await new Promise(r => setTimeout(r, 100));
   }
 
-  await pool.end();
+  if (pool) await pool.end();
   await shutdownTracing();
   await shutdownErrorTracking();
   process.exit(0);
@@ -507,13 +512,3 @@ function message(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
-/** Never log a database URL with its password in it. */
-function redactUrl(url: string): string {
-  try {
-    const parsed = new URL(url);
-    if (parsed.password) parsed.password = '***';
-    return parsed.toString();
-  } catch {
-    return '(unparseable)';
-  }
-}

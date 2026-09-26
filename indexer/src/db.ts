@@ -41,6 +41,17 @@ export async function getLatestIndexedLedger(pool: Pool, network: string): Promi
 }
 
 /**
+ * Creates any missing `operations` partitions covering the ledger range up
+ * to `partitionsAhead` partitions past the current max indexed ledger. Safe
+ * to call repeatedly — it no-ops once the needed partitions already exist.
+ * See db/migrations/006_partition_operations.sql for the partition-sizing
+ * rationale and the ensure_operations_partitions() function this calls.
+ */
+export async function ensurePartitions(pool: Pool, partitionsAhead = 5): Promise<void> {
+  await pool.query('SELECT ensure_operations_partitions($1)', [partitionsAhead]);
+}
+
+/**
  * Writes a ledger and all of its transactions/operations in a single DB
  * transaction, so a crash mid-ledger leaves no partial rows behind — the
  * ledger sequence simply gets re-fetched and re-indexed on restart.
@@ -93,6 +104,11 @@ export async function indexLedger(
     }
 
     for (const op of operations) {
+      // ON CONFLICT target is (id, ledger), not just (id): operations is
+      // partitioned by ledger (see db/migrations/006_partition_operations.sql),
+      // and Postgres requires a partitioned table's unique constraints to
+      // include the partition key. This isn't a behavior change — a given
+      // operation id is only ever written with one ledger value.
       await client.query(
         `INSERT INTO operations (id, type, transaction_hash, ledger, created_at, source_account, details, network)
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8)

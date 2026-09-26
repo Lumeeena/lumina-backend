@@ -48,22 +48,10 @@ CREATE INDEX idx_transactions_created_at ON transactions (created_at DESC);
 
 -- ─── Operations ───────────────────────────────────────────────────────────────
 --
--- Decision (#104): transaction_hash stays an immediate (non-deferrable)
--- foreign key to transactions(hash).
---
--- Why it exists: an operation without its parent transaction is silently
--- wrong data — Transaction.operations would lose rows, Operation.transaction
--- would dangle, and per-transaction groupings would undercount. The FK is the
--- only guard that fails loudly instead.
---
--- Why immediate rather than deferrable: the sole writer (indexLedger) inserts
--- parents before children inside one database transaction, so the ordering
--- the constraint demands already holds. DEFERRABLE would buy nothing until an
--- independent-operations writer exists, at the cost of a migration.
---
--- Rule for future backfill/repair paths: insert the parent transaction row
--- first, or insert parents and operations in the same transaction. A path
--- that writes operations on their own will fail on this constraint by design.
+-- Range-partitioned by ledger (see db/migrations/006_partition_operations.sql
+-- for the full rationale and the migration path for a pre-existing table).
+-- The primary key includes `ledger` because Postgres requires a partitioned
+-- table's unique constraints to include the partition key.
 
 CREATE TABLE IF NOT EXISTS operations (
     id                  TEXT NOT NULL,
@@ -86,6 +74,52 @@ CREATE INDEX idx_operations_type          ON operations (type);
 CREATE INDEX idx_operations_created_at    ON operations (created_at DESC);
 -- GIN index for JSONB queries (e.g. filter by "to" address in payment details)
 CREATE INDEX idx_operations_details       ON operations USING GIN (details);
+
+-- Creates partitions covering [0, partitions_ahead * 2,000,000) so a fresh
+-- database has somewhere to write immediately. The indexer keeps calling this
+-- periodically afterward (see indexer/src/db.ts ensurePartitions) so future
+-- partitions always exist before the chain reaches them. Idempotent: always
+-- continues from whatever the current highest partition's upper bound
+-- actually is, so repeated calls only create the newly-needed partitions
+-- (see db/migrations/006_partition_operations.sql for the full rationale).
+CREATE OR REPLACE FUNCTION ensure_operations_partitions(partitions_ahead INTEGER DEFAULT 3)
+RETURNS void AS $$
+DECLARE
+  partition_size CONSTANT BIGINT := 2000000;
+  v_max_ledger BIGINT;
+  v_upper BIGINT;
+  v_target BIGINT;
+  v_from BIGINT;
+  v_to BIGINT;
+  v_name TEXT;
+BEGIN
+  SELECT COALESCE(MAX(ledger), 0) INTO v_max_ledger FROM operations;
+
+  SELECT MAX((regexp_match(pg_get_expr(c.relpartbound, c.oid), 'TO \(''?(-?\d+)''?\)'))[1]::bigint)
+    INTO v_upper
+  FROM pg_inherits pi JOIN pg_class c ON c.oid = pi.inhrelid
+  WHERE pi.inhparent = 'operations'::regclass;
+
+  v_from := COALESCE(v_upper, 0);
+  v_target := v_max_ledger + partitions_ahead * partition_size;
+
+  WHILE v_from < v_target LOOP
+    v_to := v_from + partition_size;
+    v_name := format('operations_p%s', v_from);
+
+    IF NOT EXISTS (SELECT 1 FROM pg_class WHERE relname = v_name) THEN
+      EXECUTE format(
+        'CREATE TABLE %I PARTITION OF operations FOR VALUES FROM (%L) TO (%L)',
+        v_name, v_from, v_to
+      );
+    END IF;
+
+    v_from := v_to;
+  END LOOP;
+END;
+$$ LANGUAGE plpgsql;
+
+SELECT ensure_operations_partitions(3);
 
 -- ─── Accounts ─────────────────────────────────────────────────────────────────
 
@@ -215,7 +249,6 @@ CREATE TABLE IF NOT EXISTS api_keys (
     export_enabled      BOOLEAN NOT NULL DEFAULT FALSE
 );
 
-CREATE INDEX IF NOT EXISTS idx_api_keys_key_hash ON api_keys (key_hash);
 CREATE INDEX IF NOT EXISTS idx_api_keys_revoked_at ON api_keys (revoked_at);
 
 -- Lower insert-triggered vacuum/analyze thresholds for the append-heavy tables.

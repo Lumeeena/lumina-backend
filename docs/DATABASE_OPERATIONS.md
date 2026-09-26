@@ -1,5 +1,40 @@
 # Database operations
 
+## Read replica
+
+The GraphQL server can serve queries from a read-only replica by setting
+`READ_DATABASE_URL`. When it is unset — or equal to `DATABASE_URL` — the server
+behaves exactly as before and opens only the primary pool.
+
+What runs where:
+
+| Traffic | Connection |
+|---|---|
+| GraphQL queries (`transactions`, `accounts`, `operations`, `search`, `events`, …) | `READ_DATABASE_URL` when set, else `DATABASE_URL` |
+| Subscriptions (`newTransaction`, `accountActivity`) | `DATABASE_URL` (primary) |
+| API-key auth lookups, `/health`, `/metrics`, `/export` | `DATABASE_URL` (primary) |
+| Migrations and `LISTEN` | `DATABASE_URL` (primary) |
+
+Subscriptions are pinned to the primary deliberately: `LISTEN` does not work
+usefully through a replica, and a subscriber replays the exact ledger the
+primary just announced. Reading that replay from a lagging replica could return
+no rows yet, and the notification would be dropped.
+
+### Replication lag
+
+A replica is eventually consistent. With `READ_DATABASE_URL` set, a query may
+miss a ledger that was indexed moments ago, so the API can appear a few seconds
+behind the head of the chain — the delay is the replica's `replay_lag`, not an
+indexer stall. Do not point `READ_DATABASE_URL` at the primary's host expecting
+a no-op; either leave it unset or use a real replica. Operations that must
+observe the newest write (debugging a just-indexed ledger, comparing the two
+databases) should query the primary directly.
+
+Monitor lag on the replica
+(`SELECT now() - pg_last_xact_replay_timestamp();`) and alert before it grows
+past the freshness the API promises. If the replica falls too far behind,
+unset `READ_DATABASE_URL` and restart the service to fall back to the primary.
+
 ## Index usage review
 
 Do not drop an index solely because `idx_scan` is zero in one snapshot. PostgreSQL
@@ -10,6 +45,24 @@ read-only report in `db/audit-index-usage.sql` lists usage and definitions and
 flags exact duplicate key/predicate definitions for manual review. Preserve
 indexes supporting constraints and re-check `EXPLAIN (ANALYZE, BUFFERS)` for
 important queries before scheduling any removal.
+
+### Static findings (no production statistics)
+
+Reviewed from `db/schema.sql`, migrations 001-006 and the query code in
+`graphql-server/src` and `indexer/src`:
+
+- **Dropped (migration 007):** `idx_api_keys_key_hash` duplicates the index
+  behind `key_hash TEXT NOT NULL UNIQUE`. Redundant by construction.
+- **Kept, but flagged for the production report:** `idx_api_keys_revoked_at`
+  (no query filters on `revoked_at` alone; the table is tiny),
+  `idx_operations_details` and `idx_events_topics` GIN indexes (no
+  `@>`/`?` predicate found in the code that would use them; GIN is the most
+  expensive to maintain on the write path), and the standalone
+  `created_at DESC` indexes on `transactions`, `operations` and
+  `contract_events` (only `operations.created_at` is filtered on, by the asset
+  volume query). These are unused only on the evidence of static reading, so
+  they are not removed until the report below confirms `idx_scan = 0` over a
+  representative window.
 
 No production database credentials are available in this checkout, so no
 index has been removed based on unobserved production usage. Run the report

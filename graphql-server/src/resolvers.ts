@@ -22,6 +22,7 @@ import { getIndexerStatus } from './freshness';
 import { getNetworks, resolveNetworkArgument, type NetworkConfig, type NetworkRegistry } from './networks';
 import type { LedgerNotifier } from './pubsub';
 import { ANONYMOUS_CALLER, type ApiCaller } from './auth';
+import type { subsystem } from './logger';
 
 export interface BaseContext {
   pool: Pool;

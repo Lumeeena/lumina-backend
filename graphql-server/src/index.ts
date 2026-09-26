@@ -1,5 +1,6 @@
 import { ApolloServer } from '@apollo/server';
 import { expressMiddleware } from '@apollo/server/express4';
+import { ApolloServerPluginLandingPageDisabled } from '@apollo/server/plugin/disabled';
 import { ApolloServerPluginDrainHttpServer } from '@apollo/server/plugin/drainHttpServer';
 import { makeExecutableSchema } from '@graphql-tools/schema';
 import cors from 'cors';
@@ -18,6 +19,7 @@ import { persistedQueryOption } from './persistedQueries';
 import { loadMigrations, runMigrations } from './migrations';
 import { LedgerNotifier, SubscriberLimitError } from './pubsub';
 import { subsystem } from './logger';
+import { loadMigrations, runMigrations } from './migrations';
 import {
   DEFAULT_API_KEY_HEADER,
   apiKeyAuthMiddleware,
@@ -39,7 +41,16 @@ import {
 } from './metrics';
 import { initTracing, shutdownTracing } from './tracing';
 import { initErrorTracking, shutdownErrorTracking } from './errorTracking';
+import {
+  corsOptions,
+  formatTimeoutError,
+  loadSecurityConfig,
+  poolTimeoutOptions,
+  queryLimitsPlugin,
+  requestTimeoutMiddleware,
+} from './security';
 import { scheduledExportOptions, startScheduledExports } from './scheduledExport';
+import { loadMigrations, runMigrations } from './migrations';
 
 const log = subsystem('server');
 const startedAt = Date.now();
@@ -64,12 +75,29 @@ const DB_POOL_CONNECTION_TIMEOUT = parseInt(process.env['DB_POOL_CONNECTION_TIME
 // than a request that behaves differently from what the operator configured.
 const persistedQueries = persistedQueryOption();
 
-const pool = new Pool({ 
+const DB_POOL_MAX = process.env.DB_POOL_MAX ? parseInt(process.env.DB_POOL_MAX, 10) : undefined;
+const DB_POOL_IDLE_TIMEOUT = process.env.DB_POOL_IDLE_TIMEOUT ? parseInt(process.env.DB_POOL_IDLE_TIMEOUT, 10) : undefined;
+const DB_POOL_CONNECTION_TIMEOUT = process.env.DB_POOL_CONNECTION_TIMEOUT ? parseInt(process.env.DB_POOL_CONNECTION_TIMEOUT, 10) : undefined;
+
+const security = loadSecurityConfig();
+
+const pool = new Pool({
   connectionString: DATABASE_URL,
+  ...poolTimeoutOptions(security),
   max: DB_POOL_MAX,
   idleTimeoutMillis: DB_POOL_IDLE_TIMEOUT,
   connectionTimeoutMillis: DB_POOL_CONNECTION_TIMEOUT,
 });
+// Falls back to the primary pool when no replica is configured, so the single
+// connection string keeps working exactly as before.
+const readPool = READ_DATABASE_URL && READ_DATABASE_URL !== DATABASE_URL
+  ? new Pool({
+      connectionString: READ_DATABASE_URL,
+      max: DB_POOL_MAX,
+      idleTimeoutMillis: DB_POOL_IDLE_TIMEOUT,
+      connectionTimeoutMillis: DB_POOL_CONNECTION_TIMEOUT,
+    })
+  : pool;
 const schema = makeExecutableSchema({ typeDefs, resolvers });
 
 const notifier = new LedgerNotifier({
@@ -109,6 +137,9 @@ async function main() {
       // not authenticated yet; when `ALLOW_ANONYMOUS_ACCESS=false` this is the
       // path that will need a key, and it is why that switch is documented as
       // covering queries only until then.
+      // Subscriptions replay the ledger the primary just notified us about, so
+      // they must read the primary — a lagging replica might not have the rows
+      // yet and the notification would be silently dropped.
       context: async (): Promise<Context> => createContext(pool, { notifier }),
       onError: (_ctx: unknown, _message: unknown, errors: readonly Error[]) => {
         for (const error of errors) {
@@ -140,6 +171,8 @@ async function main() {
     schema,
     persistedQueries,
     plugins: [
+      queryLimitsPlugin(security),
+      ...(security.introspection ? [] : [ApolloServerPluginLandingPageDisabled()]),
       metricsPlugin(),
       ApolloServerPluginDrainHttpServer({ httpServer }),
       {
@@ -258,7 +291,8 @@ async function main() {
   const middleware = [
     // CORS first so a 401 from the auth layer still carries the headers a
     // browser needs to read the error body.
-    cors(),
+    cors(corsOptions(security)),
+    requestTimeoutMiddleware(security.requestTimeoutMs),
     // Ahead of the body parser and the GraphQL layer both. The parser is
     // skipped for an unauthenticated request, so an anonymous caller cannot
     // make the server buffer an arbitrary payload, and a request that cannot be
@@ -275,7 +309,10 @@ async function main() {
           // configured to require keys.
           throw new Error('API key auth middleware did not run for this route');
         }
-        return createContext(pool, { caller });
+        // Every resolver behind this context is a read, so HTTP queries use the
+        // replica when one is configured; the primary remains in use for auth,
+        // health, metrics, exports and LISTEN.
+        return createContext(readPool, { caller });
       },
     }),
   ];
@@ -310,6 +347,9 @@ async function main() {
       void server.stop()
         .then(() => shutdownTracing())
         .then(() => shutdownErrorTracking())
+        // Only the replica pool is closed explicitly; the primary pool is left
+        // to the process exit that follows, matching the previous behaviour.
+        .then(() => (readPool === pool ? undefined : readPool.end()))
         .then(() => process.exit(0));
     });
   }

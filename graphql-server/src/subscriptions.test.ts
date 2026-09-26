@@ -176,7 +176,8 @@ test('a ledger with no transactions yields nothing and does not stall the stream
 test('a failed ledger read costs that ledger, not the subscription', async () => {
   const { notifier, push } = fakeNotifier();
   const logged: string[] = [];
-  const failing = createSubscriptionResolvers(message => logged.push(message));
+  const requestLogger = { warn: (message: string) => logged.push(message) };
+  const failing = createSubscriptionResolvers();
 
   let first = true;
   const pool = {
@@ -189,7 +190,7 @@ test('a failed ledger read costs that ledger, not the subscription', async () =>
     },
   } as unknown as Pool;
 
-  const stream = failing.newTransaction.subscribe({}, {}, { pool, notifier } as SubscriptionContext);
+  const stream = failing.newTransaction.subscribe({}, {}, { pool, notifier, requestLogger } as unknown as SubscriptionContext);
   push({ kind: 'ledger', ledger: 100 });
   push({ kind: 'ledger', ledger: 101 });
 

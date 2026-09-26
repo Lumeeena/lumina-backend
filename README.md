@@ -277,7 +277,8 @@ indexer from starting.
 
 | Variable | Default |
 |---|---|
-| `DATABASE_URL` | `postgresql://localhost:5432/lumina` |
+| `DATABASE_URL` | `postgresql://localhost:5432/lumina` — primary; used for auth, health, metrics, exports and `LISTEN` |
+| `READ_DATABASE_URL` | unset — optional read-only replica used for GraphQL queries. When unset (or equal to `DATABASE_URL`) every query uses the primary, so no separate connection is opened. See `docs/DATABASE_OPERATIONS.md` for the replication-lag caveats. |
 | `DB_POOL_MAX` | `10` | Database connection pool size. Must be sized against Postgres `max_connections` and other service instances. |
 | `DB_POOL_IDLE_TIMEOUT` | `10000` | Milliseconds before an idle connection is closed |
 | `DB_POOL_CONNECTION_TIMEOUT` | `0` | Milliseconds to wait for a connection before failing (0 = wait forever) |
