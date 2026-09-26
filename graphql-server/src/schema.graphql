@@ -220,7 +220,8 @@ type Transaction {
   successful: Boolean!
   memoType: String
   memo: String
-  operations: [Operation!]!
+  """Operations may be null when their lookup fails; errors remain local to this field."""
+  operations: [Operation!]
 }
 
 type Account {
@@ -233,8 +234,9 @@ type Account {
   balances: [Balance!]!
   flags: AccountFlags!
   thresholds: Thresholds!
-  transactions(limit: Int = 10): [Transaction!]!
-  operations(limit: Int = 10): [Operation!]!
+  """Related rows are optional so a lookup error does not erase the account."""
+  transactions(limit: Int = 10): [Transaction!]
+  operations(limit: Int = 10): [Operation!]
 }
 
 type Balance {

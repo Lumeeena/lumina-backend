@@ -49,6 +49,7 @@ export interface Balance {
 
 const MAX_RETRIES = 3;
 const BASE_BACKOFF_MS = 300;
+const REQUEST_TIMEOUT_MS = parseInt(process.env['HORIZON_REQUEST_TIMEOUT_MS'] ?? '2000', 10);
 
 /**
  * Fetches from Horizon with 429-aware retry (respecting Retry-After when
@@ -58,8 +59,10 @@ const BASE_BACKOFF_MS = 300;
  */
 async function get<T>(path: string, baseUrl: string = HORIZON): Promise<T | null> {
   for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
     try {
-      const res = await fetch(`${baseUrl}${path}`);
+      const res = await fetch(`${baseUrl}${path}`, { signal: controller.signal });
       if (res.ok) return res.json() as Promise<T>;
       if (res.status === 404) return null; // genuinely doesn't exist — no point retrying
 
@@ -79,6 +82,8 @@ async function get<T>(path: string, baseUrl: string = HORIZON): Promise<T | null
         return null;
       }
       await new Promise(r => setTimeout(r, BASE_BACKOFF_MS * 2 ** (attempt - 1)));
+    } finally {
+      clearTimeout(timeout);
     }
   }
   return null;

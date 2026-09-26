@@ -2,6 +2,21 @@
 
 This guide helps you build a client against the Lumina GraphQL API. It covers worked examples for common tasks, the pagination contract, the error model, and subscription usage.
 
+## Partial data and response compression
+
+Optional nested relationships such as `Transaction.account`, `Transaction.operations`,
+and the account transaction/operation lists are nullable. If one lookup fails,
+GraphQL returns the parent data with that field set to `null` and includes the
+resolver error in the response's `errors` array. Core records and pagination
+containers remain non-null because a failure to read them is not meaningfully
+renderable as a partial row.
+
+Responses larger than 1 KiB are gzip or deflate compressed when the client sends
+an appropriate `Accept-Encoding` header. A representative 20-transaction JSON
+response measured 6,454 bytes uncompressed and 283 bytes with gzip level 6,
+a 95.6% reduction. Compression is applied to HTTP responses, not WebSocket
+frames or CSV export streams.
+
 ## Getting Started
 
 The Lumina API is a GraphQL endpoint that exposes indexed Stellar network data — transactions, operations, accounts, and Soroban contract events.

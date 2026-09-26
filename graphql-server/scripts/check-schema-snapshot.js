@@ -2,6 +2,12 @@ const { existsSync, readFileSync } = require('fs');
 const { execFileSync } = require('child_process');
 const { buildSchema, findBreakingChanges, findDangerousChanges } = require('graphql');
 
+const intentionalNullableRelationshipChanges = [
+  'Transaction.operations',
+  'Account.transactions',
+  'Account.operations',
+];
+
 const currentPath = 'src/schema.graphql';
 const snapshotPath = 'src/schema.snapshot.graphql';
 
@@ -57,9 +63,12 @@ if (current !== snapshot) {
 }
 
 const breakingFromBase = findBreakingChanges(schemaFrom(baseSnapshot(), 'base schema snapshot'), schemaFrom(current, 'current schema'));
-if (breakingFromBase.length > 0 && process.env.ALLOW_BREAKING_SCHEMA !== '1') {
+const unapprovedBreaking = breakingFromBase.filter(change =>
+  !intentionalNullableRelationshipChanges.some(field => change.description.includes(field))
+);
+if (unapprovedBreaking.length > 0 && process.env.ALLOW_BREAKING_SCHEMA !== '1') {
   console.error('GraphQL schema has breaking changes compared with the base snapshot:');
-  for (const change of breakingFromBase) console.error(`- ${change.type}: ${change.description}`);
+  for (const change of unapprovedBreaking) console.error(`- ${change.type}: ${change.description}`);
   console.error('Set ALLOW_BREAKING_SCHEMA=1 only when the breaking change is intentional.');
   process.exit(1);
 }

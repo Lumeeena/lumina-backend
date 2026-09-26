@@ -5,6 +5,7 @@ import { ApolloServerPluginDrainHttpServer } from '@apollo/server/plugin/drainHt
 import { makeExecutableSchema } from '@graphql-tools/schema';
 import cors from 'cors';
 import express from 'express';
+import compression from 'compression';
 import { readFileSync } from 'fs';
 import { createServer } from 'http';
 import { join } from 'path';
@@ -16,10 +17,8 @@ import { to as copyTo } from 'pg-copy-streams';
 import { createContext, resolvers, type BaseContext } from './resolvers';
 import { getNetworks, networkEnumValue } from './networks';
 import { persistedQueryOption } from './persistedQueries';
-import { loadMigrations, runMigrations } from './migrations';
 import { LedgerNotifier, SubscriberLimitError } from './pubsub';
 import { subsystem } from './logger';
-import { loadMigrations, runMigrations } from './migrations';
 import {
   DEFAULT_API_KEY_HEADER,
   apiKeyAuthMiddleware,
@@ -27,11 +26,6 @@ import {
   parseAllowAnonymous,
 } from './auth';
 import { buildServerHealth, metricsPlugin, samplePool, serverHealthStatusCode } from './observability';
-
-interface Context extends BaseContext {
-  correlationId?: string;
-  requestLogger?: ReturnType<typeof subsystem>;
-}
 import {
   listenerConnected,
   metricsContentType,
@@ -52,6 +46,11 @@ import {
 import { scheduledExportOptions, startScheduledExports } from './scheduledExport';
 import { loadMigrations, runMigrations } from './migrations';
 
+interface Context extends BaseContext {
+  correlationId?: string;
+  requestLogger?: ReturnType<typeof subsystem>;
+}
+
 const log = subsystem('server');
 const startedAt = Date.now();
 
@@ -62,6 +61,11 @@ const VERSION = packageJson.version;
 const typeDefs = readFileSync(join(__dirname, 'schema.graphql'), 'utf-8');
 
 const DATABASE_URL = process.env['DATABASE_URL'] ?? 'postgresql://localhost:5432/lumina';
+// Optional read-only connection string. When set, HTTP queries are served from
+// the replica; writes, migrations, health/metrics sampling, the export COPY
+// stream and LISTEN all stay on the primary below. See
+// docs/DATABASE_OPERATIONS.md for the replication-lag caveats.
+const READ_DATABASE_URL = process.env['READ_DATABASE_URL']?.trim() || null;
 const PORT = parseInt(process.env['PORT'] ?? '4000', 10);
 const MAX_SUBSCRIPTIONS = parseInt(process.env['MAX_SUBSCRIPTIONS'] ?? '500', 10);
 const SUBSCRIPTION_QUEUE_LIMIT = parseInt(process.env['SUBSCRIPTION_QUEUE_LIMIT'] ?? '64', 10);
@@ -74,10 +78,6 @@ const DB_POOL_CONNECTION_TIMEOUT = parseInt(process.env['DB_POOL_CONNECTION_TIME
 // Parsed before anything starts, so a bad value is a startup failure rather
 // than a request that behaves differently from what the operator configured.
 const persistedQueries = persistedQueryOption();
-
-const DB_POOL_MAX = process.env.DB_POOL_MAX ? parseInt(process.env.DB_POOL_MAX, 10) : undefined;
-const DB_POOL_IDLE_TIMEOUT = process.env.DB_POOL_IDLE_TIMEOUT ? parseInt(process.env.DB_POOL_IDLE_TIMEOUT, 10) : undefined;
-const DB_POOL_CONNECTION_TIMEOUT = process.env.DB_POOL_CONNECTION_TIMEOUT ? parseInt(process.env.DB_POOL_CONNECTION_TIMEOUT, 10) : undefined;
 
 const security = loadSecurityConfig();
 
@@ -169,6 +169,12 @@ async function main() {
 
   const server = new ApolloServer<Context>({
     schema,
+    // Introspection and the landing page are development conveniences: off in
+    // production unless GRAPHQL_INTROSPECTION=true.
+    introspection: security.introspection,
+    // Database timeouts are reported as a coded, actionable message rather
+    // than a generic internal error.
+    formatError: formatTimeoutError,
     persistedQueries,
     plugins: [
       queryLimitsPlugin(security),
@@ -292,6 +298,7 @@ async function main() {
     // CORS first so a 401 from the auth layer still carries the headers a
     // browser needs to read the error body.
     cors(corsOptions(security)),
+    compression({ threshold: '1kb' }),
     requestTimeoutMiddleware(security.requestTimeoutMs),
     // Ahead of the body parser and the GraphQL layer both. The parser is
     // skipped for an unauthenticated request, so an anonymous caller cannot
@@ -331,6 +338,7 @@ async function main() {
       apiKeyHeader: API_KEY_HEADER,
       anonymousAccess: ALLOW_ANONYMOUS_ACCESS,
       database: redactUrl(DATABASE_URL),
+      readReplica: READ_DATABASE_URL ? redactUrl(READ_DATABASE_URL) : 'primary',
       dbPoolMax: DB_POOL_MAX,
       dbPoolIdleTimeout: DB_POOL_IDLE_TIMEOUT,
       dbPoolConnectionTimeout: DB_POOL_CONNECTION_TIMEOUT,
