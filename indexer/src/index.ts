@@ -62,6 +62,7 @@ const state: IndexerState = {
 import { getAccount, getLatestLedgerSequence, getLedger, getLedgerOperations, getLedgerTransactions, HorizonAccount } from './horizon';
 import { getActiveContracts } from './registry';
 import { getEvents, getLatestLedgerSequence as getLatestRpcLedgerSequence, type ContractEvent } from './soroban';
+import { chunkContractIds, filterContractIds, recordFailure, recordSuccess } from './circuitBreaker';
 
 // Read version from package.json for logging
 import { readFileSync } from 'fs';
@@ -270,12 +271,35 @@ async function pollContractEvents(): Promise<void> {
       }
     }
 
-    const { events, latestLedger } = await getEvents(SOROBAN_RPC_URL, contractIds, eventsCursor);
-    if (events.length > 0) {
-      routine.success({ events: events.length, fromLedger: eventsCursor }, 'indexing contract events');
-      contractEventsIndexed.inc(events.length);
-      await insertContractEvents(pool, events);
-      await indexCustomEvents(events);
+    // Filter out dropped contract IDs (unless it's time to retry)
+    const filteredIds = filterContractIds(contractIds);
+    if (filteredIds.length === 0) {
+      log.debug('all contract IDs dropped by circuit breaker, skipping event polling');
+      return;
+    }
+
+    // Chunk contract IDs to limit blast radius of failures
+    const batches = chunkContractIds(filteredIds);
+    let allEvents: ContractEvent[] = [];
+    let latestLedger = eventsCursor;
+
+    for (const batch of batches) {
+      try {
+        const { events, latestLedger: batchLatest } = await getEvents(SOROBAN_RPC_URL, batch, eventsCursor);
+        allEvents.push(...events);
+        latestLedger = Math.max(latestLedger, batchLatest);
+        recordSuccess(batch);
+      } catch (err) {
+        recordFailure(batch);
+        log.warn({ contractIds: batch, err: message(err) }, 'contract event batch failed, circuit breaker tracking failure');
+      }
+    }
+
+    if (allEvents.length > 0) {
+      routine.success({ events: allEvents.length, fromLedger: eventsCursor }, 'indexing contract events');
+      contractEventsIndexed.inc(allEvents.length);
+      await insertContractEvents(pool, allEvents);
+      await indexCustomEvents(allEvents);
     }
     eventsCursor = Math.max(eventsCursor, latestLedger - EVENTS_SAFETY_LAG_LEDGERS + 1);
   } catch (err) {
