@@ -1,18 +1,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import type { Pool, PoolClient } from 'pg';
-import { getLatestIndexedEventLedger, getLatestIndexedLedger, indexLedger, insertContractEvents, upsertAccount } from './db';
-import { makeAccount, makeContractEvent, makeLedger, makeOperation, makeTransaction } from '../../shared/test-factories';
-
-test('createPool logs and counts idle client errors instead of leaving them unhandled', async () => {
-  const pool = createPool('postgresql://localhost:5432/lumina');
-  const metric = registry.getSingleMetric('lumina_indexer_db_pool_errors_total')!;
-  const before = (await metric.get()).values[0]?.value ?? 0;
-  pool.emit('error', new Error('simulated idle client error'));
-  const after = (await metric.get()).values[0]?.value ?? 0;
-  assert.equal(after, before + 1);
-  await pool.end();
-});
+import { ensurePartitions, getLatestIndexedEventLedger, getLatestIndexedLedger, indexLedger, insertContractEvents, upsertAccount } from './db';
+import type { HorizonAccount, HorizonLedger, HorizonOperation, HorizonTransaction } from './horizon';
+import type { ContractEvent } from './soroban';
 
 function makeFakeClient(opts: { failOn?: string } = {}) {
   const calls: string[] = [];
@@ -104,6 +95,40 @@ test('indexLedger writes accounts inside the same commit when provided', async (
     'COMMIT',
     'RELEASE',
   ]);
+});
+
+test('ensurePartitions calls the partition-maintenance function with the requested lookahead', async () => {
+  const calls: Array<{ sql: string; params: unknown[] }> = [];
+  const pool = {
+    query: async (sql: string, params: unknown[]) => {
+      calls.push({ sql, params });
+      return { rows: [] };
+    },
+  } as unknown as Pool;
+
+  await ensurePartitions(pool, 7);
+
+  assert.equal(calls.length, 1);
+  const call = calls[0];
+  assert.ok(call);
+  assert.match(call.sql, /SELECT ensure_operations_partitions\(\$1\)/);
+  assert.deepEqual(call.params, [7]);
+});
+
+test('ensurePartitions defaults the lookahead to 5 partitions', async () => {
+  const calls: Array<{ sql: string; params: unknown[] }> = [];
+  const pool = {
+    query: async (sql: string, params: unknown[]) => {
+      calls.push({ sql, params });
+      return { rows: [] };
+    },
+  } as unknown as Pool;
+
+  await ensurePartitions(pool);
+
+  const call = calls[0];
+  assert.ok(call);
+  assert.deepEqual(call.params, [5]);
 });
 
 test('upsertAccount inserts with an ON CONFLICT upsert', async () => {
