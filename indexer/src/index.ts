@@ -50,10 +50,15 @@ import {
   recordHorizonTip,
   recordIndexedLedger,
   lastSuccessfulRegistryDiscoveryTimestamp,
+  accountCacheSize,
+  sorobanEventsTruncated,
+  sorobanRetentionWindowExceeded,
 } from './metrics';
 import { aggregateNetworkStates, startHealthServer, type NetworkState } from './health';
 import { initTracing, shutdownTracing } from './tracing';
 import { initErrorTracking, captureException, shutdownErrorTracking } from './errorTracking';
+import { loadConfig } from './config';
+import { getRetentionInfo } from './soroban';
 
 const log = subsystem('indexer');
 
@@ -75,35 +80,34 @@ import { join } from 'path';
 const packageJson = JSON.parse(readFileSync(join(__dirname, '../package.json'), 'utf-8'));
 const VERSION = packageJson.version;
 
-const DATABASE_URL = process.env['DATABASE_URL'] ?? 'postgresql://localhost:5432/lumina';
-const POLL_INTERVAL_MS = parseInt(process.env['POLL_INTERVAL_MS'] ?? '5000', 10);
-const START_LEDGER = process.env['START_LEDGER'] ? parseInt(process.env['START_LEDGER'], 10) : undefined;
-const DB_POOL_MAX = process.env['DB_POOL_MAX'] ? parseInt(process.env['DB_POOL_MAX'], 10) : undefined;
-const DB_POOL_IDLE_TIMEOUT = process.env['DB_POOL_IDLE_TIMEOUT'] ? parseInt(process.env['DB_POOL_IDLE_TIMEOUT'], 10) : undefined;
-const DB_POOL_CONNECTION_TIMEOUT = process.env['DB_POOL_CONNECTION_TIMEOUT'] ? parseInt(process.env['DB_POOL_CONNECTION_TIMEOUT'], 10) : undefined;
+const config = loadConfig();
+
+const DATABASE_URL = config.databaseUrl;
+const POLL_INTERVAL_MS = config.pollIntervalMs;
+const START_LEDGER = config.startLedger;
+const DB_POOL_MAX = config.dbPoolMax;
+const DB_POOL_IDLE_TIMEOUT = config.dbPoolIdleTimeoutMs;
+const DB_POOL_CONNECTION_TIMEOUT = config.dbPoolConnectionTimeoutMs;
 
 // Soroban contract event indexing is opt-in — unset by default, the indexer
 // behaves exactly as it did before these were introduced. The RPC endpoint
 // itself is per network (see networks.ts); the contract list is shared unless
 // a network overrides it with <NAME>_INDEXED_CONTRACT_IDS, because the same
 // deployment usually indexes different contract ids on each chain.
-const INDEXED_CONTRACT_IDS = (process.env['INDEXED_CONTRACT_IDS'] ?? '')
-  .split(',')
-  .map(id => id.trim())
-  .filter(Boolean);
+const INDEXED_CONTRACT_IDS = config.indexedContractIds;
 
 // Registry-based discovery is opt-in on top of the opt-in event indexing above —
 // unset, the indexer relies solely on the static INDEXED_CONTRACT_IDS list.
 // One Registry contract lives on one chain, so discovery runs on the primary
 // network only; the contracts it finds are indexed alongside that network's
 // static list.
-const REGISTRY_CONTRACT_ID = process.env['REGISTRY_CONTRACT_ID'];
-const REGISTRY_READ_ACCOUNT = process.env['REGISTRY_READ_ACCOUNT'];
-const REGISTRY_NETWORK_PASSPHRASE = process.env['REGISTRY_NETWORK_PASSPHRASE'];
-const REGISTRY_POLL_EVERY_N_TICKS = 12; // ~once/minute at the default 5s poll interval
+const REGISTRY_CONTRACT_ID = config.registryContractId;
+const REGISTRY_READ_ACCOUNT = config.registryReadAccount;
+const REGISTRY_NETWORK_PASSPHRASE = config.registryNetworkPassphrase;
+const REGISTRY_POLL_EVERY_N_TICKS = Math.max(1, Math.round(config.registryPollIntervalMs / POLL_INTERVAL_MS));
 
-const LEDGER_RETRY_ATTEMPTS = 3;
-const LEDGER_RETRY_BASE_MS = 500;
+const LEDGER_RETRY_ATTEMPTS = config.ledgerRetryAttempts;
+const LEDGER_RETRY_BASE_MS = config.ledgerRetryBaseMs;
 
 // How long an account's Horizon data is considered fresh enough to skip
 // re-fetching. Busy accounts (exchanges, bots) show up in most ledgers —
@@ -111,8 +115,8 @@ const LEDGER_RETRY_BASE_MS = 500;
 // floods Horizon's per-IP rate limit, which then also breaks the GraphQL
 // server's own account lookups sharing that limit. Kept per network: the
 // account sequence on mainnet says nothing about the same address on testnet.
-const ACCOUNT_CACHE_TTL_MS = 5 * 60 * 1000;
-const ACCOUNT_CACHE_MAX_SIZE = 50_000;
+const ACCOUNT_CACHE_TTL_MS = config.accountCacheTtlMs;
+const ACCOUNT_CACHE_MAX_SIZE = config.accountCacheMaxSize;
 
 // getEvents' reported latestLedger is the RPC's chain-tip awareness, not a
 // guarantee that ledger's events have finished being indexed internally —
@@ -122,7 +126,13 @@ const ACCOUNT_CACHE_MAX_SIZE = 50_000;
 // events landing right at that boundary. Re-scanning the last few ledgers
 // each poll is cheap and idempotent (insertContractEvents is ON CONFLICT
 // DO NOTHING), so hold the cursor back by a small margin instead.
-const EVENTS_SAFETY_LAG_LEDGERS = 3;
+const EVENTS_SAFETY_LAG_LEDGERS = config.eventsSafetyLagLedgers;
+
+// Maximum events to fetch per polling cycle to prevent one busy range from stalling the loop.
+const MAX_EVENTS_PER_CYCLE = config.sorobanMaxEventsPerCycle;
+
+// RPC ledger retention window — how far back the RPC can serve events.
+const RETENTION_WINDOW_LEDGERS = config.sorobanRetentionWindowLedgers;
 
 const pool = createPool(DATABASE_URL, {
   max: DB_POOL_MAX,
@@ -154,6 +164,7 @@ interface NetworkLoop {
   loopTick: number;
   discoveredContractIds: string[];
   accountCache: Map<string, number>;
+  accountCacheOrder: string[];
 }
 
 function createLoop(network: NetworkConfig, primaryName: string): NetworkLoop {
@@ -180,13 +191,26 @@ function createLoop(network: NetworkConfig, primaryName: string): NetworkLoop {
     loopTick: 0,
     discoveredContractIds: [],
     accountCache: new Map<string, number>(),
+    accountCacheOrder: [],
   };
 }
 
-function pruneAccountCache(cache: Map<string, number>, now: number): void {
-  if (cache.size < ACCOUNT_CACHE_MAX_SIZE) return;
+function pruneAccountCache(cache: Map<string, number>, order: string[], now: number): void {
+  // First, remove expired entries
   for (const [address, fetchedAt] of cache) {
-    if (now - fetchedAt > ACCOUNT_CACHE_TTL_MS) cache.delete(address);
+    if (now - fetchedAt > ACCOUNT_CACHE_TTL_MS) {
+      cache.delete(address);
+    }
+  }
+  // Rebuild order array to only contain valid entries
+  const validOrder = order.filter(address => cache.has(address));
+  order.length = 0;
+  order.push(...validOrder);
+
+  // Then, if still over size, evict LRU entries
+  while (cache.size > ACCOUNT_CACHE_MAX_SIZE && order.length > 0) {
+    const lruAddress = order.shift();
+    if (lruAddress) cache.delete(lruAddress);
   }
 }
 
@@ -204,7 +228,7 @@ async function fetchAndIndexLedger(loop: NetworkLoop, sequence: number): Promise
   for (const op of operations) addresses.add(op.source_account);
 
   const now = Date.now();
-  pruneAccountCache(loop.accountCache, now);
+  pruneAccountCache(loop.accountCache, loop.accountCacheOrder, now);
   const addressesToFetch = [...addresses].filter(address => {
     const fetchedAt = loop.accountCache.get(address);
     return fetchedAt === undefined || now - fetchedAt > ACCOUNT_CACHE_TTL_MS;
@@ -215,7 +239,15 @@ async function fetchAndIndexLedger(loop: NetworkLoop, sequence: number): Promise
       addressesToFetch.map(address => getAccount(loop.network.horizonUrl, address))
     )
   ).filter((a): a is HorizonAccount => a !== null);
-  for (const address of addressesToFetch) loop.accountCache.set(address, now);
+  for (const address of addressesToFetch) {
+    loop.accountCache.set(address, now);
+    // Update LRU order: remove if exists, then add to end (most recent)
+    const idx = loop.accountCacheOrder.indexOf(address);
+    if (idx !== -1) loop.accountCacheOrder.splice(idx, 1);
+    loop.accountCacheOrder.push(address);
+  }
+
+  accountCacheSize.set({ network: name }, loop.accountCache.size);
 
   const stopTimer = ledgerIndexDuration.startTimer();
   await indexLedger(pool, name, ledger, transactions, operations, accounts);
@@ -334,12 +366,38 @@ async function pollContractEvents(loop: NetworkLoop): Promise<void> {
       }
     }
 
-    const { events, latestLedger } = await getEvents(loop.sorobanRpcUrl, contractIds, loop.eventsCursor);
+    // Check if cursor has fallen outside the RPC's retention window
+    const retentionInfo = await getRetentionInfo(loop.sorobanRpcUrl);
+    if (retentionInfo) {
+      const oldestAvailable = retentionInfo.oldestLedger;
+      if (loop.eventsCursor < oldestAvailable) {
+        log.warn(
+          { network: name, cursor: loop.eventsCursor, oldestAvailable, retentionWindowLedgers: RETENTION_WINDOW_LEDGERS },
+          'Soroban event cursor is behind RPC retention window; skipping forward to oldest available ledger'
+        );
+        sorobanRetentionWindowExceeded.inc({ network: name });
+        loop.eventsCursor = oldestAvailable;
+      }
+    }
+
+    const { events, latestLedger, truncated } = await getEvents(
+      loop.sorobanRpcUrl,
+      contractIds,
+      loop.eventsCursor,
+      MAX_EVENTS_PER_CYCLE
+    );
     if (events.length > 0) {
       routine.success({ network: name, events: events.length, fromLedger: loop.eventsCursor }, 'indexing contract events');
       contractEventsIndexed.inc(events.length);
       await insertContractEvents(pool, name, events);
       await indexCustomEvents(loop, events);
+    }
+    if (truncated) {
+      sorobanEventsTruncated.inc({ network: name });
+      log.info(
+        { network: name, eventsFetched: events.length, maxEventsPerCycle: MAX_EVENTS_PER_CYCLE },
+        'Soroban event polling hit per-cycle limit; remaining events will be fetched in next cycle'
+      );
     }
     loop.eventsCursor = Math.max(loop.eventsCursor, latestLedger - EVENTS_SAFETY_LAG_LEDGERS + 1);
   } catch (err) {
@@ -510,5 +568,18 @@ if (require.main === module) {
 /** Errors are logged as a field, not interpolated, so they stay queryable. */
 function message(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
+}
+
+/** Redacts the password from a database URL for logging. */
+function redactUrl(url: string): string {
+  try {
+    const parsed = new URL(url);
+    if (parsed.password) {
+      parsed.password = '***';
+    }
+    return parsed.toString();
+  } catch {
+    return '(unparseable)';
+  }
 }
 

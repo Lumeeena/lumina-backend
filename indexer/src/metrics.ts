@@ -75,6 +75,13 @@ export const sorobanRequests = new Counter({
   registers: [registry],
 });
 
+export const sorobanRequestDuration = new Histogram({
+  name: 'lumina_soroban_request_duration_seconds',
+  help: 'Outbound Soroban RPC request latency.',
+  buckets: [0.05, 0.1, 0.25, 0.5, 1, 2, 5, 10],
+  registers: [registry],
+});
+
 export const indexerPoolErrors = new Counter({
   name: 'lumina_indexer_db_pool_errors_total',
   help: 'Unexpected idle PostgreSQL pool client errors.',
@@ -141,6 +148,27 @@ export const lastSuccessfulIndexTimestamp = new Gauge({
 export const lastSuccessfulRegistryDiscoveryTimestamp = new Gauge({
   name: 'lumina_last_successful_registry_discovery_timestamp_seconds',
   help: 'Unix time of the last successful registry contract discovery.',
+  registers: [registry],
+});
+
+export const accountCacheSize = new Gauge({
+  name: 'lumina_account_cache_size',
+  help: 'Current size of the account cache, by network.',
+  labelNames: ['network'] as const,
+  registers: [registry],
+});
+
+export const sorobanEventsTruncated = new Counter({
+  name: 'lumina_soroban_events_truncated_total',
+  help: 'Soroban event polling cycles that hit the per-cycle event limit.',
+  labelNames: ['network'] as const,
+  registers: [registry],
+});
+
+export const sorobanRetentionWindowExceeded = new Counter({
+  name: 'lumina_soroban_retention_window_exceeded_total',
+  help: 'Times the Soroban event cursor fell behind the RPC retention window.',
+  labelNames: ['network'] as const,
   registers: [registry],
 });
 
