@@ -460,6 +460,8 @@ query {
 }
 ```
 
+Introspection is disabled when `NODE_ENV=production` unless `GRAPHQL_INTROSPECTION=true`; see [`SECURITY_HARDENING.md`](SECURITY_HARDENING.md), which also documents query depth/complexity limits.
+
 Most GraphQL tools (Apollo Client, GraphQL CodeGen, etc.) use introspection to power code generation and IDE autocomplete.
 
 ## API Versioning

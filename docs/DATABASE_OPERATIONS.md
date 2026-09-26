@@ -46,6 +46,24 @@ flags exact duplicate key/predicate definitions for manual review. Preserve
 indexes supporting constraints and re-check `EXPLAIN (ANALYZE, BUFFERS)` for
 important queries before scheduling any removal.
 
+### Static findings (no production statistics)
+
+Reviewed from `db/schema.sql`, migrations 001-006 and the query code in
+`graphql-server/src` and `indexer/src`:
+
+- **Dropped (migration 007):** `idx_api_keys_key_hash` duplicates the index
+  behind `key_hash TEXT NOT NULL UNIQUE`. Redundant by construction.
+- **Kept, but flagged for the production report:** `idx_api_keys_revoked_at`
+  (no query filters on `revoked_at` alone; the table is tiny),
+  `idx_operations_details` and `idx_events_topics` GIN indexes (no
+  `@>`/`?` predicate found in the code that would use them; GIN is the most
+  expensive to maintain on the write path), and the standalone
+  `created_at DESC` indexes on `transactions`, `operations` and
+  `contract_events` (only `operations.created_at` is filtered on, by the asset
+  volume query). These are unused only on the evidence of static reading, so
+  they are not removed until the report below confirms `idx_scan = 0` over a
+  representative window.
+
 No production database credentials are available in this checkout, so no
 index has been removed based on unobserved production usage. Run the report
 against a representative deployment and attach its output before deciding on

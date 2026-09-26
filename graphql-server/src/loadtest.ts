@@ -14,7 +14,6 @@
  */
 
 import { performance } from 'perf_hooks';
-import { URL } from 'url';
 import { subsystem } from './logger';
 
 const log = subsystem('loadtest');

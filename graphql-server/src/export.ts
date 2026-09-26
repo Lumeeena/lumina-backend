@@ -48,7 +48,8 @@ export async function writeDatabaseExport(pool: Pool, write: (line: string) => P
   const batchSize = 500;
   for (const table of EXPORT_TABLES) {
     let offset = 0;
-    while (true) {
+    let hasMoreRows = true;
+    while (hasMoreRows) {
       const result = await pool.query(
         `SELECT * FROM ${table.name} ORDER BY ${table.order} LIMIT $1 OFFSET $2`,
         [batchSize, offset]
@@ -56,7 +57,7 @@ export async function writeDatabaseExport(pool: Pool, write: (line: string) => P
       for (const row of result.rows) {
         if (!await write(`${JSON.stringify({ table: table.name, record: row })}\n`)) return;
       }
-      if (result.rows.length < batchSize) break;
+      hasMoreRows = result.rows.length === batchSize;
       offset += batchSize;
     }
   }

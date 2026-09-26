@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import type { Pool } from 'pg';
 import { buildHealthReport, healthStatusCode, type IndexerState } from './health';
 
-const THRESHOLDS = { maxSecondsSinceIndex: 60, maxLagLedgers: 20 };
+const THRESHOLDS = { maxSecondsSinceIndex: 60, maxLagLedgers: 20, startToleranceSeconds: 300 };
 const NOW = 1_700_000_000_000;
 
 function state(overrides: Partial<IndexerState> = {}): IndexerState {
@@ -126,7 +126,7 @@ test('uptime is reported in seconds', async () => {
 });
 
 test('thresholds are honoured as configured', async () => {
-  const lenient = { maxSecondsSinceIndex: 600, maxLagLedgers: 500 };
+  const lenient = { maxSecondsSinceIndex: 600, maxLagLedgers: 500, startToleranceSeconds: 300 };
   const report = await buildHealthReport(
     state({ lastIndexedAt: NOW - 120_000, latestIndexedLedger: 900, latestHorizonLedger: 1000 }),
     okPool,

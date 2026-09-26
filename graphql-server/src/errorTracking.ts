@@ -19,7 +19,7 @@ export function initErrorTracking(): void {
     environment: SENTRY_ENVIRONMENT,
     release: SENTRY_RELEASE,
     tracesSampleRate: 1.0,
-    beforeSend(event, hint) {
+    beforeSend(event, _hint) {
       return scrubSensitiveData(event);
     },
   });
@@ -50,7 +50,7 @@ export function setUserContext(userId?: string, email?: string): void {
   }
 }
 
-function scrubSensitiveData(event: Sentry.Event): Sentry.Event {
+function scrubSensitiveData(event: Sentry.ErrorEvent): Sentry.ErrorEvent {
   if (event.request) {
     const headers = event.request.headers || {};
     const scrubbed = { ...headers };
@@ -63,8 +63,9 @@ function scrubSensitiveData(event: Sentry.Event): Sentry.Event {
     event.request.headers = scrubbed;
   }
 
-  if (event.contexts?.db?.statement) {
-    event.contexts.db.statement = scrubPII(event.contexts.db.statement);
+  const statement = event.contexts?.db?.statement;
+  if (typeof statement === 'string') {
+    event.contexts!.db!.statement = scrubPII(statement);
   }
 
   if (event.exception?.values) {

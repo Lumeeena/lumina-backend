@@ -1,5 +1,6 @@
 import { ApolloServer } from '@apollo/server';
 import { expressMiddleware } from '@apollo/server/express4';
+import { ApolloServerPluginLandingPageDisabled } from '@apollo/server/plugin/disabled';
 import { ApolloServerPluginDrainHttpServer } from '@apollo/server/plugin/drainHttpServer';
 import { makeExecutableSchema } from '@graphql-tools/schema';
 import cors from 'cors';
@@ -12,9 +13,10 @@ import { GraphQLError } from 'graphql';
 import { useServer } from 'graphql-ws/lib/use/ws';
 import { WebSocketServer } from 'ws';
 import { to as copyTo } from 'pg-copy-streams';
-import { Context, createContext, resolvers } from './resolvers';
+import { createContext, resolvers, type Context } from './resolvers';
 import { LedgerNotifier, SubscriberLimitError } from './pubsub';
 import { subsystem } from './logger';
+import { loadMigrations, runMigrations } from './migrations';
 import {
   DEFAULT_API_KEY_HEADER,
   apiKeyAuthMiddleware,
@@ -22,14 +24,7 @@ import {
   parseAllowAnonymous,
 } from './auth';
 import { buildServerHealth, metricsPlugin, samplePool, serverHealthStatusCode } from './observability';
-import { v4 as uuidv4 } from 'uuid'; // TODO: Ensure 'uuid' is a dependency
-
-interface Context extends BaseContext {
-  correlationId: string;
-  requestLogger: ReturnType<typeof subsystem>;
-}
 import {
-  dbPoolErrors,
   listenerConnected,
   metricsContentType,
   renderMetrics,
@@ -38,7 +33,16 @@ import {
 } from './metrics';
 import { initTracing, shutdownTracing } from './tracing';
 import { initErrorTracking, shutdownErrorTracking } from './errorTracking';
+import {
+  corsOptions,
+  formatTimeoutError,
+  loadSecurityConfig,
+  poolTimeoutOptions,
+  queryLimitsPlugin,
+  requestTimeoutMiddleware,
+} from './security';
 import { scheduledExportOptions, startScheduledExports } from './scheduledExport';
+import { loadMigrations, runMigrations } from './migrations';
 
 const log = subsystem('server');
 const startedAt = Date.now();
@@ -60,9 +64,19 @@ const MAX_SUBSCRIPTIONS = parseInt(process.env.MAX_SUBSCRIPTIONS ?? '500', 10);
 const SUBSCRIPTION_QUEUE_LIMIT = parseInt(process.env.SUBSCRIPTION_QUEUE_LIMIT ?? '64', 10);
 const API_KEY_HEADER = (process.env.API_KEY_HEADER ?? DEFAULT_API_KEY_HEADER).toLowerCase();
 const ALLOW_ANONYMOUS_ACCESS = parseAllowAnonymous(process.env.ALLOW_ANONYMOUS_ACCESS);
+const DB_POOL_MAX = parseInt(process.env.DB_POOL_MAX ?? '10', 10);
+const DB_POOL_IDLE_TIMEOUT = parseInt(process.env.DB_POOL_IDLE_TIMEOUT ?? '10000', 10);
+const DB_POOL_CONNECTION_TIMEOUT = parseInt(process.env.DB_POOL_CONNECTION_TIMEOUT ?? '0', 10);
 
-const pool = new Pool({ 
+const DB_POOL_MAX = process.env.DB_POOL_MAX ? parseInt(process.env.DB_POOL_MAX, 10) : undefined;
+const DB_POOL_IDLE_TIMEOUT = process.env.DB_POOL_IDLE_TIMEOUT ? parseInt(process.env.DB_POOL_IDLE_TIMEOUT, 10) : undefined;
+const DB_POOL_CONNECTION_TIMEOUT = process.env.DB_POOL_CONNECTION_TIMEOUT ? parseInt(process.env.DB_POOL_CONNECTION_TIMEOUT, 10) : undefined;
+
+const security = loadSecurityConfig();
+
+const pool = new Pool({
   connectionString: DATABASE_URL,
+  ...poolTimeoutOptions(security),
   max: DB_POOL_MAX,
   idleTimeoutMillis: DB_POOL_IDLE_TIMEOUT,
   connectionTimeoutMillis: DB_POOL_CONNECTION_TIMEOUT,
@@ -144,7 +158,13 @@ async function main() {
 
   const server = new ApolloServer<Context>({
     schema,
+    // Introspection and the landing page are development conveniences: off in
+    // production unless GRAPHQL_INTROSPECTION=true.
+    introspection: security.introspection,
+    formatError: formatTimeoutError,
     plugins: [
+      queryLimitsPlugin(security),
+      ...(security.introspection ? [] : [ApolloServerPluginLandingPageDisabled()]),
       metricsPlugin(),
       ApolloServerPluginDrainHttpServer({ httpServer }),
       {
@@ -263,7 +283,8 @@ async function main() {
   const middleware = [
     // CORS first so a 401 from the auth layer still carries the headers a
     // browser needs to read the error body.
-    cors(),
+    cors(corsOptions(security)),
+    requestTimeoutMiddleware(security.requestTimeoutMs),
     // Ahead of the body parser and the GraphQL layer both. The parser is
     // skipped for an unauthenticated request, so an anonymous caller cannot
     // make the server buffer an arbitrary payload, and a request that cannot be
