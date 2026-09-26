@@ -46,6 +46,9 @@ const DATABASE_URL = process.env.DATABASE_URL ?? 'postgresql://localhost:5432/lu
 const PORT = parseInt(process.env.PORT ?? '4000', 10);
 const MAX_SUBSCRIPTIONS = parseInt(process.env.MAX_SUBSCRIPTIONS ?? '500', 10);
 const SUBSCRIPTION_QUEUE_LIMIT = parseInt(process.env.SUBSCRIPTION_QUEUE_LIMIT ?? '64', 10);
+const exportRateLimit = parseInt(process.env.EXPORT_RATE_LIMIT_PER_MINUTE ?? '2', 10);
+const exportConcurrency = parseInt(process.env.MAX_CONCURRENT_EXPORTS ?? '2', 10);
+const exportLimiter = new ExportLimiter(exportRateLimit, exportConcurrency);
 
 const pool = new Pool({ connectionString: DATABASE_URL });
 pool.on('error', err => {
@@ -63,6 +66,10 @@ const notifier = new LedgerNotifier({
 let stopScheduledExports: () => Promise<void> = async () => {};
 
 async function main() {
+  if (process.env.RUN_MIGRATIONS_ON_STARTUP === 'true') {
+    const status = await runMigrations(pool, loadMigrations());
+    log.info({ applied: status.applied, pending: status.pending }, 'database migrations ready');
+  }
   initErrorTracking();
   initTracing();
 
@@ -166,6 +173,52 @@ async function main() {
         log.error({ err: err instanceof Error ? err.message : err }, 'failed to render metrics');
         res.status(500).send('metrics unavailable');
       });
+  });
+
+  app.get('/export', async (req, res) => {
+    const match = /^Bearer\s+(lum_[a-f0-9]{64})$/i.exec(req.header('authorization') ?? '');
+    let authorized = false;
+    try { authorized = Boolean(match && await hasExportPermission(pool, match[1])); }
+    catch (error) {
+      log.error({ err: error instanceof Error ? error.message : error }, 'export authorization failed');
+      res.status(503).json({ error: 'Export authorization is temporarily unavailable' });
+      return;
+    }
+    if (!authorized || !match) {
+      res.status(403).json({ error: 'A valid API key with export permission is required' });
+      return;
+    }
+    const keyHash = hashApiKey(match[1]);
+    if (!exportLimiter.allow(keyHash)) {
+      res.set('Retry-After', '60').status(429).json({ error: 'Export rate limit exceeded' });
+      return;
+    }
+    const release = exportLimiter.acquire();
+    if (!release) {
+      res.set('Retry-After', '30').status(429).json({ error: 'Concurrent export limit reached' });
+      return;
+    }
+    res.status(200).set({
+      'Content-Type': 'application/x-ndjson; charset=utf-8',
+      'Content-Disposition': 'attachment; filename="lumina-export.ndjson"',
+      'Cache-Control': 'no-store',
+    });
+    try {
+      await writeDatabaseExport(pool, line => new Promise<boolean>(resolve => {
+        if (res.destroyed) { resolve(false); return; }
+        if (res.write(line)) { resolve(true); return; }
+        const drained = () => { cleanup(); resolve(true); };
+        const closed = () => { cleanup(); resolve(false); };
+        const cleanup = () => { res.off('drain', drained); res.off('close', closed); };
+        res.once('drain', drained);
+        res.once('close', closed);
+      }));
+      if (!res.destroyed) res.end();
+    } catch (error) {
+      log.error({ err: error instanceof Error ? error.message : error }, 'database export failed');
+      if (!res.headersSent) res.status(500).json({ error: 'Export failed' });
+      else res.destroy(error instanceof Error ? error : undefined);
+    } finally { release(); }
   });
 
   const middleware = [

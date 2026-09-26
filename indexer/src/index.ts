@@ -111,6 +111,9 @@ let loopTick = 0;
 let eventsCursor = 0;
 const accountCache = new Map<string, number>(); // address -> last-fetched-at
 
+let isShuttingDown = false;
+let isLoopRunning = false;
+
 function pruneAccountCache(now: number): void {
   if (accountCache.size < ACCOUNT_CACHE_MAX_SIZE) return;
   for (const [address, fetchedAt] of accountCache) {
@@ -185,6 +188,7 @@ export async function runLedgerCatchUp(
   onAdvanced: (cursor: number) => void = () => {}
 ): Promise<number> {
   for (let seq = cursor + 1; seq <= latest; seq++) {
+    if (isShuttingDown) break;
     const indexed = await indexOne(seq);
     if (!indexed) break;
     cursor = seq;
@@ -321,7 +325,8 @@ async function run() {
     log.info({ ledger: cursor + 1 }, 'resuming from ledger');
   }
 
-  while (true) {
+  isLoopRunning = true;
+  while (!isShuttingDown) {
     try {
       if (loopTick % REGISTRY_POLL_EVERY_N_TICKS === 0) {
         await pollRegistry();
@@ -334,6 +339,7 @@ async function run() {
 
       cursor = await runLedgerCatchUp(cursor, latest, undefined, advanced => recordHorizonTip(latest, advanced));
 
+      if (isShuttingDown) break;
       await pollContractEvents();
     } catch (err) {
       indexingErrors.inc({ loop: 'main' });
@@ -343,12 +349,26 @@ async function run() {
       }
     }
 
+    if (isShuttingDown) break;
     await new Promise(r => setTimeout(r, POLL_INTERVAL_MS));
   }
+  isLoopRunning = false;
 }
 
 async function shutdown() {
+  if (isShuttingDown) return;
+  isShuttingDown = true;
   log.info('shutting down indexer');
+
+  setTimeout(() => {
+    log.fatal('shutdown timeout exceeded, forcing exit');
+    process.exit(1);
+  }, 10000).unref();
+
+  while (isLoopRunning) {
+    await new Promise(r => setTimeout(r, 100));
+  }
+
   await pool.end();
   await shutdownTracing();
   await shutdownErrorTracking();

@@ -21,6 +21,7 @@ import {
   getApiKey,
   revokeApiKey,
   setApiKeyLimit,
+  setApiKeyExportPermission,
 } from './keys';
 
 const DATABASE_URL = process.env.DATABASE_URL ?? 'postgresql://localhost:5432/lumina';
@@ -34,6 +35,8 @@ function usage(): never {
       '  manage-keys show <id|hash>                Show key metadata (cannot print plaintext key)',
       '  manage-keys revoke <id|hash>              Revoke an API key immediately',
       '  manage-keys set-limit <id|hash> <limit>   Set key rate limit in requests per minute',
+      '  manage-keys grant-export <id|hash>        Grant bulk export permission',
+      '  manage-keys revoke-export <id|hash>       Revoke bulk export permission',
     ].join('\n')
   );
   process.exit(1);
@@ -174,6 +177,14 @@ export async function runCli(args: string[], pool: Pool): Promise<void> {
       }
       const key = await setApiKeyLimit(pool, arg1, parsedLimit);
       console.log(`✓ Updated rate limit for API key #${key.id} ("${key.label}") to ${key.rateLimit} req/min.`);
+      break;
+    }
+
+    case 'grant-export':
+    case 'revoke-export': {
+      if (!arg1) { console.error(`Error: "${command}" requires a key ID or hash.`); usage(); }
+      await setApiKeyExportPermission(pool, arg1, command === 'grant-export');
+      console.log(`Bulk export permission ${command === 'grant-export' ? 'granted' : 'revoked'} for API key ${arg1}.`);
       break;
     }
 
