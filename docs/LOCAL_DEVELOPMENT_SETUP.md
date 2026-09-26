@@ -152,7 +152,8 @@ A healthy response is `{"status":"ok","checks":...}`. An unhealthy one includes 
 | Variable | Default | Purpose |
 |---|---|---|
 | `DATABASE_URL` | `postgresql://localhost:5432/lumina` | PostgreSQL connection |
-| `HORIZON_URL` | `https://horizon.stellar.org` | Mainnet Horizon API (change for testnet) |
+| `NETWORKS` | unset | Comma-separated networks to index (e.g. `mainnet,testnet`); each needs `<NAME>_HORIZON_URL`. See [`MULTI_NETWORK.md`](MULTI_NETWORK.md) |
+| `HORIZON_URL` | `https://horizon.stellar.org` | Mainnet Horizon API (change for testnet). Single-network deployments only — ignored when `NETWORKS` is set |
 | `START_LEDGER` | Latest ledger | Initial ledger to index; useful for backfilling |
 | `POLL_INTERVAL_MS` | `5000` | Delay between ledger polls |
 | `HORIZON_MIN_REQUEST_INTERVAL_MS` | `100` | Minimum spacing between Horizon requests (raises if 429 rate-limit errors appear) |
@@ -169,6 +170,8 @@ A healthy response is `{"status":"ok","checks":...}`. An unhealthy one includes 
 | `LOG_LEVEL` | `info` | `debug` for per-request GraphQL detail |
 | `LOG_PRETTY` | unset | Set to `true` for human-readable logs |
 | `MAX_SUBSCRIPTIONS` | `500` | Max concurrent GraphQL subscriptions |
+| `NETWORKS` | unset | Same scheme as the indexer; queries then accept a `network` argument |
+| `PERSISTED_QUERIES` | `true` | Automatic persisted queries; `false` refuses hash-only requests |
 
 ## Switching to Testnet
 
@@ -193,6 +196,21 @@ cd indexer && npm run dev
 The server keeps running — queries now return testnet data. The GraphQL query syntax is identical; only the data changes.
 
 **Common mistake:** Forgetting to truncate tables. If you query after switching and get empty results, or if queries time out, clear the database and re-start.
+
+To keep **both** at once instead of switching, declare them and point each at
+its own endpoint — rows are keyed by network, so they share one database
+without mixing (and nothing needs truncating):
+
+```bash
+export NETWORKS=mainnet,testnet
+export MAINNET_HORIZON_URL=https://horizon.stellar.org
+export TESTNET_HORIZON_URL=https://horizon-testnet.stellar.org
+```
+
+The GraphQL server reads the same variables; queries then take
+`network: TESTNET`, and omitting the argument serves the primary network.
+Full scheme, error cases and the one-time relabel of existing rows:
+[`MULTI_NETWORK.md`](MULTI_NETWORK.md).
 
 ## Running Tests
 
