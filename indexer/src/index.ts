@@ -22,6 +22,7 @@
 import { Networks } from '@stellar/stellar-sdk';
 import {
   createPool,
+  ensurePartitions,
   getLatestIndexedEventLedger,
   getLatestIndexedLedger,
   indexLedger,
@@ -91,6 +92,12 @@ const REGISTRY_CONTRACT_ID = process.env.REGISTRY_CONTRACT_ID;
 const REGISTRY_READ_ACCOUNT = process.env.REGISTRY_READ_ACCOUNT;
 const REGISTRY_NETWORK_PASSPHRASE = process.env.REGISTRY_NETWORK_PASSPHRASE ?? Networks.TESTNET;
 const REGISTRY_POLL_EVERY_N_TICKS = 12; // ~once/minute at the default 5s poll interval
+
+// Partitions are 2,000,000 ledgers wide (~115 days), so there is no urgency
+// here — checking every ~10 minutes at the default poll interval is plenty
+// of margin to create the next partition well before the chain reaches it,
+// for the cost of one cheap SELECT + a handful of catalog lookups.
+const PARTITION_MAINTENANCE_EVERY_N_TICKS = 120;
 
 const LEDGER_RETRY_ATTEMPTS = 3;
 const LEDGER_RETRY_BASE_MS = 500;
@@ -346,6 +353,12 @@ async function run() {
     try {
       if (loopTick % REGISTRY_POLL_EVERY_N_TICKS === 0) {
         await pollRegistry();
+      }
+      if (loopTick % PARTITION_MAINTENANCE_EVERY_N_TICKS === 0) {
+        await ensurePartitions(pool).catch(err => {
+          indexingErrors.inc({ loop: 'partition-maintenance' });
+          log.error({ err: message(err) }, 'partition maintenance failed');
+        });
       }
       loopTick++;
 

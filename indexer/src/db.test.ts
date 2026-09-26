@@ -107,6 +107,40 @@ test('indexLedger writes accounts inside the same commit when provided', async (
   ]);
 });
 
+test('ensurePartitions calls the partition-maintenance function with the requested lookahead', async () => {
+  const calls: Array<{ sql: string; params: unknown[] }> = [];
+  const pool = {
+    query: async (sql: string, params: unknown[]) => {
+      calls.push({ sql, params });
+      return { rows: [] };
+    },
+  } as unknown as Pool;
+
+  await ensurePartitions(pool, 7);
+
+  assert.equal(calls.length, 1);
+  const call = calls[0];
+  assert.ok(call);
+  assert.match(call.sql, /SELECT ensure_operations_partitions\(\$1\)/);
+  assert.deepEqual(call.params, [7]);
+});
+
+test('ensurePartitions defaults the lookahead to 5 partitions', async () => {
+  const calls: Array<{ sql: string; params: unknown[] }> = [];
+  const pool = {
+    query: async (sql: string, params: unknown[]) => {
+      calls.push({ sql, params });
+      return { rows: [] };
+    },
+  } as unknown as Pool;
+
+  await ensurePartitions(pool);
+
+  const call = calls[0];
+  assert.ok(call);
+  assert.deepEqual(call.params, [5]);
+});
+
 test('upsertAccount inserts with an ON CONFLICT upsert', async () => {
   const queries: string[] = [];
   const client = { query: async (sql: string) => { queries.push(sql); return { rows: [] }; } } as unknown as PoolClient;
