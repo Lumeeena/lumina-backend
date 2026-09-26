@@ -3,6 +3,7 @@ import type { HorizonAccount, HorizonLedger, HorizonOperation, HorizonTransactio
 import type { ContractEvent } from './soroban';
 import { notifyIndexed } from './notify';
 import { subsystem } from './logger';
+import { indexerPoolErrors } from './metrics';
 
 const log = subsystem('db');
 import { parseContractSchema, type ContractSchema } from './customSchema';
