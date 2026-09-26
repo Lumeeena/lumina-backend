@@ -8,6 +8,7 @@ import {
   getLatestIndexedLedger,
   indexLedger,
   insertContractEvents,
+  isCheckViolation,
   upsertAccount,
 } from './db';
 import { indexerPoolErrors } from './metrics';
@@ -85,6 +86,60 @@ test('indexLedger rolls back and releases the client on failure', async () => {
   const { client, calls } = makeFakeClient({ failOn: 'INSERT INTO operations' });
   await assert.rejects(() => indexLedger(fakePool(client), 'mainnet', ledger, [tx], [op]));
   assert.deepEqual(calls, ['BEGIN', 'ledgers', 'transactions', 'operations', 'ROLLBACK', 'RELEASE']);
+});
+
+// A Postgres CHECK-constraint violation: SQLSTATE 23514, with the constraint
+// name attached the way pg attaches it.
+function checkViolation(constraint: string): Error & { code: string; constraint: string } {
+  const err = new Error(`new row for relation "ledgers" violates check constraint "${constraint}"`) as Error & {
+    code: string;
+    constraint: string;
+  };
+  err.code = '23514';
+  err.constraint = constraint;
+  return err;
+}
+
+test('isCheckViolation recognises a Postgres check violation by SQLSTATE', () => {
+  assert.equal(isCheckViolation(checkViolation('ledgers_sequence_check')), true);
+  assert.equal(isCheckViolation(Object.assign(new Error('boom'), { code: '23503' })), false); // FK violation
+  assert.equal(isCheckViolation(Object.assign(new Error('boom'), { code: '23505' })), false); // unique violation
+  assert.equal(isCheckViolation(new Error('no code')), false);
+  assert.equal(isCheckViolation(null), false);
+  assert.equal(isCheckViolation(undefined), false);
+  assert.equal(isCheckViolation('23514'), false); // the code alone is not the error
+});
+
+test('indexLedger surfaces a check violation as a failed write', async () => {
+  // A check constraint on the ledger insert rejects the row: the write fails,
+  // rolls back, and the violation propagates so the retry loop in index.ts can
+  // classify it (a check violation is not transient, so retrying is pointless).
+  const client = {
+    query: async (sql: string) => {
+      if (sql.includes('INSERT INTO ledgers')) throw checkViolation('ledgers_transaction_count_check');
+      return { rows: [] };
+    },
+    release: () => {},
+  } as unknown as PoolClient;
+
+  await assert.rejects(
+    () => indexLedger(fakePool(client), 'mainnet', ledger, [tx], [op]),
+    (err: unknown) => err instanceof Error && isCheckViolation(err)
+  );
+});
+
+test('insertContractEvents surfaces a check violation as a failed write', async () => {
+  const pool = {
+    query: async (sql: string) => {
+      if (sql.includes('INSERT INTO contract_events')) throw checkViolation('contract_events_id_check');
+      return { rows: [] };
+    },
+  } as unknown as Pool;
+
+  await assert.rejects(
+    () => insertContractEvents(pool, 'mainnet', [event]),
+    (err: unknown) => err instanceof Error && isCheckViolation(err)
+  );
 });
 
 test('getLatestIndexedLedger returns 0 when the table is empty', async () => {

@@ -10,6 +10,47 @@ import { parseContractSchema, type ContractSchema } from './customSchema';
 import type { DecodedCustomEvent } from './customDecode';
 
 /**
+ * Postgres SQLSTATE for a CHECK constraint violation.
+ *
+ * Worth picking out from a generic database error: a check violation means the
+ * row itself is implausible (see db/migrations/008_data_constraints.sql), so
+ * retrying the identical write fails identically — unlike a transient error
+ * (deadlock, connection drop), a retry will never succeed. Naming the
+ * constraint turns a cryptic write failure into an actionable data-quality
+ * signal.
+ */
+const PG_CHECK_VIOLATION = '23514';
+
+/** True when the error is a Postgres CHECK constraint violation. */
+export function isCheckViolation(err: unknown): boolean {
+  return typeof err === 'object' && err !== null && (err as { code?: unknown }).code === PG_CHECK_VIOLATION;
+}
+
+/** A short, loggable description of a constraint violation, if it carries one. */
+function describeCheckViolation(err: unknown): string {
+  const e = err as { constraint?: unknown; table?: unknown };
+  if (typeof e.constraint === 'string' && e.constraint) {
+    return `check constraint "${e.constraint}"${typeof e.table === 'string' && e.table ? ` on ${e.table}` : ''}`;
+  }
+  return 'a check constraint';
+}
+
+/**
+ * Report a failed write clearly when it was rejected by a check constraint.
+ *
+ * Called before the error is retried/rewritten by the caller, so the specific
+ * violation is visible alongside the generic retry logging.
+ */
+function logCheckViolation(context: Record<string, unknown>, err: unknown): void {
+  if (!isCheckViolation(err)) return;
+  log.error(
+    { ...context, violation: describeCheckViolation(err), err: err instanceof Error ? err.message : String(err) },
+    'write rejected by a database check constraint; the row is implausible, so retrying will not help'
+  );
+}
+
+
+/**
  * Pool factory with the idle-client error handled.
  *
  * Postgres emits `error` on the pool when a client dies while idle. With no
@@ -135,6 +176,7 @@ export async function indexLedger(
     await client.query('COMMIT');
   } catch (err) {
     await client.query('ROLLBACK');
+    logCheckViolation({ network, ledger: ledger.sequence, transactions: transactions.length, operations: operations.length }, err);
     throw err;
   } finally {
     client.release();
@@ -193,24 +235,29 @@ export async function insertContractEvents(
   // batch, which is what a subscriber would read up to.
   let highestLedger = 0;
 
-  for (const event of events) {
-    await pool.query(
-      `INSERT INTO contract_events (id, type, contract_id, ledger, created_at, paging_token, topics, value, network)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-       ON CONFLICT (id, network) DO NOTHING`,
-      [
-        event.id,
-        event.type,
-        event.contractId,
-        event.ledger,
-        event.createdAt,
-        event.pagingToken,
-        event.topics,
-        event.value === undefined ? null : JSON.stringify(event.value),
-        network,
-      ]
-    );
-    if (event.ledger > highestLedger) highestLedger = event.ledger;
+  try {
+    for (const event of events) {
+      await pool.query(
+        `INSERT INTO contract_events (id, type, contract_id, ledger, created_at, paging_token, topics, value, network)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+         ON CONFLICT (id, network) DO NOTHING`,
+        [
+          event.id,
+          event.type,
+          event.contractId,
+          event.ledger,
+          event.createdAt,
+          event.pagingToken,
+          event.topics,
+          event.value === undefined ? null : JSON.stringify(event.value),
+          network,
+        ]
+      );
+      if (event.ledger > highestLedger) highestLedger = event.ledger;
+    }
+  } catch (err) {
+    logCheckViolation({ network, events: events.length }, err);
+    throw err;
   }
 
   await notifyIndexed(pool, {
@@ -306,27 +353,32 @@ export async function insertCustomEvents(
 ): Promise<void> {
   if (events.length === 0) return;
 
-  for (const event of events) {
-    await pool.query(
-      `INSERT INTO custom_events
-         (event_id, contract_id, event_name, ledger, created_at, schema_version, fields, network)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-       ON CONFLICT (event_id, event_name, network) DO UPDATE SET
-         schema_version = EXCLUDED.schema_version,
-         fields = EXCLUDED.fields,
-         indexed_at = NOW()`,
-      [
-        event.eventId,
-        event.contractId,
-        event.eventName,
-        event.ledger,
-        event.createdAt,
-        event.schemaVersion,
-        // The whole point of the JSONB payload: field names travel as data,
-        // never as SQL identifiers.
-        JSON.stringify(event.fields),
-        network,
-      ]
-    );
+  try {
+    for (const event of events) {
+      await pool.query(
+        `INSERT INTO custom_events
+           (event_id, contract_id, event_name, ledger, created_at, schema_version, fields, network)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+         ON CONFLICT (event_id, event_name, network) DO UPDATE SET
+           schema_version = EXCLUDED.schema_version,
+           fields = EXCLUDED.fields,
+           indexed_at = NOW()`,
+        [
+          event.eventId,
+          event.contractId,
+          event.eventName,
+          event.ledger,
+          event.createdAt,
+          event.schemaVersion,
+          // The whole point of the JSONB payload: field names travel as data,
+          // never as SQL identifiers.
+          JSON.stringify(event.fields),
+          network,
+        ]
+      );
+    }
+  } catch (err) {
+    logCheckViolation({ network, events: events.length }, err);
+    throw err;
   }
 }
