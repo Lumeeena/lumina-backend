@@ -11,13 +11,15 @@ CREATE TABLE IF NOT EXISTS schema_migrations (
 -- ─── Ledgers ──────────────────────────────────────────────────────────────────
 
 CREATE TABLE IF NOT EXISTS ledgers (
-    sequence            BIGINT PRIMARY KEY,
+    sequence            BIGINT NOT NULL,
     closed_at           TIMESTAMPTZ NOT NULL,
     transaction_count   INTEGER NOT NULL DEFAULT 0,
     operation_count     INTEGER NOT NULL DEFAULT 0,
     base_fee            BIGINT NOT NULL DEFAULT 100,
     base_reserve        BIGINT NOT NULL DEFAULT 5000000,
-    indexed_at          TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    indexed_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    network             TEXT NOT NULL DEFAULT 'mainnet',
+    PRIMARY KEY (sequence, network)
 );
 
 CREATE INDEX idx_ledgers_closed_at ON ledgers (closed_at DESC);
@@ -25,8 +27,8 @@ CREATE INDEX idx_ledgers_closed_at ON ledgers (closed_at DESC);
 -- ─── Transactions ─────────────────────────────────────────────────────────────
 
 CREATE TABLE IF NOT EXISTS transactions (
-    hash                TEXT PRIMARY KEY,
-    ledger              BIGINT NOT NULL REFERENCES ledgers(sequence),
+    hash                TEXT NOT NULL,
+    ledger              BIGINT NOT NULL,
     created_at          TIMESTAMPTZ NOT NULL,
     source_account      TEXT NOT NULL,
     fee_charged         BIGINT NOT NULL,
@@ -34,7 +36,10 @@ CREATE TABLE IF NOT EXISTS transactions (
     successful          BOOLEAN NOT NULL,
     memo_type           TEXT,
     memo                TEXT,
-    indexed_at          TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    indexed_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    network             TEXT NOT NULL DEFAULT 'mainnet',
+    PRIMARY KEY (hash, network),
+    FOREIGN KEY (ledger, network) REFERENCES ledgers (sequence, network)
 );
 
 CREATE INDEX idx_transactions_ledger     ON transactions (ledger DESC);
@@ -61,15 +66,18 @@ CREATE INDEX idx_transactions_created_at ON transactions (created_at DESC);
 -- that writes operations on their own will fail on this constraint by design.
 
 CREATE TABLE IF NOT EXISTS operations (
-    id                  TEXT PRIMARY KEY,
+    id                  TEXT NOT NULL,
     type                TEXT NOT NULL,
-    transaction_hash    TEXT NOT NULL REFERENCES transactions(hash),
+    transaction_hash    TEXT NOT NULL,
     ledger              BIGINT NOT NULL,
     created_at          TIMESTAMPTZ NOT NULL,
     source_account      TEXT NOT NULL,
     -- JSONB column holds type-specific fields (from, to, amount, asset, etc.)
     details             JSONB NOT NULL DEFAULT '{}',
-    indexed_at          TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    indexed_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    network             TEXT NOT NULL DEFAULT 'mainnet',
+    PRIMARY KEY (id, network),
+    FOREIGN KEY (transaction_hash, network) REFERENCES transactions (hash, network)
 );
 
 CREATE INDEX idx_operations_transaction   ON operations (transaction_hash);
@@ -82,7 +90,7 @@ CREATE INDEX idx_operations_details       ON operations USING GIN (details);
 -- ─── Accounts ─────────────────────────────────────────────────────────────────
 
 CREATE TABLE IF NOT EXISTS accounts (
-    address             TEXT PRIMARY KEY,
+    address             TEXT NOT NULL,
     sequence            TEXT NOT NULL,
     subentry_count      INTEGER NOT NULL DEFAULT 0,
     last_modified_ledger BIGINT NOT NULL,
@@ -92,13 +100,15 @@ CREATE TABLE IF NOT EXISTS accounts (
     flags               JSONB NOT NULL DEFAULT '{}',
     thresholds          JSONB NOT NULL DEFAULT '{}',
     indexed_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at          TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    updated_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    network             TEXT NOT NULL DEFAULT 'mainnet',
+    PRIMARY KEY (address, network)
 );
 
 -- ─── Contract Events (Soroban) ────────────────────────────────────────────────
 
 CREATE TABLE IF NOT EXISTS contract_events (
-    id                  TEXT PRIMARY KEY,
+    id                  TEXT NOT NULL,
     type                TEXT NOT NULL DEFAULT 'contract',
     contract_id         TEXT NOT NULL,
     ledger              BIGINT NOT NULL,
@@ -106,7 +116,9 @@ CREATE TABLE IF NOT EXISTS contract_events (
     paging_token        TEXT NOT NULL,
     topics              TEXT[] NOT NULL DEFAULT '{}',
     value               JSONB,
-    indexed_at          TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    indexed_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    network             TEXT NOT NULL DEFAULT 'mainnet',
+    PRIMARY KEY (id, network)
 );
 
 CREATE INDEX idx_events_contract_id  ON contract_events (contract_id);
@@ -119,11 +131,13 @@ CREATE INDEX idx_events_topics       ON contract_events USING GIN (topics);
 -- as JSONB rather than shredded into tables because it is read whole, once per
 -- indexer start, and never queried by its parts.
 CREATE TABLE IF NOT EXISTS contract_schemas (
-    contract_id     TEXT PRIMARY KEY,
+    contract_id     TEXT NOT NULL,
     version         INTEGER NOT NULL DEFAULT 1,
     definition      JSONB NOT NULL,
     created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    network         TEXT NOT NULL DEFAULT 'mainnet',
+    PRIMARY KEY (contract_id, network)
 );
 -- Decoded events live in one shared table keyed by JSONB payload, rather than a
 -- generated table per contract/event.
@@ -148,7 +162,8 @@ CREATE TABLE IF NOT EXISTS custom_events (
     schema_version  INTEGER NOT NULL,
     fields          JSONB NOT NULL DEFAULT '{}',
     indexed_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    PRIMARY KEY (event_id, event_name)
+    network         TEXT NOT NULL DEFAULT 'mainnet',
+    PRIMARY KEY (event_id, event_name, network)
 );
 CREATE INDEX IF NOT EXISTS idx_custom_events_contract_event
     ON custom_events (contract_id, event_name, ledger DESC);
@@ -196,7 +211,8 @@ CREATE TABLE IF NOT EXISTS api_keys (
     rate_limit          INTEGER NOT NULL DEFAULT 60, -- requests per minute
     created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     revoked_at          TIMESTAMPTZ,
-    updated_at          TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    updated_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    export_enabled      BOOLEAN NOT NULL DEFAULT FALSE
 );
 
 CREATE INDEX IF NOT EXISTS idx_api_keys_key_hash ON api_keys (key_hash);
