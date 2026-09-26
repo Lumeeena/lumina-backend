@@ -200,9 +200,20 @@ connection instead.
 
 ### Indexer environment variables
 
+Configuration is shared with the GraphQL server and described in full in
+[`docs/MULTI_NETWORK.md`](docs/MULTI_NETWORK.md). Set `NETWORKS` to index more
+than one chain; leave it unset and the flat variables below describe a single
+network, exactly as before.
+
 | Variable | Default | Notes |
 |---|---|---|
-| `HORIZON_URL` | `https://horizon.stellar.org` | |
+| `NETWORKS` | unset | Comma-separated networks to index, in declaration order (`mainnet`, `testnet`, `futurenet`). One polling loop runs per network |
+| `PRIMARY_NETWORK` | first of `NETWORKS` | Which network registry discovery and the default `network` argument use |
+| `<NAME>_HORIZON_URL` | — | Required for every name in `NETWORKS`, e.g. `MAINNET_HORIZON_URL` |
+| `<NAME>_SOROBAN_RPC_URL` | unset | Per-network Soroban RPC; unset disables contract events for that network |
+| `<NAME>_NETWORK_PASSPHRASE` | per network name | Passphrase the network's transactions are signed against |
+| `<NAME>_INDEXED_CONTRACT_IDS` | `INDEXED_CONTRACT_IDS` | Per-network override of the shared contract list |
+| `HORIZON_URL` | `https://horizon.stellar.org` | Single-network deployments: the one Horizon base URL (ignored when `NETWORKS` is set) |
 | `DATABASE_URL` | `postgresql://localhost:5432/lumina` | |
 | `DB_POOL_MAX` | `10` | Database connection pool size. Postgres caps total connections via `max_connections` (default 100). The combined pool size of all indexer and graphql-server replicas plus other clients must stay under this. |
 | `DB_POOL_IDLE_TIMEOUT` | `10000` | Milliseconds before an idle connection is closed |
@@ -210,11 +221,11 @@ connection instead.
 | `START_LEDGER` | latest | Only used when the DB is empty |
 | `POLL_INTERVAL_MS` | `5000` | |
 | `HORIZON_MIN_REQUEST_INTERVAL_MS` | `100` | Minimum spacing between outbound Horizon requests, to avoid bursts tripping the per-IP rate limit |
-| `SOROBAN_RPC_URL` | unset | Enables Soroban contract event indexing |
-| `INDEXED_CONTRACT_IDS` | unset | Comma-separated contract IDs to index events for; requires `SOROBAN_RPC_URL` |
-| `REGISTRY_CONTRACT_ID` | unset | Lumina Registry contract to poll for additional contract IDs; requires `SOROBAN_RPC_URL` + `REGISTRY_READ_ACCOUNT` |
+| `SOROBAN_RPC_URL` | unset | Single-network deployments: enables Soroban contract event indexing |
+| `INDEXED_CONTRACT_IDS` | unset | Comma-separated contract IDs to index events for; requires a Soroban RPC URL |
+| `REGISTRY_CONTRACT_ID` | unset | Lumina Registry contract to poll for additional contract IDs (primary network only); requires a Soroban RPC URL + `REGISTRY_READ_ACCOUNT` |
 | `REGISTRY_READ_ACCOUNT` | unset | Any funded G... account used to simulate the registry's read calls — no secret key needed, simulation doesn't sign or submit |
-| `REGISTRY_NETWORK_PASSPHRASE` | Test SDF Network passphrase | Network the registry is deployed on |
+| `REGISTRY_NETWORK_PASSPHRASE` | the primary network's passphrase | Overrides the passphrase used for registry simulation |
 
 Soroban event indexing and registry discovery are both entirely opt-in at
 the code level — the indexer behaves exactly as it did before these
@@ -277,6 +288,10 @@ indexer from starting.
 | `SUBSCRIPTION_QUEUE_LIMIT` | `64` — notifications buffered per subscriber before the oldest are dropped |
 | `ALLOW_ANONYMOUS_ACCESS` | `true` — set `false` to require an API key on every query |
 | `API_KEY_HEADER` | `x-api-key` — header the key is read from |
+| `NETWORKS` | unset — same scheme as the indexer; every query takes an optional `network` argument naming one of them |
+| `PRIMARY_NETWORK` | first of `NETWORKS` — which network serves a request that does not name one |
+| `PERSISTED_QUERIES` | `true` — automatic persisted queries; set `false` to refuse hash-only requests |
+| `PERSISTED_QUERIES_TTL_SECONDS` | `604800` | How long a registered hash stays cached (in-memory; a restart empties it) |
 
 `MAX_SUBSCRIPTIONS` is a ceiling, not a lifetime budget: closing a subscription
 frees its slot. Past it, a new subscription is refused with a clear error rather
@@ -291,6 +306,14 @@ head of the stream, not a replay of a backlog it no longer cares about.
 in today: every existing client is anonymous, and introducing keys must not break
 any of them. An unrecognised value resolves to *false* rather than `true`, so a
 typo in a security switch cannot silently leave the API open.
+
+`PERSISTED_QUERIES` decides whether a client may send the SHA-256 of a query
+instead of the query itself: the first request carries both, later ones carry
+the hash alone. An unrecognised value fails at startup rather than silently
+leaving it on, and switching it off makes the server answer
+`PERSISTED_QUERY_NOT_SUPPORTED` so clients fall back to full documents. This is
+cache, not a safelist — it answers "I have seen this document", never "this
+document is allowed".
 
 ### Authentication
 
