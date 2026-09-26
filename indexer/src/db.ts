@@ -1,4 +1,4 @@
-import { Pool, PoolClient } from 'pg';
+import { Pool, PoolClient, type PoolConfig } from 'pg';
 import type { HorizonAccount, HorizonLedger, HorizonOperation, HorizonTransaction } from './horizon';
 import type { ContractEvent } from './soroban';
 import { notifyIndexed } from './notify';
@@ -9,13 +9,8 @@ const log = subsystem('db');
 import { parseContractSchema, type ContractSchema } from './customSchema';
 import type { DecodedCustomEvent } from './customDecode';
 
-export function createPool(databaseUrl: string): Pool {
-  const pool = new Pool({ connectionString: databaseUrl });
-  pool.on('error', err => {
-    indexerPoolErrors.inc();
-    log.error({ err: err.message }, 'unexpected PostgreSQL pool client error; pool will replace the client');
-  });
-  return pool;
+export function createPool(databaseUrl: string, options?: PoolConfig): Pool {
+  return new Pool({ connectionString: databaseUrl, ...options });
 }
 
 export async function getLatestIndexedLedger(pool: Pool): Promise<number> {

@@ -200,7 +200,10 @@ connection instead.
 | Variable | Default | Notes |
 |---|---|---|
 | `HORIZON_URL` | `https://horizon.stellar.org` | |
-| `DATABASE_URL` | `postgresql://localhost:5432/lumina` | Connect as `lumina_indexer` in a provisioned database — see [docs/DATABASE_ROLES.md](docs/DATABASE_ROLES.md) |
+| `DATABASE_URL` | `postgresql://localhost:5432/lumina` | |
+| `DB_POOL_MAX` | `10` | Database connection pool size. Postgres caps total connections via `max_connections` (default 100). The combined pool size of all indexer and graphql-server replicas plus other clients must stay under this. |
+| `DB_POOL_IDLE_TIMEOUT` | `10000` | Milliseconds before an idle connection is closed |
+| `DB_POOL_CONNECTION_TIMEOUT` | `0` | Milliseconds to wait for a connection before failing (0 = wait forever) |
 | `START_LEDGER` | latest | Only used when the DB is empty |
 | `POLL_INTERVAL_MS` | `5000` | |
 | `HORIZON_MIN_REQUEST_INTERVAL_MS` | `100` | Minimum spacing between outbound Horizon requests, to avoid bursts tripping the per-IP rate limit |
@@ -260,7 +263,10 @@ indexer from starting.
 
 | Variable | Default |
 |---|---|
-| `DATABASE_URL` | `postgresql://localhost:5432/lumina` — connect as read-only `lumina_graphql` in a provisioned database ([docs/DATABASE_ROLES.md](docs/DATABASE_ROLES.md)) |
+| `DATABASE_URL` | `postgresql://localhost:5432/lumina` |
+| `DB_POOL_MAX` | `10` | Database connection pool size. Must be sized against Postgres `max_connections` and other service instances. |
+| `DB_POOL_IDLE_TIMEOUT` | `10000` | Milliseconds before an idle connection is closed |
+| `DB_POOL_CONNECTION_TIMEOUT` | `0` | Milliseconds to wait for a connection before failing (0 = wait forever) |
 | `PORT` | `4000` |
 | `LOG_LEVEL` | `info` — `debug` for per-ledger detail |
 | `LOG_PRETTY` | unset — `true` for human-readable local logs |

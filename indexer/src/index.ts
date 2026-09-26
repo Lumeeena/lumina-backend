@@ -73,6 +73,9 @@ const HORIZON_URL = process.env.HORIZON_URL ?? 'https://horizon.stellar.org';
 const DATABASE_URL = process.env.DATABASE_URL ?? 'postgresql://localhost:5432/lumina';
 const POLL_INTERVAL_MS = parseInt(process.env.POLL_INTERVAL_MS ?? '5000', 10);
 const START_LEDGER = process.env.START_LEDGER ? parseInt(process.env.START_LEDGER, 10) : undefined;
+const DB_POOL_MAX = process.env.DB_POOL_MAX ? parseInt(process.env.DB_POOL_MAX, 10) : undefined;
+const DB_POOL_IDLE_TIMEOUT = process.env.DB_POOL_IDLE_TIMEOUT ? parseInt(process.env.DB_POOL_IDLE_TIMEOUT, 10) : undefined;
+const DB_POOL_CONNECTION_TIMEOUT = process.env.DB_POOL_CONNECTION_TIMEOUT ? parseInt(process.env.DB_POOL_CONNECTION_TIMEOUT, 10) : undefined;
 
 // Soroban contract event indexing is opt-in — unset by default, the indexer
 // behaves exactly as it did before these were introduced.
@@ -110,7 +113,11 @@ const ACCOUNT_CACHE_MAX_SIZE = 50_000;
 // DO NOTHING), so hold the cursor back by a small margin instead.
 const EVENTS_SAFETY_LAG_LEDGERS = 3;
 
-const pool = createPool(DATABASE_URL);
+const pool = createPool(DATABASE_URL, {
+  max: DB_POOL_MAX,
+  idleTimeoutMillis: DB_POOL_IDLE_TIMEOUT,
+  connectionTimeoutMillis: DB_POOL_CONNECTION_TIMEOUT,
+});
 let discoveredContractIds: string[] = [];
 let loopTick = 0;
 let eventsCursor = 0;
@@ -320,7 +327,7 @@ async function indexCustomEvents(events: ContractEvent[]): Promise<void> {
 async function run() {
   initErrorTracking();
   initTracing();
-  log.info({ version: VERSION, horizon: HORIZON_URL, database: redactUrl(DATABASE_URL), healthPort: HEALTH_PORT }, 'lumina indexer starting');
+  log.info({ version: VERSION, horizon: HORIZON_URL, database: redactUrl(DATABASE_URL), healthPort: HEALTH_PORT, dbPoolMax: DB_POOL_MAX ?? 10, dbPoolIdleTimeout: DB_POOL_IDLE_TIMEOUT ?? 10000, dbPoolConnectionTimeout: DB_POOL_CONNECTION_TIMEOUT ?? 0 }, 'lumina indexer starting');
   startHealthServer({ port: HEALTH_PORT, getState: () => state, pool });
 
   let cursor = await getLatestIndexedLedger(pool);
