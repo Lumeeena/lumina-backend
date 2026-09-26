@@ -42,6 +42,23 @@ CREATE INDEX idx_transactions_source     ON transactions (source_account);
 CREATE INDEX idx_transactions_created_at ON transactions (created_at DESC);
 
 -- ─── Operations ───────────────────────────────────────────────────────────────
+--
+-- Decision (#104): transaction_hash stays an immediate (non-deferrable)
+-- foreign key to transactions(hash).
+--
+-- Why it exists: an operation without its parent transaction is silently
+-- wrong data — Transaction.operations would lose rows, Operation.transaction
+-- would dangle, and per-transaction groupings would undercount. The FK is the
+-- only guard that fails loudly instead.
+--
+-- Why immediate rather than deferrable: the sole writer (indexLedger) inserts
+-- parents before children inside one database transaction, so the ordering
+-- the constraint demands already holds. DEFERRABLE would buy nothing until an
+-- independent-operations writer exists, at the cost of a migration.
+--
+-- Rule for future backfill/repair paths: insert the parent transaction row
+-- first, or insert parents and operations in the same transaction. A path
+-- that writes operations on their own will fail on this constraint by design.
 
 CREATE TABLE IF NOT EXISTS operations (
     id                  TEXT PRIMARY KEY,

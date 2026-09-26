@@ -76,6 +76,19 @@ test('indexLedger writes ledger, transactions, and operations inside one commit'
   ]);
 });
 
+test('indexLedger inserts every transaction before any operation (FK order)', async () => {
+  const { client, calls } = makeFakeClient();
+  const tx2 = { ...tx, hash: 'tx2' };
+  const op2 = { ...op, id: 'op2', transaction_hash: 'tx2' };
+  await indexLedger(fakePool(client), ledger, [tx, tx2], [op, op2]);
+  // operations.transaction_hash is an immediate FK to transactions(hash), so
+  // every parent row must land before any child row within the transaction.
+  const lastTx = calls.lastIndexOf('transactions');
+  const firstOp = calls.indexOf('operations');
+  assert.ok(lastTx !== -1 && firstOp !== -1);
+  assert.ok(lastTx < firstOp, 'a write path that inserts operations first fails on the FK by design');
+});
+
 test('indexLedger rolls back and releases the client on failure', async () => {
   const { client, calls } = makeFakeClient({ failOn: 'INSERT INTO operations' });
   await assert.rejects(() => indexLedger(fakePool(client), ledger, [tx], [op]));
