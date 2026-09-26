@@ -1,5 +1,6 @@
 import { test } from 'node:test';
 import * as assert from 'node:assert/strict';
+import { loadConfig } from './config';
 
 test('config parses comma-separated contract IDs', () => {
   process.env['INDEXED_CONTRACT_IDS'] = 'C' + '0'.repeat(55) + ',C' + '1'.repeat(55) + ', C' + '2'.repeat(55);
@@ -53,5 +54,29 @@ test('config handles unparseable database URL', () => {
   } catch {
     // Expected to fail
     assert.ok(true);
+  }
+});
+
+test('ledger retry parameters default to 3 attempts and 500ms', () => {
+  delete process.env['LEDGER_RETRY_ATTEMPTS'];
+  delete process.env['LEDGER_RETRY_BASE_MS'];
+
+  const cfg = loadConfig();
+
+  assert.equal(cfg.ledgerRetryAttempts, 3);
+  assert.equal(cfg.ledgerRetryBaseMs, 500);
+});
+
+test('ledger retry parameters are read from the environment', () => {
+  process.env['LEDGER_RETRY_ATTEMPTS'] = '7';
+  process.env['LEDGER_RETRY_BASE_MS'] = '250';
+  try {
+    const cfg = loadConfig();
+
+    assert.equal(cfg.ledgerRetryAttempts, 7);
+    assert.equal(cfg.ledgerRetryBaseMs, 250);
+  } finally {
+    delete process.env['LEDGER_RETRY_ATTEMPTS'];
+    delete process.env['LEDGER_RETRY_BASE_MS'];
   }
 });

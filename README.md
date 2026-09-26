@@ -220,6 +220,8 @@ network, exactly as before.
 | `DB_POOL_CONNECTION_TIMEOUT` | `0` | Milliseconds to wait for a connection before failing (0 = wait forever) |
 | `START_LEDGER` | latest | Only used when the DB is empty |
 | `POLL_INTERVAL_MS` | `5000` | |
+| `LEDGER_RETRY_ATTEMPTS` | `3` | How many times a ledger whose fetch/index fails is retried before the cursor stops at it. More attempts ride out a longer Horizon outage but hold the cursor back while retrying; fewer move the cursor on sooner, at the cost of more history gaps |
+| `LEDGER_RETRY_BASE_MS` | `500` | Delay before the first retry in milliseconds; doubles each attempt, so this also sets the maximum wait between attempts |
 | `HORIZON_MIN_REQUEST_INTERVAL_MS` | `100` | Minimum spacing between outbound Horizon requests, to avoid bursts tripping the per-IP rate limit |
 | `SOROBAN_RPC_URL` | unset | Single-network deployments: enables Soroban contract event indexing |
 | `INDEXED_CONTRACT_IDS` | unset | Comma-separated contract IDs to index events for; requires a Soroban RPC URL |
