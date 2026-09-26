@@ -240,3 +240,80 @@ test('Account.operations resolves account operations', { skip, timeout: TEST_TIM
   const foundOp = ops.some(o => o.id === OPERATION_ID);
   assert.ok(foundOp, 'should resolve account operations');
 });
+
+test('asset query returns supply, holders and a matching volume series', { skip, timeout: TEST_TIMEOUT_MS }, async () => {
+  const assetLedger = 990_003;
+  const holderA = 'GASSET_HOLDER_A';
+  const holderB = 'GASSET_HOLDER_B';
+  const txA = 'tx_asset_test_a';
+  const txB = 'tx_asset_test_b';
+
+  await pool.query(
+    `INSERT INTO ledgers (sequence, closed_at, transaction_count, operation_count)
+     VALUES ($1, NOW(), 2, 2) ON CONFLICT (sequence) DO NOTHING`,
+    [assetLedger]
+  );
+  await pool.query(
+    `INSERT INTO accounts (address, sequence, subentry_count, last_modified_ledger, num_sponsored, num_sponsoring, balances, flags, thresholds)
+     VALUES ($1, '1', 1, $2, 0, 0, $3, '{}', '{}')
+     ON CONFLICT (address) DO UPDATE SET balances = EXCLUDED.balances`,
+    [holderA, assetLedger, JSON.stringify([{ asset_type: 'credit_alphanum4', asset_code: 'USDC', asset_issuer: ISSUER, balance: '100' }])]
+  );
+  await pool.query(
+    `INSERT INTO accounts (address, sequence, subentry_count, last_modified_ledger, num_sponsored, num_sponsoring, balances, flags, thresholds)
+     VALUES ($1, '1', 1, $2, 0, 0, $3, '{}', '{}')
+     ON CONFLICT (address) DO UPDATE SET balances = EXCLUDED.balances`,
+    [holderB, assetLedger, JSON.stringify([{ asset_type: 'credit_alphanum4', asset_code: 'USDC', asset_issuer: ISSUER, balance: '150.5' }])]
+  );
+  for (const [hash, createdAt] of [[txA, '2026-01-01T12:00:00Z'], [txB, '2026-01-02T12:00:00Z']] as const) {
+    await pool.query(
+      `INSERT INTO transactions (hash, ledger, created_at, source_account, fee_charged, operation_count, successful)
+       VALUES ($1, $2, $3, $4, 100, 1, true)
+       ON CONFLICT (hash) DO UPDATE SET created_at = EXCLUDED.created_at`,
+      [hash, assetLedger, createdAt, holderA]
+    );
+  }
+  await pool.query(
+    `INSERT INTO operations (id, type, transaction_hash, ledger, created_at, source_account, details)
+     VALUES ('op_asset_test_a', 'payment', $1, $2, '2026-01-01T12:00:00Z', $3, $4)
+     ON CONFLICT (id) DO UPDATE SET details = EXCLUDED.details`,
+    [txA, assetLedger, holderA, JSON.stringify({ asset_type: 'credit_alphanum4', asset_code: 'USDC', asset_issuer: ISSUER, amount: '60', from: holderA, to: holderB })]
+  );
+  await pool.query(
+    `INSERT INTO operations (id, type, transaction_hash, ledger, created_at, source_account, details)
+     VALUES ('op_asset_test_b', 'payment', $1, $2, '2026-01-02T12:00:00Z', $3, $4)
+     ON CONFLICT (id) DO UPDATE SET details = EXCLUDED.details`,
+    [txB, assetLedger, holderA, JSON.stringify({ asset_type: 'credit_alphanum4', asset_code: 'USDC', asset_issuer: ISSUER, amount: '40', from: holderA, to: holderB })]
+  );
+
+  try {
+    const ctx = createContext(pool);
+    const detail = await resolvers.Query.asset(
+      undefined,
+      {
+        asset: `USDC:${ISSUER}`,
+        from: '2026-01-01T00:00:00Z',
+        to: '2026-01-03T00:00:00Z',
+        bucketSeconds: 86400,
+      },
+      ctx
+    );
+
+    assert.equal(detail.asset, `USDC:${ISSUER}`);
+    assert.equal(detail.supply, '250.5');
+    assert.equal(detail.holders, 2);
+    assert.equal(detail.series.length, 3);
+    // Buckets are zero-filled and ascending; the total matches the parts.
+    const total = detail.series.reduce((sum, bucket) => sum + Number(bucket.volume), 0);
+    assert.equal(total, 100);
+    assert.deepEqual(
+      detail.series.map(bucket => bucket.operationCount),
+      [1, 1, 0]
+    );
+  } finally {
+    await pool.query('DELETE FROM operations WHERE id IN ($1, $2)', ['op_asset_test_a', 'op_asset_test_b']);
+    await pool.query('DELETE FROM transactions WHERE hash IN ($1, $2)', [txA, txB]);
+    await pool.query('DELETE FROM accounts WHERE address IN ($1, $2)', [holderA, holderB]);
+    await pool.query('DELETE FROM ledgers WHERE sequence = $1', [assetLedger]);
+  }
+});

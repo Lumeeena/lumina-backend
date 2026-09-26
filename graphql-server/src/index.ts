@@ -11,6 +11,7 @@ import { Pool } from 'pg';
 import { GraphQLError } from 'graphql';
 import { useServer } from 'graphql-ws/lib/use/ws';
 import { WebSocketServer } from 'ws';
+import { to as copyTo } from 'pg-copy-streams';
 import { Context, createContext, resolvers } from './resolvers';
 import { LedgerNotifier, SubscriberLimitError } from './pubsub';
 import { subsystem } from './logger';
@@ -28,6 +29,7 @@ interface Context extends BaseContext {
   requestLogger: ReturnType<typeof subsystem>;
 }
 import {
+  dbPoolErrors,
   listenerConnected,
   metricsContentType,
   renderMetrics,
@@ -36,6 +38,7 @@ import {
 } from './metrics';
 import { initTracing, shutdownTracing } from './tracing';
 import { initErrorTracking, shutdownErrorTracking } from './errorTracking';
+import { scheduledExportOptions, startScheduledExports } from './scheduledExport';
 
 const log = subsystem('server');
 const startedAt = Date.now();
@@ -53,7 +56,12 @@ const SUBSCRIPTION_QUEUE_LIMIT = parseInt(process.env.SUBSCRIPTION_QUEUE_LIMIT ?
 const API_KEY_HEADER = (process.env.API_KEY_HEADER ?? DEFAULT_API_KEY_HEADER).toLowerCase();
 const ALLOW_ANONYMOUS_ACCESS = parseAllowAnonymous(process.env.ALLOW_ANONYMOUS_ACCESS);
 
-const pool = new Pool({ connectionString: DATABASE_URL });
+const pool = new Pool({ 
+  connectionString: DATABASE_URL,
+  max: DB_POOL_MAX,
+  idleTimeoutMillis: DB_POOL_IDLE_TIMEOUT,
+  connectionTimeoutMillis: DB_POOL_CONNECTION_TIMEOUT,
+});
 const schema = makeExecutableSchema({ typeDefs, resolvers });
 
 const notifier = new LedgerNotifier({
@@ -62,8 +70,13 @@ const notifier = new LedgerNotifier({
   queueLimit: SUBSCRIPTION_QUEUE_LIMIT,
   log: (message, detail) => subsystem('pubsub').info({ detail }, message),
 });
+let stopScheduledExports: () => Promise<void> = async () => {};
 
 async function main() {
+  if (process.env.RUN_MIGRATIONS_ON_STARTUP === 'true') {
+    const status = await runMigrations(pool, loadMigrations());
+    log.info({ applied: status.applied, pending: status.pending }, 'database migrations ready');
+  }
   initErrorTracking();
   initTracing();
 
@@ -122,6 +135,7 @@ async function main() {
         async serverWillStart() {
           return {
             async drainServer() {
+              await stopScheduledExports();
               await wsCleanup.dispose();
               await notifier.stop();
             },
@@ -133,6 +147,11 @@ async function main() {
 
   await server.start();
   await notifier.start();
+  const exportOptions = scheduledExportOptions();
+  if (exportOptions) {
+    stopScheduledExports = startScheduledExports(pool, exportOptions);
+    log.info({ bucket: exportOptions.bucket, intervalMs: exportOptions.intervalMs }, 'scheduled exports enabled');
+  }
 
   // Ahead of the GraphQL middleware so an operator can always reach them, even
   // while the schema layer is unhappy.
@@ -166,6 +185,61 @@ async function main() {
         log.error({ err: err instanceof Error ? err.message : err }, 'failed to render metrics');
         res.status(500).send('metrics unavailable');
       });
+  });
+
+  app.get('/export/:table', async (req, res) => {
+    const table = req.params.table;
+    if (!['transactions', 'operations', 'ledgers'].includes(table)) {
+      res.status(400).send('Invalid table');
+      return;
+    }
+
+    const { min_ledger, max_ledger, min_date, max_date } = req.query;
+
+    const whereClauses: string[] = [];
+    const ledgerCol = table === 'ledgers' ? 'sequence' : 'ledger';
+    const dateCol = table === 'ledgers' ? 'closed_at' : 'created_at';
+
+    if (min_ledger) {
+      const parsed = parseInt(min_ledger as string, 10);
+      if (!isNaN(parsed)) whereClauses.push(`${ledgerCol} >= ${parsed}`);
+    }
+    if (max_ledger) {
+      const parsed = parseInt(max_ledger as string, 10);
+      if (!isNaN(parsed)) whereClauses.push(`${ledgerCol} <= ${parsed}`);
+    }
+    if (min_date) {
+      const parsed = new Date(min_date as string);
+      if (!isNaN(parsed.getTime())) whereClauses.push(`${dateCol} >= '${parsed.toISOString()}'`);
+    }
+    if (max_date) {
+      const parsed = new Date(max_date as string);
+      if (!isNaN(parsed.getTime())) whereClauses.push(`${dateCol} <= '${parsed.toISOString()}'`);
+    }
+
+    const whereStr = whereClauses.length > 0 ? `WHERE ${whereClauses.join(' AND ')}` : '';
+
+    try {
+      const client = await pool.connect();
+      const query = `COPY (SELECT * FROM ${table} ${whereStr}) TO STDOUT WITH CSV HEADER`;
+      const stream = client.query(copyTo(query));
+      
+      res.setHeader('Content-Type', 'text/csv');
+      res.setHeader('Content-Disposition', `attachment; filename="${table}.csv"`);
+      
+      stream.pipe(res);
+      stream.on('end', () => {
+        client.release();
+      });
+      stream.on('error', (err) => {
+        client.release();
+        log.error({ err }, 'export stream error');
+        if (!res.headersSent) res.status(500).send('export failed');
+      });
+    } catch (err) {
+      log.error({ err }, 'export setup error');
+      res.status(500).send('export failed');
+    }
   });
 
   const middleware = [
@@ -207,6 +281,9 @@ async function main() {
       apiKeyHeader: API_KEY_HEADER,
       anonymousAccess: ALLOW_ANONYMOUS_ACCESS,
       database: redactUrl(DATABASE_URL),
+      dbPoolMax: DB_POOL_MAX ?? 10,
+      dbPoolIdleTimeout: DB_POOL_IDLE_TIMEOUT ?? 10000,
+      dbPoolConnectionTimeout: DB_POOL_CONNECTION_TIMEOUT ?? 0,
     },
     'lumina graphql server listening'
   );

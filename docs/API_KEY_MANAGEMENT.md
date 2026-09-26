@@ -58,6 +58,14 @@ Ensure migration `005_api_keys.sql` has been run:
 psql $DATABASE_URL -f db/migrations/005_api_keys.sql
 ```
 
+## Database Role
+
+The CLI writes to `api_keys` (`create`, `revoke`, `set-limit`), so run it with
+the owning role — a login that is a member of `lumina_owner` — and not with the
+read-only `lumina_graphql` role the GraphQL server itself connects as. The
+server never writes to `api_keys`; key administration is an operator action. See
+[docs/DATABASE_ROLES.md](DATABASE_ROLES.md).
+
 ## CLI Usage
 
 You can invoke the CLI from the repo root or from `graphql-server`:

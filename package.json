@@ -11,12 +11,19 @@
     "build": "npm run build:graphql && npm run build:indexer",
     "build:graphql": "cd graphql-server && npm run build",
     "build:indexer": "cd indexer && npm run build",
-    "test": "npm run test:indexer && npm run test:graphql",
+    "lint": "npm run lint:indexer && npm run lint:graphql",
+    "lint:indexer": "cd indexer && npm run lint",
+    "lint:graphql": "cd graphql-server && npm run lint",
+    "lint:fix": "npm run lint:fix:indexer && npm run lint:fix:graphql",
+    "lint:fix:indexer": "cd indexer && npm run lint:fix",
+    "lint:fix:graphql": "cd graphql-server && npm run lint:fix",
+    "test": "npm run lint && npm run test:indexer && npm run test:graphql",
     "test:indexer": "cd indexer && npm test",
     "test:graphql": "cd graphql-server && npm test",
-    "manage-keys": "npm run --prefix graphql-server manage-keys --"
+    "manage-keys": "npm run --prefix graphql-server manage-keys --",
+    "migrate": "npm run --prefix graphql-server migrate --"
   },
   "engines": {
     "node": ">=18"
-  }
+  },
 }

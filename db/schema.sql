@@ -42,6 +42,23 @@ CREATE INDEX idx_transactions_source     ON transactions (source_account);
 CREATE INDEX idx_transactions_created_at ON transactions (created_at DESC);
 
 -- ─── Operations ───────────────────────────────────────────────────────────────
+--
+-- Decision (#104): transaction_hash stays an immediate (non-deferrable)
+-- foreign key to transactions(hash).
+--
+-- Why it exists: an operation without its parent transaction is silently
+-- wrong data — Transaction.operations would lose rows, Operation.transaction
+-- would dangle, and per-transaction groupings would undercount. The FK is the
+-- only guard that fails loudly instead.
+--
+-- Why immediate rather than deferrable: the sole writer (indexLedger) inserts
+-- parents before children inside one database transaction, so the ordering
+-- the constraint demands already holds. DEFERRABLE would buy nothing until an
+-- independent-operations writer exists, at the cost of a migration.
+--
+-- Rule for future backfill/repair paths: insert the parent transaction row
+-- first, or insert parents and operations in the same transaction. A path
+-- that writes operations on their own will fail on this constraint by design.
 
 CREATE TABLE IF NOT EXISTS operations (
     id                  TEXT PRIMARY KEY,
@@ -184,3 +201,18 @@ CREATE TABLE IF NOT EXISTS api_keys (
 
 CREATE INDEX IF NOT EXISTS idx_api_keys_key_hash ON api_keys (key_hash);
 CREATE INDEX IF NOT EXISTS idx_api_keys_revoked_at ON api_keys (revoked_at);
+
+-- Lower insert-triggered vacuum/analyze thresholds for the append-heavy tables.
+ALTER TABLE transactions SET (
+    autovacuum_vacuum_insert_threshold = 5000,
+    autovacuum_vacuum_insert_scale_factor = 0.05,
+    autovacuum_analyze_threshold = 5000,
+    autovacuum_analyze_scale_factor = 0.02
+);
+
+ALTER TABLE operations SET (
+    autovacuum_vacuum_insert_threshold = 5000,
+    autovacuum_vacuum_insert_scale_factor = 0.05,
+    autovacuum_analyze_threshold = 5000,
+    autovacuum_analyze_scale_factor = 0.02
+);

@@ -3,17 +3,30 @@ version: "3.9"
 services:
   # PostgreSQL — stores indexed Stellar network data
   postgres:
-    image: postgres:16-alpine
+    image: postgres:16-alpine@sha256:721873c34ceb9f8d8fc265984940dc982404c105f19ad51be9fdc5970a6080ea
     restart: unless-stopped
     environment:
       POSTGRES_DB: lumina
       POSTGRES_USER: lumina
       POSTGRES_PASSWORD: lumina_dev
       POSTGRES_INITDB_ARGS: ${POSTGRES_INITDB_ARGS:-}
+      # Consumed by docker/initdb/03_roles.sh when it applies db/roles.sql. The
+      # two service DATABASE_URLs below are built from the same values, so
+      # changing one here changes both ends.
+      LUMINA_GRAPHQL_PASSWORD: ${LUMINA_GRAPHQL_PASSWORD:-lumina_graphql_dev}
+      LUMINA_INDEXER_PASSWORD: ${LUMINA_INDEXER_PASSWORD:-lumina_indexer_dev}
     volumes:
       - postgres_data:/var/lib/postgresql/data
       - ../db/schema.sql:/docker-entrypoint-initdb.d/01_schema.sql
       - ../db/seed.sql:/docker-entrypoint-initdb.d/02_seed.sql:ro
+      # Runs last: creates lumina_owner/lumina_graphql/lumina_indexer, moves
+      # ownership, and applies the grants. Wrapped in a .sh because db/roles.sql
+      # needs psql variables the .sql init path cannot pass. Mounted outside
+      # docker-entrypoint-initdb.d so the entrypoint does not also try to run it
+      # bare (it refuses to run without passwords).
+      - ./initdb/03_roles.sh:/docker-entrypoint-initdb.d/03_roles.sh:ro
+      - ../db/roles.sql:/opt/lumina/db/roles.sql:ro
+      - ../db/verify_roles.sql:/opt/lumina/db/verify_roles.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U lumina -d lumina"]
       interval: 10s
@@ -31,7 +44,9 @@ services:
       postgres:
         condition: service_healthy
     environment:
-      DATABASE_URL: postgresql://lumina:lumina_dev@postgres:5432/lumina
+      # Least-privilege login: DML on the indexed tables, no DDL. See
+      # docs/DATABASE_ROLES.md.
+      DATABASE_URL: postgresql://lumina_indexer:${LUMINA_INDEXER_PASSWORD:-lumina_indexer_dev}@postgres:5432/lumina
       HORIZON_URL: https://horizon.stellar.org
       POLL_INTERVAL_MS: "5000"
       # Conservative pacing for anonymous public Horizon access — its
@@ -73,8 +88,19 @@ services:
       postgres:
         condition: service_healthy
     environment:
-      DATABASE_URL: postgresql://lumina:lumina_dev@postgres:5432/lumina
+      # Read-only login: SELECT + LISTEN. See docs/DATABASE_ROLES.md.
+      DATABASE_URL: postgresql://lumina_graphql:${LUMINA_GRAPHQL_PASSWORD:-lumina_graphql_dev}@postgres:5432/lumina
       PORT: "4000"
+      S3_EXPORT_BUCKET: ${S3_EXPORT_BUCKET:-}
+      S3_EXPORT_PREFIX: ${S3_EXPORT_PREFIX:-lumina/exports}
+      S3_EXPORT_INTERVAL_MS: ${S3_EXPORT_INTERVAL_MS:-86400000}
+      S3_EXPORT_RETENTION_DAYS: ${S3_EXPORT_RETENTION_DAYS:-30}
+      S3_ENDPOINT: ${S3_ENDPOINT:-}
+      S3_REGION: ${S3_REGION:-us-east-1}
+      S3_FORCE_PATH_STYLE: ${S3_FORCE_PATH_STYLE:-true}
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
+      AWS_SESSION_TOKEN: ${AWS_SESSION_TOKEN:-}
     ports:
       - "127.0.0.1:4000:4000"
     healthcheck:
@@ -94,7 +120,7 @@ services:
   # Grafana lands on http://localhost:3001 (admin/admin) with the Lumina
   # dashboard already provisioned.
   prometheus:
-    image: prom/prometheus:v2.54.1
+    image: prom/prometheus:v2.54.1@sha256:f6639335d34a77d9d9db382b92eeb7fc00934be8eae81dbc03b31cfe90411a94
     profiles: ["observability"]
     restart: unless-stopped
     depends_on:
@@ -107,7 +133,7 @@ services:
       - "127.0.0.1:9091:9090"
 
   grafana:
-    image: grafana/grafana:11.2.0
+    image: grafana/grafana:11.2.0@sha256:408afb9726de5122b00a2576763a8a57a3c86d5b0eff5305bc994ceb3eb96c3f
     profiles: ["observability"]
     restart: unless-stopped
     depends_on:

@@ -64,6 +64,24 @@ type Query {
 
   """The custom schema registered for a contract, if any."""
   contractSchema(contractId: String!): ContractSchema
+
+  """
+  Asset detail in one call: current supply and holder count plus a bucketed
+  volume series. Supply is the sum of indexed `accounts.balances` for the
+  asset (a last-seen snapshot, not ledger state) — see the query docs for
+  limitations. The series reuses the `operations(asset:)` predicate, so its
+  buckets always agree with the operation list.
+  """
+  asset(
+    """Asset to inspect: "CODE:ISSUER", or "XLM" for native."""
+    asset: String!
+    """Range start (ISO-8601). Defaults to 30 days before `to`."""
+    from: String
+    """Range end (ISO-8601). Defaults to now."""
+    to: String
+    """Bucket width in seconds (min 60). Defaults to 86400 (daily)."""
+    bucketSeconds: Int = 86400
+  ): AssetDetail!
 }
 
 type Subscription {
@@ -284,4 +302,30 @@ type ContractSchema {
   contractId: String!
   version: Int!
   events: [SchemaEvent!]!
+}
+
+# ─── Asset analytics ─────────────────────────────────────────────────────────
+
+"""
+Everything an asset detail page needs: supply and holders from indexed
+balances plus a bucketed volume series from operations.
+"""
+type AssetDetail {
+  asset: String!
+  code: String
+  issuer: String
+  native: Boolean!
+  """Sum of indexed balances, as a decimal string (no float rounding)."""
+  supply: String!
+  holders: Int!
+  series: [VolumeBucket!]!
+}
+
+"""One bucket of the volume series. Empty buckets report zero volume."""
+type VolumeBucket {
+  bucketStart: String!
+  bucketEnd: String!
+  """Summed transfer amounts in the bucket, as a decimal string."""
+  volume: String!
+  operationCount: Int!
 }
