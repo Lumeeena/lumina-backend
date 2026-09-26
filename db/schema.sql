@@ -92,8 +92,7 @@ CREATE TABLE IF NOT EXISTS accounts (
     flags               JSONB NOT NULL DEFAULT '{}',
     thresholds          JSONB NOT NULL DEFAULT '{}',
     indexed_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    export_enabled      BOOLEAN NOT NULL DEFAULT FALSE
+    updated_at          TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
 -- ─── Contract Events (Soroban) ────────────────────────────────────────────────
@@ -197,7 +196,8 @@ CREATE TABLE IF NOT EXISTS api_keys (
     rate_limit          INTEGER NOT NULL DEFAULT 60, -- requests per minute
     created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     revoked_at          TIMESTAMPTZ,
-    updated_at          TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    updated_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    export_enabled      BOOLEAN NOT NULL DEFAULT FALSE
 );
 
 CREATE INDEX IF NOT EXISTS idx_api_keys_revoked_at ON api_keys (revoked_at);

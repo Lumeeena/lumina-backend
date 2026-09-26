@@ -12,7 +12,7 @@ import { GraphQLError } from 'graphql';
 import { useServer } from 'graphql-ws/lib/use/ws';
 import { WebSocketServer } from 'ws';
 import { to as copyTo } from 'pg-copy-streams';
-import { Context, createContext, resolvers } from './resolvers';
+import { createContext, resolvers, type Context } from './resolvers';
 import { LedgerNotifier, SubscriberLimitError } from './pubsub';
 import { subsystem } from './logger';
 import {
@@ -22,14 +22,7 @@ import {
   parseAllowAnonymous,
 } from './auth';
 import { buildServerHealth, metricsPlugin, samplePool, serverHealthStatusCode } from './observability';
-import { v4 as uuidv4 } from 'uuid'; // TODO: Ensure 'uuid' is a dependency
-
-interface Context extends BaseContext {
-  correlationId: string;
-  requestLogger: ReturnType<typeof subsystem>;
-}
 import {
-  dbPoolErrors,
   listenerConnected,
   metricsContentType,
   renderMetrics,
@@ -39,6 +32,7 @@ import {
 import { initTracing, shutdownTracing } from './tracing';
 import { initErrorTracking, shutdownErrorTracking } from './errorTracking';
 import { scheduledExportOptions, startScheduledExports } from './scheduledExport';
+import { loadMigrations, runMigrations } from './migrations';
 
 const log = subsystem('server');
 const startedAt = Date.now();
@@ -55,8 +49,11 @@ const MAX_SUBSCRIPTIONS = parseInt(process.env.MAX_SUBSCRIPTIONS ?? '500', 10);
 const SUBSCRIPTION_QUEUE_LIMIT = parseInt(process.env.SUBSCRIPTION_QUEUE_LIMIT ?? '64', 10);
 const API_KEY_HEADER = (process.env.API_KEY_HEADER ?? DEFAULT_API_KEY_HEADER).toLowerCase();
 const ALLOW_ANONYMOUS_ACCESS = parseAllowAnonymous(process.env.ALLOW_ANONYMOUS_ACCESS);
+const DB_POOL_MAX = parseInt(process.env.DB_POOL_MAX ?? '10', 10);
+const DB_POOL_IDLE_TIMEOUT = parseInt(process.env.DB_POOL_IDLE_TIMEOUT ?? '10000', 10);
+const DB_POOL_CONNECTION_TIMEOUT = parseInt(process.env.DB_POOL_CONNECTION_TIMEOUT ?? '0', 10);
 
-const pool = new Pool({ 
+const pool = new Pool({
   connectionString: DATABASE_URL,
   max: DB_POOL_MAX,
   idleTimeoutMillis: DB_POOL_IDLE_TIMEOUT,

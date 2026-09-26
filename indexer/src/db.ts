@@ -10,7 +10,12 @@ import { parseContractSchema, type ContractSchema } from './customSchema';
 import type { DecodedCustomEvent } from './customDecode';
 
 export function createPool(databaseUrl: string, options?: PoolConfig): Pool {
-  return new Pool({ connectionString: databaseUrl, ...options });
+  const pool = new Pool({ connectionString: databaseUrl, ...options });
+  pool.on('error', err => {
+    indexerPoolErrors.inc();
+    log.error({ err: err instanceof Error ? err.message : err }, 'idle database client error');
+  });
+  return pool;
 }
 
 export async function getLatestIndexedLedger(pool: Pool): Promise<number> {
