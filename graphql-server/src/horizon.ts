@@ -2,8 +2,14 @@
 // Mirrors frontend/lib/horizon.ts but is intentionally separate —
 // the GraphQL server is a standalone service and must not import from the frontend package.
 // Once the indexer is writing to PostgreSQL, replace these fetch calls with db queries.
+//
+// A deployment serves more than one chain, so every call takes the base URL of
+// the network it is asking about: falling back to the primary network's Horizon
+// when the database has nothing for testnet would hand a client mainnet data
+// under a testnet label. The flat `HORIZON_URL` remains the default so the
+// single-network deployment — and the unit tests — keep one obvious URL.
 
-const HORIZON = process.env.HORIZON_URL ?? 'https://horizon.stellar.org';
+const HORIZON = process.env['HORIZON_URL'] ?? 'https://horizon.stellar.org';
 
 export interface HorizonTransaction {
   id: string;
@@ -50,10 +56,10 @@ const BASE_BACKOFF_MS = 300;
  * silent-null-on-any-failure here made a Horizon rate limit indistinguishable
  * from a genuinely nonexistent account.
  */
-async function get<T>(path: string): Promise<T | null> {
+async function get<T>(path: string, baseUrl: string = HORIZON): Promise<T | null> {
   for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
     try {
-      const res = await fetch(`${HORIZON}${path}`);
+      const res = await fetch(`${baseUrl}${path}`);
       if (res.ok) return res.json() as Promise<T>;
       if (res.status === 404) return null; // genuinely doesn't exist — no point retrying
 
@@ -78,24 +84,24 @@ async function get<T>(path: string): Promise<T | null> {
   return null;
 }
 
-export async function getRecentTransactions(limit = 20): Promise<HorizonTransaction[]> {
+export async function getRecentTransactions(limit = 20, baseUrl?: string): Promise<HorizonTransaction[]> {
   type R = { _embedded: { records: HorizonTransaction[] } };
-  const data = await get<R>(`/transactions?order=desc&limit=${limit}`);
+  const data = await get<R>(`/transactions?order=desc&limit=${limit}`, baseUrl);
   return data?._embedded?.records ?? [];
 }
 
-export async function getAccount(address: string): Promise<HorizonAccount | null> {
-  return get<HorizonAccount>(`/accounts/${address}`);
+export async function getAccount(address: string, baseUrl?: string): Promise<HorizonAccount | null> {
+  return get<HorizonAccount>(`/accounts/${address}`, baseUrl);
 }
 
-export async function getAccountTransactions(address: string, limit = 10): Promise<HorizonTransaction[]> {
+export async function getAccountTransactions(address: string, limit = 10, baseUrl?: string): Promise<HorizonTransaction[]> {
   type R = { _embedded: { records: HorizonTransaction[] } };
-  const data = await get<R>(`/accounts/${address}/transactions?order=desc&limit=${limit}`);
+  const data = await get<R>(`/accounts/${address}/transactions?order=desc&limit=${limit}`, baseUrl);
   return data?._embedded?.records ?? [];
 }
 
-export async function getLatestLedger() {
+export async function getLatestLedger(baseUrl?: string) {
   type R = { _embedded: { records: Array<{ sequence: number; closed_at: string; successful_transaction_count: number; failed_transaction_count: number; operation_count: number }> } };
-  const data = await get<R>('/ledgers?order=desc&limit=1');
+  const data = await get<R>('/ledgers?order=desc&limit=1', baseUrl);
   return data?._embedded?.records?.[0] ?? null;
 }
