@@ -13,6 +13,11 @@
  *   manage-keys set-limit <id|hash> <limit>   Update a key's rate limit (req/min)
  *
  * Reads DATABASE_URL from environment (default: postgresql://localhost:5432/lumina).
+ *
+ * This is an operator CLI, not part of the server: it writes to `api_keys`, so
+ * it must run with the owning role (a member of `lumina_owner`), never with the
+ * read-only `lumina_graphql` role the server connects as. See
+ * docs/DATABASE_ROLES.md.
  */
 import { Pool } from 'pg';
 import {
