@@ -21,6 +21,7 @@ import {
   registry,
   renderMetrics,
   transactionsIndexed,
+  indexerPoolErrors,
 } from './metrics';
 
 /** The current value of a counter/gauge, optionally for one label set. */
@@ -81,6 +82,12 @@ test('a request that never got a response is still counted', async () => {
 
   // Otherwise a DNS failure or a dropped connection looks like silence.
   assert.equal(await value('lumina_horizon_requests_total', { status: 'error' }), before + 1);
+});
+
+test('unexpected PostgreSQL pool client errors have a scrapeable counter', async () => {
+  const before = await value('lumina_indexer_db_pool_errors_total');
+  indexerPoolErrors.inc();
+  assert.equal(await value('lumina_indexer_db_pool_errors_total'), before + 1);
 });
 
 test('the registry renders Prometheus text exposition', async () => {

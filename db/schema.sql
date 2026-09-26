@@ -236,3 +236,18 @@ CREATE TABLE IF NOT EXISTS api_keys (
 
 CREATE INDEX IF NOT EXISTS idx_api_keys_key_hash ON api_keys (key_hash);
 CREATE INDEX IF NOT EXISTS idx_api_keys_revoked_at ON api_keys (revoked_at);
+
+-- Lower insert-triggered vacuum/analyze thresholds for the append-heavy tables.
+ALTER TABLE transactions SET (
+    autovacuum_vacuum_insert_threshold = 5000,
+    autovacuum_vacuum_insert_scale_factor = 0.05,
+    autovacuum_analyze_threshold = 5000,
+    autovacuum_analyze_scale_factor = 0.02
+);
+
+ALTER TABLE operations SET (
+    autovacuum_vacuum_insert_threshold = 5000,
+    autovacuum_vacuum_insert_scale_factor = 0.05,
+    autovacuum_analyze_threshold = 5000,
+    autovacuum_analyze_scale_factor = 0.02
+);

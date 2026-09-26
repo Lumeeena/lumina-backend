@@ -8,6 +8,9 @@ Part of the Lumina project, split across three repos:
 - [lumina-backend](https://github.com/Lumeeena/lumina-backend) — this repo
 - [lumina-contracts](https://github.com/Lumeeena/lumina-contracts) — Soroban Registry contract
 
+API consumers: start with [docs/API_GUIDE.md](docs/API_GUIDE.md), and see
+[docs/AUTHENTICATION.md](docs/AUTHENTICATION.md) for API keys and rate limits.
+
 ## Structure
 
 ```
@@ -15,7 +18,7 @@ indexer/         Polls Stellar Horizon, writes ledgers/transactions/operations/a
                   to Postgres, and (opt-in) indexes Soroban contract events via RPC
 graphql-server/   Apollo GraphQL API — reads from Postgres, falls back to Horizon
                   only for accounts that haven't been indexed yet
-db/               PostgreSQL schema + migrations
+db/               PostgreSQL schema, migrations, and role grants
 docker/           Dockerfiles + docker-compose.yml for postgres + indexer + graphql
 ```
 
@@ -171,6 +174,15 @@ docker compose -f docker/docker-compose.yml up
 # once
 psql $DATABASE_URL -f db/schema.sql
 
+# once — the least-privilege roles the services connect as (see
+# docs/DATABASE_ROLES.md). Needs a superuser connection the first time: it
+# creates roles and moves object ownership.
+psql "$ADMIN_DATABASE_URL" \
+  -v graphql_password="$LUMINA_GRAPHQL_PASSWORD" \
+  -v indexer_password="$LUMINA_INDEXER_PASSWORD" \
+  -f db/roles.sql
+psql "$ADMIN_DATABASE_URL" -f db/verify_roles.sql   # asserts the grants
+
 # indexer
 cd indexer && npm install && npm run dev
 
@@ -178,12 +190,23 @@ cd indexer && npm install && npm run dev
 cd graphql-server && npm install && npm run dev
 ```
 
+Each service then runs against its own role rather than the owning one:
+`DATABASE_URL=postgresql://lumina_indexer:…` for the indexer and
+`postgresql://lumina_graphql:…` for the GraphQL server. The server is
+read-only, so it cannot write even if a resolver is compromised; the indexer
+can write its seven indexed tables and nothing else. Operator commands that do
+write — `db/migrations/*.sql`, `npm run manage-keys` — use an `lumina_owner`
+connection instead.
+
 ### Indexer environment variables
 
 | Variable | Default | Notes |
 |---|---|---|
 | `HORIZON_URL` | `https://horizon.stellar.org` | |
 | `DATABASE_URL` | `postgresql://localhost:5432/lumina` | |
+| `DB_POOL_MAX` | `10` | Database connection pool size. Postgres caps total connections via `max_connections` (default 100). The combined pool size of all indexer and graphql-server replicas plus other clients must stay under this. |
+| `DB_POOL_IDLE_TIMEOUT` | `10000` | Milliseconds before an idle connection is closed |
+| `DB_POOL_CONNECTION_TIMEOUT` | `0` | Milliseconds to wait for a connection before failing (0 = wait forever) |
 | `START_LEDGER` | latest | Only used when the DB is empty |
 | `POLL_INTERVAL_MS` | `5000` | |
 | `HORIZON_MIN_REQUEST_INTERVAL_MS` | `100` | Minimum spacing between outbound Horizon requests, to avoid bursts tripping the per-IP rate limit |
@@ -220,17 +243,40 @@ npm run dev
 | `HEALTH_MAX_LAG_LEDGERS` | `20` — lag threshold before `/health` reports 503 |
 | `LOG_LEVEL` | `info` |
 | `LOG_PRETTY` | unset — `true` for human-readable local logs |
+| `LOG_SAMPLE_RATE` | `0.01` — fraction of routine success logs emitted (see below) |
+
+Routine success logs — one per indexed ledger, plus one per contract-event and
+custom-decode batch — are sampled with `LOG_SAMPLE_RATE`, because at a 5s poll
+they are the highest-volume source in the indexer and they are measurement
+duplicates of the Prometheus counters in `metrics.ts`. `1` logs every one of
+them, `0` logs none.
+
+Warnings and errors are never sampled. The sampled path is a separate method
+(`routineLogger(...).success()`), so there is no way to log a failure through a
+logger that drops lines; `indexer/src/logger.test.ts` asserts that at rate 0 a
+warning and an error are still emitted.
+
+An emitted line carries a `suppressed` field with the number of routine
+successes dropped since the previous emitted line, so a sampled stream still
+shows how much work happened rather than implying nothing did. An unusable
+`LOG_SAMPLE_RATE` falls back to the default and says so, instead of stopping the
+indexer from starting.
 
 ### GraphQL server environment variables
 
 | Variable | Default |
 |---|---|
 | `DATABASE_URL` | `postgresql://localhost:5432/lumina` |
+| `DB_POOL_MAX` | `10` | Database connection pool size. Must be sized against Postgres `max_connections` and other service instances. |
+| `DB_POOL_IDLE_TIMEOUT` | `10000` | Milliseconds before an idle connection is closed |
+| `DB_POOL_CONNECTION_TIMEOUT` | `0` | Milliseconds to wait for a connection before failing (0 = wait forever) |
 | `PORT` | `4000` |
 | `LOG_LEVEL` | `info` — `debug` for per-ledger detail |
 | `LOG_PRETTY` | unset — `true` for human-readable local logs |
 | `MAX_SUBSCRIPTIONS` | `500` — concurrent subscriptions before new ones are refused |
 | `SUBSCRIPTION_QUEUE_LIMIT` | `64` — notifications buffered per subscriber before the oldest are dropped |
+| `ALLOW_ANONYMOUS_ACCESS` | `true` — set `false` to require an API key on every query |
+| `API_KEY_HEADER` | `x-api-key` — header the key is read from |
 
 `MAX_SUBSCRIPTIONS` is a ceiling, not a lifetime budget: closing a subscription
 frees its slot. Past it, a new subscription is refused with a clear error rather
@@ -240,6 +286,53 @@ than degrading every existing one.
 tab, a wedged socket — can accumulate in the server's heap. Past it the *oldest*
 notifications are dropped, because on a live feed a client catching up wants the
 head of the stream, not a replay of a backlog it no longer cares about.
+
+`ALLOW_ANONYMOUS_ACCESS` defaults to `true` because that is the state the API is
+in today: every existing client is anonymous, and introducing keys must not break
+any of them. An unrecognised value resolves to *false* rather than `true`, so a
+typo in a security switch cannot silently leave the API open.
+
+### Authentication
+
+A request may carry an API key, and the server turns it into a **caller** — an
+id, a label, and that key's rate limit — attached to the GraphQL context.
+Per-key rate limits, quotas and audit all read that caller rather than the key.
+
+```bash
+curl -H "x-api-key: lum_..." http://localhost:4000/graphql \
+  -d '{"query":"{ latestLedger { sequence } }"}'
+```
+
+Anonymous requests keep working, so nothing changes for a client that sends no
+key. Set `ALLOW_ANONYMOUS_ACCESS=false` to require one. Create and revoke keys
+with [`manage-keys`](docs/API_KEY_MANAGEMENT.md).
+
+Three properties of this layer are load-bearing:
+
+- **The key is never logged and never echoed.** It is read, hashed, compared and
+  dropped. Rejections name the failure, not the value, and an unknown key is
+  reported identically to a revoked one — distinguishing them would confirm to
+  an attacker that a guessed key really was issued and later cut off. The
+  operator still gets the distinction, in the log line and the metric.
+- **The digest comparison is constant-time** (`crypto.timingSafeEqual`). The
+  digest is not the secret, so this is a second line of defence rather than the
+  primary protection — SHA-256 preimage-resistance is what actually protects a
+  leaked `api_keys` table. What it buys is that the accept/reject decision does
+  not depend on *where* two values first differ.
+- **A request that cannot be attributed never reaches a resolver.** The
+  middleware runs ahead of the body parser as well as the GraphQL layer, so an
+  unauthenticated caller cannot make the server buffer a payload, and a 401 comes
+  back before any query is parsed.
+
+The header name is configurable with `API_KEY_HEADER`; the name is matched
+case-insensitively, and a key sent under a different header is treated as no key
+at all. `lumina_graphql_auth_total{caller,outcome}` counts requests by presented
+credential and outcome (`resolved`, `rejected`, `revoked`) — that is how you tell
+a misconfigured client from someone guessing at keys.
+
+**Subscriptions are not authenticated.** A websocket cannot present an HTTP
+header, so `ws://…/graphql` connections are always the anonymous caller. That path
+needs its own work before `ALLOW_ANONYMOUS_ACCESS=false` is a complete lock-down.
 
 ## Observability
 
@@ -322,6 +415,14 @@ is down and reconnecting; queries are unaffected and this is not fatal to
 health. If it stays down, check Postgres connectivity from the GraphQL
 container. `lumina_graphql_subscriptions_rejected_total` increasing means
 clients are hitting the `MAX_SUBSCRIPTIONS` ceiling.
+
+### Database Backup & Restore Runbook
+
+The indexer records full historical ledger state in PostgreSQL that cannot be reconstructed from chain tip alone. See [docs/DATABASE_RESTORE_RUNBOOK.md](docs/DATABASE_RESTORE_RUNBOOK.md) for the operational runbook covering:
+- Backup strategy, snapshot isolation, and recommended cadence
+- Step-by-step restoration procedure and expected duration benchmarks
+- Indexer startup catch-up behavior against restored databases
+- Gap detection queries and remediation procedures
 
 ## Testing
 

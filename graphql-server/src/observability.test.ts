@@ -4,7 +4,7 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { Pool } from 'pg';
 import { buildServerHealth, samplePool, serverHealthStatusCode } from './observability';
-import { dbPoolIdle, dbPoolTotal, dbPoolWaiting, registry } from './metrics';
+import { dbPoolErrors, dbPoolIdle, dbPoolTotal, dbPoolWaiting, exportRuns, registry } from './metrics';
 
 const NOW = 1_700_000_000_000;
 
@@ -102,6 +102,14 @@ test('samplePool tolerates a pool that does not expose counts', async () => {
 
   assert.equal(await gauge('lumina_db_pool_connections_total'), 0);
   assert.equal(await gauge('lumina_db_pool_waiting'), 0);
+});
+
+test('PostgreSQL pool errors and scheduled export outcomes are exposed as metrics', async () => {
+  dbPoolErrors.inc();
+  exportRuns.inc({ outcome: 'success' });
+  assert.equal((await gauge('lumina_graphql_db_pool_errors_total')), 1);
+  assert.equal((await registry.getSingleMetric('lumina_scheduled_exports_total')?.get())?.values
+    .find(value => value.labels.outcome === 'success')?.value, 1);
 });
 
 test('every metric the dashboard queries is registered under its expected name', async () => {

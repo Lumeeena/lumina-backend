@@ -16,18 +16,30 @@ import { createLoaders, type RequestLoaders } from './loaders';
 import { getAccount as getAccountFromHorizon, getLatestLedger as getLatestLedgerFromHorizon } from './horizon';
 import { createSubscriptionResolvers } from './subscriptions';
 import { getContractSchema, getCustomEvents, type CustomEventFilter } from './customEvents';
+import { getAssetDetail } from './assets';
 import { getOperationsByAsset, searchTransactions } from './search';
 import type { LedgerNotifier } from './pubsub';
+import { ANONYMOUS_CALLER, type ApiCaller } from './auth';
 
 export interface BaseContext {
   pool: Pool;
   loaders?: RequestLoaders;
   /** Present for websocket connections; absent for plain HTTP queries. */
   notifier?: LedgerNotifier;
+  /**
+   * Who this request is attributed to, resolved once by the auth middleware.
+   *
+   * Websocket connections are not authenticated — they cannot carry a header —
+   * so they are always the anonymous caller until that path is built out.
+   */
+  caller?: ApiCaller;
 }
 
-export function createContext(pool: Pool, extra: Omit<Context, 'pool' | 'loaders'> = {}): Context {
-  return { pool, loaders: createLoaders(pool), ...extra };
+export function createContext(
+  pool: Pool,
+  extra: Partial<Omit<Context, 'pool' | 'loaders'>> = {}
+): Context {
+  return { pool, loaders: createLoaders(pool), caller: ANONYMOUS_CALLER, ...extra };
 }
 
 /**
@@ -198,6 +210,19 @@ export const resolvers = {
           fields: event.fields.map(field => ({ ...field, optional: field.optional ?? false })),
         })),
       };
+    },
+
+    async asset(
+      _: unknown,
+      args: { asset: string; from?: string | null; to?: string | null; bucketSeconds?: number | null },
+      { pool }: Context
+    ) {
+      return getAssetDetail(pool, {
+        asset: args.asset,
+        from: args.from,
+        to: args.to,
+        bucketSeconds: args.bucketSeconds,
+      });
     },
   },
 

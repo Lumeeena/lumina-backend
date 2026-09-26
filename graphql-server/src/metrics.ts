@@ -45,6 +45,13 @@ export const listenerConnected = new Gauge({
   registers: [registry],
 });
 
+export const authAttempts = new Counter({
+  name: 'lumina_graphql_auth_total',
+  help: 'GraphQL requests by presented credential and authentication outcome.',
+  labelNames: ['caller', 'outcome'] as const,
+  registers: [registry],
+});
+
 // Pool saturation is the metric that explains a latency cliff nothing else
 // accounts for: queries queue invisibly once every connection is checked out.
 export const dbPoolTotal = new Gauge({
@@ -62,6 +69,26 @@ export const dbPoolIdle = new Gauge({
 export const dbPoolWaiting = new Gauge({
   name: 'lumina_db_pool_waiting',
   help: 'Requests queued waiting for a pool connection.',
+  registers: [registry],
+});
+
+export const dbPoolErrors = new Counter({
+  name: 'lumina_graphql_db_pool_errors_total',
+  help: 'Unexpected idle PostgreSQL pool client errors.',
+  registers: [registry],
+});
+
+export const exportRuns = new Counter({
+  name: 'lumina_scheduled_exports_total',
+  help: 'Scheduled object-storage exports by outcome.',
+  labelNames: ['outcome'] as const,
+  registers: [registry],
+});
+
+export const exportRunDuration = new Histogram({
+  name: 'lumina_scheduled_export_duration_seconds',
+  help: 'Duration of scheduled object-storage exports.',
+  buckets: [1, 5, 15, 30, 60, 120, 300, 900],
   registers: [registry],
 });
 
