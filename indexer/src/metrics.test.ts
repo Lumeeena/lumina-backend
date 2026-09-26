@@ -40,7 +40,7 @@ test('recordIndexedLedger advances every ledger counter and gauge', async () => 
     operations: await value('lumina_operations_indexed_total'),
   };
 
-  recordIndexedLedger(4242, 7, 19);
+  recordIndexedLedger('mainnet', 4242, 7, 19);
 
   assert.equal(await value('lumina_ledgers_indexed_total'), before.ledgers + 1);
   assert.equal(await value('lumina_transactions_indexed_total'), before.transactions + 7);
@@ -50,18 +50,32 @@ test('recordIndexedLedger advances every ledger counter and gauge', async () => 
 });
 
 test('recordHorizonTip derives lag from the two ledger positions', async () => {
-  recordHorizonTip(1000, 940);
+  recordHorizonTip('mainnet', 1000, 940);
 
-  assert.equal(await value('lumina_latest_horizon_ledger'), 1000);
-  assert.equal(await value('lumina_indexing_lag_ledgers'), 60);
+  assert.equal(await value('lumina_latest_horizon_ledger', { network: 'mainnet' }), 1000);
+  assert.equal(await value('lumina_indexing_lag_ledgers', { network: 'mainnet' }), 60);
+});
+
+test('each network keeps its own tip and lag, never a shared series', async () => {
+  // Two chains do not share a cursor. Averaging or maxing them would report a
+  // healthy lag while one network sits 500 ledgers behind.
+  recordIndexedLedger('mainnet', 4_500, 1, 1);
+  recordHorizonTip('mainnet', 5_000, 4_500);
+  recordIndexedLedger('testnet', 100, 1, 1);
+  recordHorizonTip('testnet', 100, 100);
+
+  assert.equal(await value('lumina_indexing_lag_ledgers', { network: 'mainnet' }), 500);
+  assert.equal(await value('lumina_indexing_lag_ledgers', { network: 'testnet' }), 0);
+  assert.equal(await value('lumina_latest_indexed_ledger', { network: 'mainnet' }), 4_500);
+  assert.equal(await value('lumina_latest_indexed_ledger', { network: 'testnet' }), 100);
 });
 
 test('lag is clamped at zero rather than going negative on a stale tip', async () => {
   // Horizon's reported tip can briefly trail what we already indexed; a
   // negative lag would break every threshold comparison built on it.
-  recordHorizonTip(1000, 1005);
+  recordHorizonTip('mainnet', 1000, 1005);
 
-  assert.equal(await value('lumina_indexing_lag_ledgers'), 0);
+  assert.equal(await value('lumina_indexing_lag_ledgers', { network: 'mainnet' }), 0);
 });
 
 test('Horizon requests are counted per status, so a 429 spike is a number', async () => {
@@ -91,12 +105,12 @@ test('unexpected PostgreSQL pool client errors have a scrapeable counter', async
 });
 
 test('the registry renders Prometheus text exposition', async () => {
-  recordIndexedLedger(5000, 1, 1);
+  recordIndexedLedger('mainnet', 5000, 1, 1);
   const body = await renderMetrics();
 
   assert.match(body, /# HELP lumina_ledgers_indexed_total/);
   assert.match(body, /# TYPE lumina_ledgers_indexed_total counter/);
-  assert.match(body, /lumina_latest_indexed_ledger 5000/);
+  assert.match(body, /lumina_latest_indexed_ledger\{network="mainnet"\} 5000/);
   // Default process metrics come along, so a leak or event-loop stall is
   // visible without anything being added by hand.
   assert.match(body, /lumina_indexer_process_cpu_user_seconds_total/);
