@@ -158,6 +158,13 @@ export const accountCacheSize = new Gauge({
   registers: [registry],
 });
 
+export const contractsWatched = new Gauge({
+  name: 'lumina_contracts_watched',
+  help: 'Distinct contract ids whose events are being indexed.',
+  labelNames: ['network'] as const,
+  registers: [registry],
+});
+
 export const sorobanEventsTruncated = new Counter({
   name: 'lumina_soroban_events_truncated_total',
   help: 'Soroban event polling cycles that hit the per-cycle event limit.',

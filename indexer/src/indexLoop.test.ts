@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { fetchAndIndexLedgerWithRetry, runLedgerCatchUp } from './index';
+import { fetchAndIndexLedgerWithRetry, runIndependently, runLedgerCatchUp } from './index';
 
 test('ledger catch-up advances the cursor after each indexed ledger', async () => {
   const indexed: number[] = [];
@@ -50,4 +50,28 @@ test('a transient Horizon failure retries and then indexes the ledger', async ()
 
   assert.equal(indexed, true);
   assert.equal(attempts, 2);
+});
+
+test('runIndependently keeps other tasks running when one rejects', async () => {
+  const finished: string[] = [];
+  await runIndependently(['a', 'b', 'c'], async name => {
+    if (name === 'b') throw new Error('boom');
+    await new Promise(r => setTimeout(r, 5));
+    finished.push(name);
+  });
+  assert.deepEqual(finished.sort(), ['a', 'c']);
+});
+
+test('runIndependently runs tasks concurrently with independent state', async () => {
+  const cursors: Record<string, number> = { mainnet: 0, testnet: 0 };
+  const order: string[] = [];
+  await runIndependently(['mainnet', 'testnet'], async name => {
+    for (let i = 0; i < 3; i++) {
+      await new Promise(r => setTimeout(r, 1));
+      cursors[name] += name === 'mainnet' ? 1 : 10;
+      order.push(name);
+    }
+  });
+  assert.deepEqual(cursors, { mainnet: 3, testnet: 30 });
+  assert.ok(order.indexOf('testnet') < order.lastIndexOf('mainnet'), 'interleaved');
 });
