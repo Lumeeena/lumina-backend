@@ -18,6 +18,13 @@ const log = subsystem('soroban');
 
 export const GET_LEDGER_ENTRIES_MAX_KEYS = 200;
 
+/**
+ * Soroban RPC accepts at most 5 contract ids in a single getEvents filter
+ * (see the getEvents docs); a longer list fails the whole call. Longer lists
+ * are split across several calls of this size.
+ */
+export const GET_EVENTS_MAX_CONTRACT_IDS = 5;
+
 export interface ContractEvent {
   id: string;
   type: string;
@@ -117,30 +124,21 @@ export async function getLedgerEntries(rpcUrl: string, keys: string[]): Promise<
   return { entries, latestLedger };
 }
 
-/**
- * Fetches contract events for the given contract IDs starting at startLedger,
- * following pagination until the range is exhausted or the per-cycle limit is hit.
- * events is [] if none of the contract IDs emitted anything in range —
- * latestLedger is still returned so the caller can advance its cursor.
- */
-export async function getEvents(
+/** Paginates one getEvents filter (at most GET_EVENTS_MAX_CONTRACT_IDS ids). */
+async function getEventsChunk(
   rpcUrl: string,
   contractIds: string[],
   startLedger: number,
-  maxEventsPerCycle: number
-): Promise<GetEventsResult> {
-  if (contractIds.length === 0) {
-    return { events: [], latestLedger: startLedger, truncated: false };
-  }
-
+  maxEvents: number
+): Promise<{ records: RpcEventRecord[]; latestLedger: number; truncated: boolean }> {
   const PAGE_LIMIT = 200;
   const allEvents: RpcEventRecord[] = [];
   let cursor: string | undefined;
   let latestLedger = startLedger;
   let truncated = false;
 
-  while (allEvents.length < maxEventsPerCycle) {
-    const remaining = maxEventsPerCycle - allEvents.length;
+  while (allEvents.length < maxEvents) {
+    const remaining = maxEvents - allEvents.length;
     const limit = Math.min(PAGE_LIMIT, remaining);
 
     const pagination: Record<string, unknown> = { limit };
@@ -164,9 +162,9 @@ export async function getEvents(
       break;
     }
 
-    if (result.cursor && allEvents.length < maxEventsPerCycle) {
+    if (result.cursor && allEvents.length < maxEvents) {
       cursor = result.cursor;
-    } else if (events.length === limit && allEvents.length >= maxEventsPerCycle) {
+    } else if (events.length === limit && allEvents.length >= maxEvents) {
       truncated = true;
       break;
     } else {
@@ -174,9 +172,51 @@ export async function getEvents(
     }
   }
 
+  return { records: allEvents, latestLedger, truncated };
+}
+
+/**
+ * Fetches contract events for the given contract IDs starting at startLedger,
+ * following pagination until the range is exhausted or the per-cycle limit is hit.
+ * events is [] if none of the contract IDs emitted anything in range —
+ * latestLedger is still returned so the caller can advance its cursor.
+ */
+export async function getEvents(
+  rpcUrl: string,
+  contractIds: string[],
+  startLedger: number,
+  maxEventsPerCycle: number
+): Promise<GetEventsResult> {
+  const unique = [...new Set(contractIds)];
+  if (unique.length === 0) {
+    return { events: [], latestLedger: startLedger, truncated: false };
+  }
+
+  const allEvents: RpcEventRecord[] = [];
+  let latestLedger = startLedger;
+  let truncated = false;
+
+  // One call (with its own pagination) per chunk; the per-cycle event budget
+  // is shared across chunks so the total stays bounded.
+  for (let offset = 0; offset < unique.length; offset += GET_EVENTS_MAX_CONTRACT_IDS) {
+    const remaining = maxEventsPerCycle - allEvents.length;
+    if (remaining <= 0) {
+      truncated = true;
+      break;
+    }
+    const chunk = unique.slice(offset, offset + GET_EVENTS_MAX_CONTRACT_IDS);
+    const result = await getEventsChunk(rpcUrl, chunk, startLedger, remaining);
+    allEvents.push(...result.records);
+    latestLedger = Math.max(latestLedger, result.latestLedger);
+    if (result.truncated) {
+      truncated = true;
+      break;
+    }
+  }
+
   if (truncated) {
     log.warn(
-      { contractIds, startLedger, eventsCollected: allEvents.length, maxEventsPerCycle },
+      { contractCount: unique.length, startLedger, eventsCollected: allEvents.length, maxEventsPerCycle },
       'Soroban getEvents truncated by per-cycle limit; remaining events will be fetched in subsequent cycles'
     );
   }

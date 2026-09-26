@@ -43,6 +43,8 @@ import {
   queryLimitsPlugin,
   requestTimeoutMiddleware,
 } from './security';
+import { createErrorMasker, shouldMaskErrors } from './errorMasking';
+import { loadSlowOperationThresholdMs, slowOperationPlugin } from './slowOperations';
 import { scheduledExportOptions, startScheduledExports } from './scheduledExport';
 import { loadMigrations, runMigrations } from './migrations';
 
@@ -80,6 +82,8 @@ const DB_POOL_CONNECTION_TIMEOUT = parseInt(process.env['DB_POOL_CONNECTION_TIME
 const persistedQueries = persistedQueryOption();
 
 const security = loadSecurityConfig();
+const maskError = createErrorMasker({ enabled: shouldMaskErrors() });
+const slowOperationThresholdMs = loadSlowOperationThresholdMs();
 
 const pool = new Pool({
   connectionString: DATABASE_URL,
@@ -174,12 +178,14 @@ async function main() {
     introspection: security.introspection,
     // Database timeouts are reported as a coded, actionable message rather
     // than a generic internal error.
-    formatError: formatTimeoutError,
+    // then anything unexpected is masked behind a correlation id in production.
+    formatError: (formatted, error) => maskError(formatTimeoutError(formatted, error), error),
     persistedQueries,
     plugins: [
       queryLimitsPlugin(security),
       ...(security.introspection ? [] : [ApolloServerPluginLandingPageDisabled()]),
       metricsPlugin(),
+      slowOperationPlugin({ thresholdMs: slowOperationThresholdMs }),
       ApolloServerPluginDrainHttpServer({ httpServer }),
       {
         // Draining the websocket layer on shutdown as well, so a deploy does

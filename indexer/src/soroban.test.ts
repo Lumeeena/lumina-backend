@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { getEvents, getLatestLedgerSequence, getLedgerEntries, GET_LEDGER_ENTRIES_MAX_KEYS } from './soroban';
+import { getEvents, getLatestLedgerSequence, getLedgerEntries, GET_LEDGER_ENTRIES_MAX_KEYS, GET_EVENTS_MAX_CONTRACT_IDS } from './soroban';
 import { registry } from './metrics';
 
 // Real XDR fixtures: ScSymbol("swap") and ScMap({ amount: "1000" }), generated via
@@ -112,4 +112,19 @@ test('getLedgerEntries makes no RPC calls for an empty key list', async () => {
   (global as unknown as { fetch: typeof fetch }).fetch = (async () => { called = true; throw new Error('unexpected RPC'); }) as typeof fetch;
   assert.deepEqual(await getLedgerEntries('https://rpc.example.com', []), { entries: [], latestLedger: 0 });
   assert.equal(called, false);
+});
+
+test('getEvents splits a long contract id list across calls of GET_EVENTS_MAX_CONTRACT_IDS and dedupes', async () => {
+  const seen: string[][] = [];
+  (global as unknown as { fetch: typeof fetch }).fetch = (async (_u: unknown, init: { body: string }) => {
+    const body = JSON.parse(init.body);
+    seen.push(body.params.filters[0].contractIds);
+    return { ok: true, status: 200, json: async () => ({ jsonrpc: '2.0', id: 1, result: { latestLedger: 200 } }) };
+  }) as unknown as typeof fetch;
+  const ids = Array.from({ length: 12 }, (_, i) => `C${i}`);
+  const { latestLedger } = await getEvents('https://rpc.example.com', [...ids, ...ids], 100, 5000);
+  assert.equal(latestLedger, 200);
+  assert.deepEqual(seen.map(c => c.length), [5, 5, 2]);
+  assert.deepEqual(seen.flat(), ids);
+  assert.ok(seen.every(c => c.length <= GET_EVENTS_MAX_CONTRACT_IDS));
 });

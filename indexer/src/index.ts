@@ -55,12 +55,12 @@ import {
   lastSuccessfulRegistryDiscoveryTimestamp,
   accountCacheSize,
   sorobanEventsTruncated,
+  contractsWatched,
   sorobanRetentionWindowExceeded,
 } from './metrics';
 import { aggregateNetworkStates, startHealthServer, type NetworkState } from './health';
 import { initTracing, shutdownTracing } from './tracing';
 import { initErrorTracking, captureException, shutdownErrorTracking } from './errorTracking';
-import { loadConfig } from './config';
 import { getRetentionInfo } from './soroban';
 
 const log = subsystem('indexer');
@@ -85,8 +85,6 @@ import { readFileSync } from 'fs';
 import { join } from 'path';
 const packageJson = JSON.parse(readFileSync(join(__dirname, '../package.json'), 'utf-8'));
 const VERSION = packageJson.version;
-
-const config = loadConfig();
 
 const DATABASE_URL = config.databaseUrl;
 const POLL_INTERVAL_MS = config.pollIntervalMs;
@@ -354,8 +352,9 @@ async function pollRegistry(loop: NetworkLoop): Promise<void> {
  */
 async function pollContractEvents(loop: NetworkLoop): Promise<void> {
   const contractIds = [...new Set([...loop.staticContractIds, ...loop.discoveredContractIds])];
-  if (!loop.sorobanRpcUrl || contractIds.length === 0) return;
   const name = loop.network.name;
+  contractsWatched.set({ network: name }, loop.sorobanRpcUrl ? contractIds.length : 0);
+  if (!loop.sorobanRpcUrl || contractIds.length === 0) return;
   try {
     if (loop.eventsCursor === 0) {
       const dbCursor = await getLatestIndexedEventLedger(pool, name);
@@ -453,26 +452,53 @@ async function indexCustomEvents(loop: NetworkLoop, events: ContractEvent[]): Pr
   }
 }
 
+/**
+ * Run every item's task concurrently and independently: a task that rejects is
+ * logged and does not cancel or reject its siblings.
+ */
+export async function runIndependently<T>(items: T[], task: (item: T) => Promise<void>): Promise<void> {
+  await Promise.all(
+    items.map(async item => {
+      try {
+        await task(item);
+      } catch (err) {
+        indexingErrors.inc({ loop: 'main' });
+        log.error({ err: message(err) }, 'network loop terminated unexpectedly; other networks continue');
+      }
+    })
+  );
+}
+
 /** Run one network's polling loop until the process shuts down. */
 async function runNetworkLoop(loop: NetworkLoop, isPrimary: boolean): Promise<void> {
   const name = loop.network.name;
 
-  loop.cursor = await getLatestIndexedLedger(pool, name);
-  if (loop.cursor === 0 && START_LEDGER !== undefined) {
-    loop.cursor = START_LEDGER - 1;
-    log.info({ network: name, ledger: START_LEDGER }, 'starting from configured START_LEDGER');
-  } else if (loop.cursor === 0) {
-    loop.cursor = await getLatestLedgerSequence(loop.network.horizonUrl);
-    log.info({ network: name, ledger: loop.cursor + 1 }, 'starting from latest ledger');
-  } else {
-    log.info({ network: name, ledger: loop.cursor + 1 }, 'resuming from ledger');
-  }
+  // Cursor initialisation talks to the database and Horizon, so it can fail
+  // too. It is retried inside the loop rather than thrown, so one network's bad
+  // start never takes the others down with it.
+  let initialised = false;
+  const initCursor = async (): Promise<void> => {
+    loop.cursor = await getLatestIndexedLedger(pool, name);
+    if (loop.cursor === 0 && START_LEDGER !== undefined) {
+      loop.cursor = START_LEDGER - 1;
+      log.info({ network: name, ledger: START_LEDGER }, 'starting from configured START_LEDGER');
+    } else if (loop.cursor === 0) {
+      loop.cursor = await getLatestLedgerSequence(loop.network.horizonUrl);
+      log.info({ network: name, ledger: loop.cursor + 1 }, 'starting from latest ledger');
+    } else {
+      log.info({ network: name, ledger: loop.cursor + 1 }, 'resuming from ledger');
+    }
+    initialised = true;
+  };
 
   const indexOne = (sequence: number): Promise<boolean> =>
     fetchAndIndexLedgerWithRetry(sequence, seq => fetchAndIndexLedger(loop, seq));
 
   while (!isShuttingDown) {
     try {
+      if (!initialised) {
+        await initCursor();
+      }
       if (isPrimary && loop.loopTick % REGISTRY_POLL_EVERY_N_TICKS === 0) {
         await pollRegistry(loop);
       }
@@ -534,9 +560,7 @@ async function run() {
   });
 
   isLoopRunning = true;
-  await Promise.all(
-    loops.map(loop => runNetworkLoop(loop, loop.network.name === registry.primary.name))
-  );
+  await runIndependently(loops, loop => runNetworkLoop(loop, loop.network.name === registry.primary.name));
   isLoopRunning = false;
 }
 
