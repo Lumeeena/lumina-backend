@@ -110,10 +110,10 @@ test('a resume cursor is read for one network, never across all of them', async 
   await getLatestIndexedLedger(pool, 'testnet');
   await getLatestIndexedEventLedger(pool, 'testnet');
 
-  assert.match(queries[0].sql, /WHERE network = \$1/);
-  assert.deepEqual(queries[0].params, ['testnet']);
-  assert.match(queries[1].sql, /WHERE network = \$1/);
-  assert.deepEqual(queries[1].params, ['testnet']);
+  assert.match(queries[0]!.sql, /WHERE network = \$1/);
+  assert.deepEqual(queries[0]!.params, ['testnet']);
+  assert.match(queries[1]!.sql, /WHERE network = \$1/);
+  assert.deepEqual(queries[1]!.params, ['testnet']);
 });
 
 const account = makeAccount();
@@ -137,11 +137,11 @@ test('upsertAccount inserts with an ON CONFLICT upsert', async () => {
   const queries: string[] = [];
   const client = { query: async (sql: string) => { queries.push(sql); return { rows: [] }; } } as unknown as PoolClient;
   await upsertAccount(client, 'testnet', account);
-  assert.match(queries[0], /INSERT INTO accounts/);
+  assert.match(queries[0]!, /INSERT INTO accounts/);
   // The same address exists on every chain it has funded; without the network
   // in the key, one chain's balances silently overwrite another's.
-  assert.match(queries[0], /ON CONFLICT \(address, network\) DO UPDATE/);
-  assert.match(queries[0], /network\)/);
+  assert.match(queries[0]!, /ON CONFLICT \(address, network\) DO UPDATE/);
+  assert.match(queries[0]!, /network\)/);
 });
 
 const event = makeContractEvent();
@@ -152,9 +152,9 @@ test('insertContractEvents writes one row per event', async () => {
   await insertContractEvents(pool, 'testnet', [event, { ...event, id: 'evt2' }]);
   // Two inserts, then one notification announcing the batch.
   assert.equal(queries.length, 3);
-  assert.match(queries[0], /INSERT INTO contract_events/);
-  assert.match(queries[1], /INSERT INTO contract_events/);
-  assert.match(queries[2], /pg_notify/);
+  assert.match(queries[0]!, /INSERT INTO contract_events/);
+  assert.match(queries[1]!, /INSERT INTO contract_events/);
+  assert.match(queries[2]!, /pg_notify/);
 });
 
 test('insertContractEvents is a no-op for an empty list', async () => {
