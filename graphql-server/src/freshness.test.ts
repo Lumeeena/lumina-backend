@@ -26,12 +26,8 @@ function poolWithTip(sequence: number | null, indexedAt: Date | null = null): Po
   } as unknown as Pool;
 }
 
-function tipAt(sequence: number, at: number): Date {
-  return new Date(at);
-}
-
 test('a caught-up indexer reports no lag and is not stale', async () => {
-  const report = await getIndexerStatus(poolWithTip(990, tipAt(990, NOW - 2_000)), MAINNET, {
+  const report = await getIndexerStatus(poolWithTip(990, new Date(NOW - 2_000)), MAINNET, {
     readHorizonLedger: async () => ({ sequence: 995 }),
     now: () => NOW,
   });
