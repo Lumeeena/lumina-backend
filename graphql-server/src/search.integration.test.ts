@@ -36,7 +36,7 @@ const MEMOS: [string, string][] = [
 async function seed(): Promise<void> {
   await pool.query(
     `INSERT INTO ledgers (sequence, closed_at, transaction_count, operation_count)
-     VALUES ($1, NOW(), $2, $2) ON CONFLICT (sequence) DO NOTHING`,
+     VALUES ($1, NOW(), $2, $2) ON CONFLICT (sequence, network) DO NOTHING`,
     [LEDGER, MEMOS.length]
   );
 
@@ -44,7 +44,7 @@ async function seed(): Promise<void> {
     await pool.query(
       `INSERT INTO transactions (hash, ledger, created_at, source_account, fee_charged, operation_count, successful, memo_type, memo)
        VALUES ($1, $2, NOW(), 'GSOURCE', 100, 1, true, 'text', $3)
-       ON CONFLICT (hash) DO UPDATE SET memo = EXCLUDED.memo`,
+       ON CONFLICT (hash, network) DO UPDATE SET memo = EXCLUDED.memo`,
       [hash, LEDGER, memo]
     );
   }
@@ -62,7 +62,7 @@ async function seed(): Promise<void> {
     await pool.query(
       `INSERT INTO operations (id, type, transaction_hash, ledger, created_at, source_account, details)
        VALUES ($1, 'payment', $2, $3, NOW(), 'GSOURCE', $4)
-       ON CONFLICT (id) DO UPDATE SET details = EXCLUDED.details`,
+       ON CONFLICT (id, network) DO UPDATE SET details = EXCLUDED.details`,
       [id, 'tx_exact', LEDGER, JSON.stringify(details)]
     );
   }
@@ -71,17 +71,17 @@ async function seed(): Promise<void> {
 before(async () => {
   if (skip) return;
   pool = new Pool({ connectionString: DATABASE_URL });
-  await pool.query('DELETE FROM operations WHERE ledger = $1', [LEDGER]);
-  await pool.query('DELETE FROM transactions WHERE ledger = $1', [LEDGER]);
-  await pool.query('DELETE FROM ledgers WHERE sequence = $1', [LEDGER]);
+  await pool.query("DELETE FROM operations WHERE ledger = $1 AND network = 'mainnet'", [LEDGER]);
+  await pool.query("DELETE FROM transactions WHERE ledger = $1 AND network = 'mainnet'", [LEDGER]);
+  await pool.query("DELETE FROM ledgers WHERE sequence = $1 AND network = 'mainnet'", [LEDGER]);
   await seed();
 });
 
 after(async () => {
   if (skip) return;
-  await pool.query('DELETE FROM operations WHERE ledger = $1', [LEDGER]);
-  await pool.query('DELETE FROM transactions WHERE ledger = $1', [LEDGER]);
-  await pool.query('DELETE FROM ledgers WHERE sequence = $1', [LEDGER]);
+  await pool.query("DELETE FROM operations WHERE ledger = $1 AND network = 'mainnet'", [LEDGER]);
+  await pool.query("DELETE FROM transactions WHERE ledger = $1 AND network = 'mainnet'", [LEDGER]);
+  await pool.query("DELETE FROM ledgers WHERE sequence = $1 AND network = 'mainnet'", [LEDGER]);
   await pool.end();
 });
 
@@ -150,7 +150,7 @@ test('a page boundary survives a new matching row landing mid-scroll', { skip, t
   await pool.query(
     `INSERT INTO transactions (hash, ledger, created_at, source_account, fee_charged, operation_count, successful, memo_type, memo)
      VALUES ('tx_inserted', $1, NOW(), 'GSOURCE', 100, 1, true, 'text', 'ORDER-4471')
-     ON CONFLICT (hash) DO NOTHING`,
+     ON CONFLICT (hash, network) DO NOTHING`,
     [LEDGER]
   );
 
@@ -163,7 +163,7 @@ test('a page boundary survives a new matching row landing mid-scroll', { skip, t
       'the first page’s row must not reappear on the second'
     );
   } finally {
-    await pool.query("DELETE FROM transactions WHERE hash = 'tx_inserted'");
+    await pool.query("DELETE FROM transactions WHERE hash = 'tx_inserted' AND network = 'mainnet'");
   }
 });
 
