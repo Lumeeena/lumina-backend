@@ -30,6 +30,9 @@ export interface Config {
   accountCacheTtlMs: number;
   accountCacheMaxSize: number;
   eventsSafetyLagLedgers: number;
+  sorobanMinRequestIntervalMs: number;
+  sorobanMaxEventsPerCycle: number;
+  sorobanRetentionWindowLedgers: number;
 }
 
 /**
@@ -150,6 +153,9 @@ export function loadConfig(): Config {
     accountCacheTtlMs: 5 * 60 * 1000,
     accountCacheMaxSize: 50_000,
     eventsSafetyLagLedgers: 3,
+    sorobanMinRequestIntervalMs: intWithDefault('SOROBAN_MIN_REQUEST_INTERVAL_MS', 100, 1),
+    sorobanMaxEventsPerCycle: intWithDefault('SOROBAN_MAX_EVENTS_PER_CYCLE', 5000, 100),
+    sorobanRetentionWindowLedgers: intWithDefault('SOROBAN_RETENTION_WINDOW_LEDGERS', 300_000, 1),
   };
 
   // Validate that if registry is configured, all required fields are present
@@ -199,6 +205,9 @@ export function loadConfig(): Config {
       accountCacheTtlMs: config.accountCacheTtlMs,
       accountCacheMaxSize: config.accountCacheMaxSize,
       eventsSafetyLagLedgers: config.eventsSafetyLagLedgers,
+      sorobanMinRequestIntervalMs: config.sorobanMinRequestIntervalMs,
+      sorobanMaxEventsPerCycle: config.sorobanMaxEventsPerCycle,
+      sorobanRetentionWindowLedgers: config.sorobanRetentionWindowLedgers,
     },
     'configuration loaded'
   );

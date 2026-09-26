@@ -22,8 +22,8 @@ test('getEvents returns latestLedger=startLedger without making a request when n
     called = true;
     throw new Error('should not be called');
   }) as unknown as typeof fetch;
-  const result = await getEvents('https://rpc.example.com', [], 100);
-  assert.deepEqual(result, { events: [], latestLedger: 100 });
+  const result = await getEvents('https://rpc.example.com', [], 100, 5000);
+  assert.deepEqual(result, { events: [], latestLedger: 100, truncated: false });
   assert.equal(called, false);
 });
 
@@ -48,7 +48,7 @@ test('getEvents decodes ScVal topics and values from a real RPC response shape',
     },
   });
 
-  const { events, latestLedger } = await getEvents('https://rpc.example.com', ['CABC'], 100);
+  const { events, latestLedger } = await getEvents('https://rpc.example.com', ['CABC'], 100, 5000);
   assert.equal(latestLedger, 105);
   assert.equal(events.length, 1);
   assert.equal(events[0].id, 'evt1');
@@ -60,19 +60,19 @@ test('getEvents decodes ScVal topics and values from a real RPC response shape',
 
 test('getEvents returns [] events (but a real latestLedger) when the RPC result has none', async () => {
   mockFetchOnce({ jsonrpc: '2.0', id: 1, result: { latestLedger: 105 } });
-  const { events, latestLedger } = await getEvents('https://rpc.example.com', ['CABC'], 100);
+  const { events, latestLedger } = await getEvents('https://rpc.example.com', ['CABC'], 100, 5000);
   assert.deepEqual(events, []);
   assert.equal(latestLedger, 105);
 });
 
 test('getEvents throws on a JSON-RPC error response', async () => {
   mockFetchOnce({ jsonrpc: '2.0', id: 1, error: { code: -32600, message: 'start ledger too old' } });
-  await assert.rejects(() => getEvents('https://rpc.example.com', ['CABC'], 100), /start ledger too old/);
+  await assert.rejects(() => getEvents('https://rpc.example.com', ['CABC'], 100, 5000), /start ledger too old/);
 });
 
 test('getEvents throws on a non-OK HTTP response', async () => {
   mockFetchOnce({}, false);
-  await assert.rejects(() => getEvents('https://rpc.example.com', ['CABC'], 100));
+  await assert.rejects(() => getEvents('https://rpc.example.com', ['CABC'], 100, 5000));
 });
 
 test('getLatestLedgerSequence returns the sequence from a real getLatestLedger response shape', async () => {

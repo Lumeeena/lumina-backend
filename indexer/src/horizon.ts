@@ -5,6 +5,7 @@
 
 import { horizonRequestDuration, horizonRequests } from './metrics';
 import { subsystem } from './logger';
+import { createThrottle } from './throttle';
 
 const log = subsystem('horizon');
 
@@ -68,53 +69,16 @@ interface HorizonPage<T> {
   _links: { next?: { href: string } };
 }
 
-// A ledger's account fetches all fire via Promise.all — fine on average
-// volume, but a busy ledger with dozens of unique accounts sends that many
-// concurrent requests in one instant and trips Horizon's per-IP rate limit
-// even when nowhere near it on average (confirmed live: sustained 429s on
-// the deployed indexer's IP despite the 5-minute account cache). Serializing
-// every outbound Horizon request through one gate with a minimum spacing
-// turns that burst into a paced stream instead.
 const MIN_REQUEST_INTERVAL_MS = parseInt(process.env.HORIZON_MIN_REQUEST_INTERVAL_MS ?? '100', 10);
-let horizonGate: Promise<void> = Promise.resolve();
 
-async function throttle(): Promise<void> {
-  const previous = horizonGate;
-  let release!: () => void;
-  horizonGate = new Promise(r => { release = r; });
-  await previous;
-  await new Promise(r => setTimeout(r, MIN_REQUEST_INTERVAL_MS));
-  release();
-}
-
-async function fetchJson<T>(url: string): Promise<T> {
-  await throttle();
-
-  // Every outbound Horizon request is counted by status. This is the metric
-  // that closes the gap from the rate-limiting incident: a 429 spike is a
-  // counter with a label, not an exception message in a log nobody tails.
-  const stopTimer = horizonRequestDuration.startTimer();
-  let res: Response;
-  try {
-    res = await fetch(url);
-  } catch (err) {
-    // A request that never got a response at all still has to be visible, or a
-    // DNS failure looks like silence.
-    horizonRequests.inc({ status: 'error' });
-    stopTimer();
-    throw err;
-  }
-  stopTimer();
-  horizonRequests.inc({ status: String(res.status) });
-
-  if (!res.ok) {
-    if (res.status === 429) {
-      log.warn({ url, status: 429 }, 'horizon rate limited the request');
-    }
-    throw new Error(`Horizon request failed (${res.status}): ${url}`);
-  }
-  return (await res.json()) as T;
-}
+const { throttle, fetchJson, postJson } = createThrottle({
+  name: 'horizon',
+  minIntervalMs: MIN_REQUEST_INTERVAL_MS,
+  metrics: {
+    requestsTotal: horizonRequests,
+    requestDuration: horizonRequestDuration,
+  },
+});
 
 async function fetchAllPages<T>(url: string): Promise<T[]> {
   const records: T[] = [];
@@ -150,10 +114,6 @@ export function getLedgerOperations(horizonUrl: string, sequence: number): Promi
 
 /** Returns null (rather than throwing) for accounts that don't exist or have been merged away. */
 export async function getAccount(horizonUrl: string, address: string): Promise<HorizonAccount | null> {
-  await throttle();
-  // Counted here too — account lookups were the exact path the rate-limiting
-  // incident broke, and they bypass fetchJson because a 404 is expected rather
-  // than exceptional.
   const stopTimer = horizonRequestDuration.startTimer();
   let res: Response;
   try {

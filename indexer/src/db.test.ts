@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import type { Pool, PoolClient } from 'pg';
 import {
   createPool,
+  ensurePartitions,
   getLatestIndexedEventLedger,
   getLatestIndexedLedger,
   indexLedger,

@@ -10,7 +10,11 @@
  * enable it (see indexer/src/index.ts).
  */
 import { scValToNative, xdr } from '@stellar/stellar-sdk';
-import { sorobanRequests } from './metrics';
+import { sorobanRequestDuration, sorobanRequests } from './metrics';
+import { createThrottle } from './throttle';
+import { subsystem } from './logger';
+
+const log = subsystem('soroban');
 
 export const GET_LEDGER_ENTRIES_MAX_KEYS = 200;
 
@@ -33,18 +37,21 @@ interface RpcEventRecord {
   id: string;
   pagingToken: string;
   topic: string[];
-  value: string; // base64 XDR ScVal
+  value: string;
 }
 
 interface RpcGetEventsResult {
   events?: RpcEventRecord[];
   latestLedger: number;
+  cursor?: string;
 }
 
 export interface GetEventsResult {
   events: ContractEvent[];
   /** The RPC's current ledger at call time — use to advance the polling cursor. */
   latestLedger: number;
+  /** Whether the result was truncated due to the per-cycle limit. */
+  truncated: boolean;
 }
 
 export interface LedgerEntryResult {
@@ -60,20 +67,37 @@ function decodeScVal(base64: string): unknown {
   }
 }
 
+const SOROBAN_MIN_REQUEST_INTERVAL_MS = parseInt(process.env.SOROBAN_MIN_REQUEST_INTERVAL_MS ?? '100', 10);
+
+const { throttle, postJson } = createThrottle({
+  name: 'soroban',
+  minIntervalMs: SOROBAN_MIN_REQUEST_INTERVAL_MS,
+  metrics: {
+    requestsTotal: { inc: () => {} }, // no-op, we handle metrics in rpcCall
+    requestDuration: sorobanRequestDuration,
+  },
+});
+
 async function rpcCall<T>(rpcUrl: string, method: string, params: Record<string, unknown>): Promise<T> {
+  const stopTimer = sorobanRequestDuration.startTimer();
   try {
-    const res = await fetch(rpcUrl, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ jsonrpc: '2.0', id: 1, method, params }),
+    const body = await postJson<{ result?: T; error?: { message: string } }>(rpcUrl, {
+      jsonrpc: '2.0',
+      id: 1,
+      method,
+      params,
     });
-    if (!res.ok) throw new Error(`Soroban RPC request failed (${res.status}): ${method}`);
-    const body = (await res.json()) as { result?: T; error?: { message: string } };
-    if (body.error) throw new Error(`Soroban RPC error in ${method}: ${body.error.message}`);
+    if (body.error) {
+      sorobanRequests.inc({ method, outcome: 'error' });
+      stopTimer();
+      throw new Error(`Soroban RPC error in ${method}: ${body.error.message}`);
+    }
     sorobanRequests.inc({ method, outcome: 'success' });
+    stopTimer();
     return body.result as T;
   } catch (error) {
     sorobanRequests.inc({ method, outcome: 'error' });
+    stopTimer();
     throw error;
   }
 }
@@ -94,26 +118,70 @@ export async function getLedgerEntries(rpcUrl: string, keys: string[]): Promise<
 }
 
 /**
- * Fetches contract events for the given contract IDs starting at startLedger.
+ * Fetches contract events for the given contract IDs starting at startLedger,
+ * following pagination until the range is exhausted or the per-cycle limit is hit.
  * events is [] if none of the contract IDs emitted anything in range —
  * latestLedger is still returned so the caller can advance its cursor.
  */
 export async function getEvents(
   rpcUrl: string,
   contractIds: string[],
-  startLedger: number
+  startLedger: number,
+  maxEventsPerCycle: number
 ): Promise<GetEventsResult> {
   if (contractIds.length === 0) {
-    return { events: [], latestLedger: startLedger };
+    return { events: [], latestLedger: startLedger, truncated: false };
   }
 
-  const result = await rpcCall<RpcGetEventsResult>(rpcUrl, 'getEvents', {
-    startLedger,
-    filters: [{ type: 'contract', contractIds }],
-    pagination: { limit: 200 },
-  });
+  const PAGE_LIMIT = 200;
+  const allEvents: RpcEventRecord[] = [];
+  let cursor: string | undefined;
+  let latestLedger = startLedger;
+  let truncated = false;
 
-  const events = (result.events ?? []).map(record => ({
+  while (allEvents.length < maxEventsPerCycle) {
+    const remaining = maxEventsPerCycle - allEvents.length;
+    const limit = Math.min(PAGE_LIMIT, remaining);
+
+    const pagination: Record<string, unknown> = { limit };
+    if (cursor) {
+      pagination.cursor = cursor;
+    }
+
+    const params: Record<string, unknown> = {
+      startLedger,
+      filters: [{ type: 'contract', contractIds }],
+      pagination,
+    };
+
+    const result = await rpcCall<RpcGetEventsResult>(rpcUrl, 'getEvents', params);
+
+    const events = result.events ?? [];
+    allEvents.push(...events);
+    latestLedger = Math.max(latestLedger, result.latestLedger ?? 0);
+
+    if (events.length < limit) {
+      break;
+    }
+
+    if (result.cursor && allEvents.length < maxEventsPerCycle) {
+      cursor = result.cursor;
+    } else if (events.length === limit && allEvents.length >= maxEventsPerCycle) {
+      truncated = true;
+      break;
+    } else {
+      break;
+    }
+  }
+
+  if (truncated) {
+    log.warn(
+      { contractIds, startLedger, eventsCollected: allEvents.length, maxEventsPerCycle },
+      'Soroban getEvents truncated by per-cycle limit; remaining events will be fetched in subsequent cycles'
+    );
+  }
+
+  const mappedEvents = allEvents.map(record => ({
     id: record.id,
     type: record.type,
     contractId: record.contractId,
@@ -124,11 +192,24 @@ export async function getEvents(
     value: decodeScVal(record.value),
   }));
 
-  return { events, latestLedger: result.latestLedger };
+  return { events: mappedEvents, latestLedger, truncated };
 }
 
 /** The RPC's current ledger — used to seed the event-polling cursor on first run. */
 export async function getLatestLedgerSequence(rpcUrl: string): Promise<number> {
   const result = await rpcCall<{ sequence: number }>(rpcUrl, 'getLatestLedger', {});
   return result.sequence;
+}
+
+/**
+ * Fetches the RPC's ledger retention window info.
+ * Returns the oldest ledger the RPC can serve, or undefined if not available.
+ */
+export async function getRetentionInfo(rpcUrl: string): Promise<{ oldestLedger: number } | undefined> {
+  try {
+    const result = await rpcCall<{ oldestLedger: number }>(rpcUrl, 'getNetwork', {});
+    return { oldestLedger: result.oldestLedger };
+  } catch {
+    return undefined;
+  }
 }
