@@ -330,3 +330,83 @@ export async function insertCustomEvents(
     );
   }
 }
+
+// ─── Retry queue for failed ledgers ────────────────────────────────────────
+
+const MAX_RETRY_ATTEMPTS = 10;
+const RETRY_BACKOFF_BASE_MS = 5000; // 5 seconds
+
+/**
+ * Add a failed ledger to the retry queue with exponential backoff.
+ */
+export async function enqueueLedgerRetry(
+  pool: Pool,
+  network: string,
+  ledger: number,
+  error: string
+): Promise<void> {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    const { rows } = await client.query<{ attempt_count: number }>(
+      'SELECT attempt_count FROM ledger_retry_queue WHERE ledger = $1 AND network = $2',
+      [ledger, network]
+    );
+
+    const attemptCount = rows[0] ? rows[0].attempt_count + 1 : 1;
+    const isPermanentlyFailed = attemptCount >= MAX_RETRY_ATTEMPTS;
+    const backoffMs = Math.min(RETRY_BACKOFF_BASE_MS * Math.pow(2, attemptCount - 1), 3600000); // Max 1 hour
+
+    await client.query(
+      `INSERT INTO ledger_retry_queue
+         (ledger, network, attempt_count, next_attempt_at, last_error, last_attempted_at, permanently_failed)
+       VALUES ($1, $2, $3, NOW() + INTERVAL '1 millisecond' * $4, $5, NOW(), $6)
+       ON CONFLICT (ledger, network) DO UPDATE SET
+         attempt_count = $3,
+         next_attempt_at = NOW() + INTERVAL '1 millisecond' * $4,
+         last_error = $5,
+         last_attempted_at = NOW(),
+         permanently_failed = $6`,
+      [ledger, network, attemptCount, backoffMs, error, isPermanentlyFailed]
+    );
+
+    await client.query('COMMIT');
+  } catch (err) {
+    await client.query('ROLLBACK');
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
+/**
+ * Get ledgers that are due for retry.
+ */
+export async function getPendingRetries(pool: Pool, network: string, limit = 10): Promise<number[]> {
+  const { rows } = await pool.query<{ ledger: number }>(
+    `SELECT ledger FROM ledger_retry_queue
+     WHERE network = $1
+       AND NOT permanently_failed
+       AND next_attempt_at <= NOW()
+     ORDER BY next_attempt_at ASC
+     LIMIT $2`,
+    [network, limit]
+  );
+  return rows.map(r => r.ledger);
+}
+
+/**
+ * Remove a ledger from the retry queue after successful indexing.
+ */
+export async function removeLedgerFromRetryQueue(
+  pool: Pool,
+  network: string,
+  ledger: number
+): Promise<void> {
+  await pool.query(
+    'DELETE FROM ledger_retry_queue WHERE ledger = $1 AND network = $2',
+    [ledger, network]
+  );
+}
+

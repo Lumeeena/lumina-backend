@@ -251,6 +251,23 @@ CREATE TABLE IF NOT EXISTS api_keys (
 
 CREATE INDEX IF NOT EXISTS idx_api_keys_revoked_at ON api_keys (revoked_at);
 
+-- ─── Ledger Retry Queue ───────────────────────────────────────────────────────
+
+CREATE TABLE IF NOT EXISTS ledger_retry_queue (
+    ledger              BIGINT NOT NULL,
+    network             TEXT NOT NULL DEFAULT 'mainnet',
+    attempt_count       INTEGER NOT NULL DEFAULT 0,
+    next_attempt_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    last_error          TEXT,
+    first_failed_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    last_attempted_at   TIMESTAMPTZ,
+    permanently_failed  BOOLEAN NOT NULL DEFAULT FALSE,
+    PRIMARY KEY (ledger, network)
+);
+
+CREATE INDEX IF NOT EXISTS idx_retry_queue_next_attempt ON ledger_retry_queue (next_attempt_at)
+    WHERE NOT permanently_failed;
+
 -- Lower insert-triggered vacuum/analyze thresholds for the append-heavy tables.
 ALTER TABLE transactions SET (
     autovacuum_vacuum_insert_threshold = 5000,
