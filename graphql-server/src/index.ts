@@ -15,6 +15,7 @@ import { useServer } from 'graphql-ws/lib/use/ws';
 import { WebSocketServer } from 'ws';
 import { to as copyTo } from 'pg-copy-streams';
 import { createContext, resolvers, type BaseContext } from './resolvers';
+import { buildCsvExportStatement } from './export';
 import { getNetworks, networkEnumValue } from './networks';
 import { persistedQueryOption } from './persistedQueries';
 import { LedgerNotifier, SubscriberLimitError } from './pubsub';
@@ -241,39 +242,24 @@ async function main() {
 
   app.get('/export/:table', async (req, res) => {
     const table = req.params.table;
-    if (!['transactions', 'operations', 'ledgers'].includes(table)) {
+    const { min_ledger, max_ledger, min_date, max_date } = req.query;
+
+    // The statement is built in export.ts, which owns both the table
+    // allow-list and the canonicalisation of the values it interpolates — see
+    // the docblock there and docs/SQL_CONSTRUCTION.md.
+    const query = buildCsvExportStatement(table, {
+      minLedger: min_ledger,
+      maxLedger: max_ledger,
+      minDate: min_date,
+      maxDate: max_date,
+    });
+    if (!query) {
       res.status(400).send('Invalid table');
       return;
     }
 
-    const { min_ledger, max_ledger, min_date, max_date } = req.query;
-
-    const whereClauses: string[] = [];
-    const ledgerCol = table === 'ledgers' ? 'sequence' : 'ledger';
-    const dateCol = table === 'ledgers' ? 'closed_at' : 'created_at';
-
-    if (min_ledger) {
-      const parsed = parseInt(min_ledger as string, 10);
-      if (!isNaN(parsed)) whereClauses.push(`${ledgerCol} >= ${parsed}`);
-    }
-    if (max_ledger) {
-      const parsed = parseInt(max_ledger as string, 10);
-      if (!isNaN(parsed)) whereClauses.push(`${ledgerCol} <= ${parsed}`);
-    }
-    if (min_date) {
-      const parsed = new Date(min_date as string);
-      if (!isNaN(parsed.getTime())) whereClauses.push(`${dateCol} >= '${parsed.toISOString()}'`);
-    }
-    if (max_date) {
-      const parsed = new Date(max_date as string);
-      if (!isNaN(parsed.getTime())) whereClauses.push(`${dateCol} <= '${parsed.toISOString()}'`);
-    }
-
-    const whereStr = whereClauses.length > 0 ? `WHERE ${whereClauses.join(' AND ')}` : '';
-
     try {
       const client = await pool.connect();
-      const query = `COPY (SELECT * FROM ${table} ${whereStr}) TO STDOUT WITH CSV HEADER`;
       const stream = client.query(copyTo(query));
       
       res.setHeader('Content-Type', 'text/csv');

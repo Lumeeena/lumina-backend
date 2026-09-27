@@ -44,6 +44,78 @@ export async function hasExportPermission(pool: Pool, plaintextKey: string): Pro
   return result.rowCount === 1;
 }
 
+/**
+ * Tables the CSV endpoint exports, each with the columns it can be filtered on.
+ *
+ * A map rather than a list because the statement builder interpolates these
+ * values as *identifiers*: `COPY` cannot take bind parameters, so the only
+ * thing standing between a request and the statement is this table. Keying by
+ * table name means the two identifiers written into the statement are always
+ * values that live here, never strings that arrived from a request.
+ */
+const CSV_EXPORT_TABLES: Record<string, { ledger: string; date: string }> = {
+  ledgers: { ledger: 'sequence', date: 'closed_at' },
+  transactions: { ledger: 'ledger', date: 'created_at' },
+  operations: { ledger: 'ledger', date: 'created_at' },
+};
+
+export interface CsvExportRange {
+  minLedger?: unknown;
+  maxLedger?: unknown;
+  minDate?: unknown;
+  maxDate?: unknown;
+}
+
+/**
+ * The `COPY … TO STDOUT` statement for a CSV export, or null for a table that
+ * is not on the allow-list.
+ *
+ * ## Why the values are interpolated rather than bound
+ *
+ * `COPY` is a utility statement and cannot take bind parameters — there is no
+ * `COPY … WHERE x > $1` to write. So the values have to reach the statement as
+ * text, and the safety argument is that they are canonicalised first: a ledger
+ * bound becomes an integer through `parseInt` and can carry no quote or
+ * semicolon, and a date becomes `Date.toISOString()` output, whose alphabet is
+ * fixed. Anything that does not survive that (`NaN`, an invalid date) is
+ * dropped rather than written.
+ *
+ * The identifiers are not canonicalised, they are looked up: the table name
+ * indexes `CSV_EXPORT_TABLES`, and both column names are read out of the entry
+ * it finds. Nothing from a request reaches the statement except through those
+ * two normalisation steps, which is what makes this the one statement in the
+ * codebase where interpolation is allowed — see docs/SQL_CONSTRUCTION.md.
+ */
+export function buildCsvExportStatement(table: string, range: CsvExportRange = {}): string | null {
+  const columns = CSV_EXPORT_TABLES[table];
+  if (!columns) return null;
+
+  const clauses: string[] = [];
+  for (const [value, operator, column] of [
+    [range.minLedger, '>=', columns.ledger],
+    [range.maxLedger, '<=', columns.ledger],
+  ] as const) {
+    // Falsy values are skipped, matching the endpoint's original guard: an
+    // absent parameter and an empty string are both "no filter".
+    if (!value) continue;
+    const parsed = parseInt(String(value), 10);
+    if (!isNaN(parsed)) clauses.push(`${column} ${operator} ${parsed}`);
+  }
+  for (const [value, operator, column] of [
+    [range.minDate, '>=', columns.date],
+    [range.maxDate, '<=', columns.date],
+  ] as const) {
+    // Falsy values are skipped, matching the endpoint's original guard: an
+    // absent parameter and an empty string are both "no filter".
+    if (!value) continue;
+    const parsed = new Date(String(value));
+    if (!isNaN(parsed.getTime())) clauses.push(`${column} ${operator} '${parsed.toISOString()}'`);
+  }
+
+  const where = clauses.length > 0 ? `WHERE ${clauses.join(' AND ')}` : '';
+  return `COPY (SELECT * FROM ${table} ${where}) TO STDOUT WITH CSV HEADER`;
+}
+
 export interface ExportOptions {
   sinceLedger?: number | null;
 }
