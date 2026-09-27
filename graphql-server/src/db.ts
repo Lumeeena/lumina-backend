@@ -76,6 +76,18 @@ interface EventRow {
   value: unknown;
 }
 
+interface ContractStorageEntryRow {
+  contract_id: string;
+  network: string;
+  key: string;
+  durability: string;
+  state: string;
+  value: unknown;
+  value_xdr: string | null;
+  live_until_ledger: string | null;
+  last_modified_ledger: string;
+}
+
 // ─── GraphQL-shaped mappers (camelCase, matching schema.graphql) ──────────────
 
 export function mapLedger(row: LedgerRow) {
@@ -190,6 +202,43 @@ export function mapEvent(row: EventRow) {
     pagingToken: row.paging_token,
     topics: row.topics,
     value: row.value === null ? null : JSON.stringify(row.value),
+  };
+}
+
+/**
+ * Durability and state are stored lowercase; the schema enums are uppercase.
+ *
+ * A row the indexer wrote is always one of the two, but the mapping is
+ * deliberate about an unknown value rather than passing it through: a typo in a
+ * future indexer would otherwise surface as an unresolvable GraphQL enum error
+ * on read, and failing here names the bad row instead.
+ */
+function durabilityEnum(durability: string): 'PERSISTENT' | 'TEMPORARY' {
+  if (durability === 'persistent') return 'PERSISTENT';
+  if (durability === 'temporary') return 'TEMPORARY';
+  throw new Error(`unknown contract storage durability in database: ${durability}`);
+}
+
+function storageStateEnum(state: string): 'ACTIVE' | 'ARCHIVED' {
+  if (state === 'active') return 'ACTIVE';
+  if (state === 'archived') return 'ARCHIVED';
+  throw new Error(`unknown contract storage state in database: ${state}`);
+}
+
+export function mapContractStorageEntry(row: ContractStorageEntryRow) {
+  return {
+    network: row.network,
+    contractId: row.contract_id,
+    key: row.key,
+    durability: durabilityEnum(row.durability),
+    state: storageStateEnum(row.state),
+    // An archived entry has no readable value, so this is null rather than the
+    // last value the indexer happened to see — a stale value presented as
+    // current is exactly the confusion the archived state exists to prevent.
+    value: row.state === 'archived' ? null : row.value === null ? null : JSON.stringify(row.value),
+    valueXdr: row.state === 'archived' ? null : row.value_xdr,
+    lastModifiedLedger: Number(row.last_modified_ledger),
+    liveUntilLedger: row.live_until_ledger === null ? null : Number(row.live_until_ledger),
   };
 }
 
@@ -434,6 +483,69 @@ export async function getEventsByContract(
     params
   );
   return rows.map(mapEvent);
+}
+
+/**
+ * Contract storage entries for one contract, newest change first.
+ *
+ * Keyset pagination on (last_modified_ledger, key) rather than OFFSET, matching
+ * getEventsByContract: the cursor is resolved to its own row's ledger inside the
+ * same network, so the next page starts strictly after it. The `key` tiebreaker
+ * is required — a contract can have many entries changed in the same ledger,
+ * and without it paging would repeat or skip them.
+ *
+ * Archived entries are included, not filtered out: the whole point of #90 is
+ * that a client can see an entry is archived rather than inferring deletion
+ * from its absence. A client that only wants live state filters on
+ * `state = 'active'` downstream.
+ */
+export async function getContractStorageEntries(
+  pool: Pool,
+  opts: {
+    network: string;
+    contractId: string;
+    durability?: string | null;
+    keyPrefix?: string | null;
+    limit: number;
+    cursor?: string | null;
+  }
+) {
+  const conditions = ['contract_id = $1'];
+  const params: unknown[] = [opts.contractId];
+
+  params.push(opts.network);
+  conditions.push(`network = $${params.length}`);
+
+  if (opts.durability) {
+    params.push(opts.durability.toLowerCase());
+    conditions.push(`durability = $${params.length}`);
+  }
+  if (opts.keyPrefix) {
+    // LIKE with an explicit escape character: a prefix containing %, _ or \ is
+    // data, not a wildcard, and the escape is what makes the filter mean what it
+    // says. `key` is a base64 XDR string, so _ and % are both ordinary
+    // characters that must not silently act as wildcards.
+    const escaped = opts.keyPrefix.replace(/[\\%_]/g, ch => `\\${ch}`);
+    params.push(`${escaped}%`);
+    conditions.push(`key LIKE $${params.length} ESCAPE '\\'`);
+  }
+  if (opts.cursor) {
+    params.push(opts.cursor);
+    // The cursor's own row is looked up within the same contract and network
+    // (network is always $2, pushed second), so the next page starts strictly
+    // after it rather than restarting the whole ordering.
+    conditions.push(
+      `(last_modified_ledger, key) < (SELECT last_modified_ledger, key FROM contract_storage_entries WHERE key = $${params.length} AND contract_id = $1 AND network = $2)`
+    );
+  }
+
+  params.push(opts.limit);
+
+  const { rows } = await pool.query<ContractStorageEntryRow>(
+    `SELECT * FROM contract_storage_entries WHERE ${conditions.join(' AND ')} ORDER BY last_modified_ledger DESC, key DESC LIMIT $${params.length}`,
+    params
+  );
+  return rows.map(mapContractStorageEntry);
 }
 
 /**

@@ -3,6 +3,7 @@ import {
   getAccountFromDb,
   getAccountOperations,
   getAccountTransactions,
+  getContractStorageEntries,
   getEventsByContract,
   getLatestLedgerFromDb,
   getLedgerBySequence,
@@ -247,6 +248,37 @@ export const resolvers = {
         pageInfo: {
           hasNextPage: items.length === limit,
           cursor: items.at(-1)?.id ?? null,
+        },
+      };
+    },
+
+    async contractStorageEntries(
+      _: unknown,
+      args: {
+        network?: string | null;
+        contractId: string;
+        durability?: string | null;
+        keyPrefix?: string | null;
+        limit?: number;
+        cursor?: string | null;
+      },
+      ctx: Context
+    ) {
+      const network = networkArgument(args, ctx);
+      const limit = args.limit ?? 20;
+      const items = await getContractStorageEntries(ctx.pool, {
+        network: network.name,
+        contractId: args.contractId,
+        durability: args.durability ?? null,
+        keyPrefix: args.keyPrefix ?? null,
+        limit,
+        cursor: args.cursor ?? null,
+      });
+      return {
+        items,
+        pageInfo: {
+          hasNextPage: items.length === limit,
+          cursor: items.at(-1)?.key ?? null,
         },
       };
     },

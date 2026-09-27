@@ -9,7 +9,7 @@
  * Soroban configuration. Set SOROBAN_RPC_URL + INDEXED_CONTRACT_IDS to
  * enable it (see indexer/src/index.ts).
  */
-import { scValToNative, xdr } from '@stellar/stellar-sdk';
+import { scValToNative, StrKey, xdr } from '@stellar/stellar-sdk';
 import { sorobanRequestDuration, sorobanRequests } from './metrics';
 import { createThrottle } from './throttle';
 import { subsystem } from './logger';
@@ -62,7 +62,7 @@ export interface GetEventsResult {
 }
 
 export interface LedgerEntryResult {
-  entries: Array<{ key: string; xdr: string; lastModifiedLedgerSeq: number }>;
+  entries: Array<{ key: string; xdr: string; lastModifiedLedgerSeq: number; liveUntilLedgerSeq?: number }>;
   latestLedger: number;
 }
 
@@ -115,17 +115,118 @@ export async function getLedgerEntries(rpcUrl: string, keys: string[]): Promise<
   const entries: LedgerEntryResult['entries'] = [];
   let latestLedger = 0;
   for (let offset = 0; offset < keys.length; offset += GET_LEDGER_ENTRIES_MAX_KEYS) {
-    const result = await rpcCall<LedgerEntryResult>(rpcUrl, 'getLedgerEntries', {
+    const result = await rpcCall<RpcGetLedgerEntriesResult>(rpcUrl, 'getLedgerEntries', {
       keys: keys.slice(offset, offset + GET_LEDGER_ENTRIES_MAX_KEYS),
     });
-    entries.push(...(result.entries ?? []));
+    entries.push(...(result.entries ?? []).map(record => ({
+      key: record.key,
+      xdr: record.xdr,
+      lastModifiedLedgerSeq: record.lastModifiedLedgerSeq,
+      ...(record.liveUntilLedgerSeq !== undefined && { liveUntilLedgerSeq: record.liveUntilLedgerSeq }),
+    })));
     latestLedger = Math.max(latestLedger, result.latestLedger ?? 0);
   }
   return { entries, latestLedger };
 }
 
-/** Paginates one getEvents filter (at most GET_EVENTS_MAX_CONTRACT_IDS ids). */
-async function getEventsChunk(
+interface RpcGetLedgerEntriesResult {
+  entries?: RpcLedgerEntryRecord[];
+  latestLedger: number;
+}
+
+interface RpcLedgerEntryRecord {
+  key: string; // base64 XDR LedgerKey
+  xdr: string; // base64 XDR LedgerEntryData
+  lastModifiedLedgerSeq: number;
+  liveUntilLedgerSeq?: number;
+}
+
+// ─── Contract storage entries ──────────────────────────────────────────────
+
+export type ContractStorageDurability = 'persistent' | 'temporary';
+
+export interface ContractStorageEntry {
+  contractId: string;
+  /** The full LedgerKey (base64 XDR) that addresses this entry. */
+  key: string;
+  durability: ContractStorageDurability;
+  /** Decoded native value, or null when the entry is absent/archived. */
+  value: unknown;
+  /** The raw LedgerEntryData (base64 XDR). */
+  valueXdr: string;
+  /** The ledger at which this entry's TTL expires, if the RPC reported one. */
+  liveUntilLedgerSeq: number | null;
+  lastModifiedLedgerSeq: number;
+}
+
+export interface GetContractStorageEntriesResult {
+  entries: ContractStorageEntry[];
+  latestLedger: number;
+}
+
+/**
+ * Parse a base64 LedgerKey into the contract id and durability it names.
+ *
+ * Only `contractData` keys address contract storage; anything else is a caller
+ * error, so it throws rather than silently producing a row that cannot be
+ * filtered or fetched back.
+ */
+export function parseLedgerKey(keyXdr: string): { contractId: string; durability: ContractStorageDurability } {
+  const key = xdr.LedgerKey.fromXDR(keyXdr, 'base64');
+  if (key.switch().name !== 'contractData') {
+    throw new Error(`refusing to index a non-contract-data ledger key (${key.switch().name}) as contract storage`);
+  }
+  const data = key.contractData();
+  // A contractData key always addresses a contract, so the ScAddress is a
+  // contract hash; the union's value() is typed wider than that.
+  const contractHash = data.contract().value() as unknown as Buffer;
+  const contractId = StrKey.encodeContract(contractHash);
+  const durability = data.durability().name as ContractStorageDurability;
+  return { contractId, durability };
+}
+
+/**
+ * Fetch and parse the contract storage entries for the given LedgerKey XDRs.
+ *
+ * Each returned entry carries the key it was addressed by, the durability and
+ * contract id decoded from that key, the decoded value, the raw LedgerEntryData
+ * XDR, and the last-modified ledger. Keys the RPC does not return are simply
+ * absent from `entries` — distinguishing "archived" from "never existed" is
+ * the caller's job (see indexer/src/db.ts markContractStorageEntriesArchived).
+ */
+export async function getContractStorageEntries(
+  rpcUrl: string,
+  keys: string[]
+): Promise<GetContractStorageEntriesResult> {
+  const { entries: raw, latestLedger } = await getLedgerEntries(rpcUrl, keys);
+  const entries: ContractStorageEntry[] = [];
+  for (const record of raw) {
+    const { contractId, durability } = parseLedgerKey(record.key);
+    const data = xdr.LedgerEntryData.fromXDR(record.xdr, 'base64');
+    let value: unknown = null;
+    if (data.switch().name === 'contractData') {
+      value = scValToNative(data.contractData().val());
+    }
+    entries.push({
+      contractId,
+      key: record.key,
+      durability,
+      value,
+      valueXdr: record.xdr,
+      liveUntilLedgerSeq: record.liveUntilLedgerSeq ?? null,
+      lastModifiedLedgerSeq: record.lastModifiedLedgerSeq,
+    });
+  }
+  return { entries, latestLedger };
+}
+
+/**
+ * Fetches contract events for the given contract IDs starting at startLedger,
+ * following pagination until the range is exhausted or the per-cycle limit is hit.
+ * events is [] if none of the contract IDs emitted anything in range —
+ * latestLedger is still returned so the caller can advance its cursor.
+ */
+export async function getEvents(
   rpcUrl: string,
   contractIds: string[],
   startLedger: number,

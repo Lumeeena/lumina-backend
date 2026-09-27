@@ -1,6 +1,6 @@
 import { Pool, PoolClient, type PoolConfig } from 'pg';
 import type { HorizonAccount, HorizonLedger, HorizonOperation, HorizonTransaction } from './horizon';
-import type { ContractEvent } from './soroban';
+import type { ContractEvent, ContractStorageEntry } from './soroban';
 import { notifyIndexed } from './notify';
 import { subsystem } from './logger';
 import { indexerPoolErrors } from './metrics';
@@ -8,6 +8,58 @@ import { indexerPoolErrors } from './metrics';
 const log = subsystem('db');
 import { parseContractSchema, type ContractSchema } from './customSchema';
 import type { DecodedCustomEvent } from './customDecode';
+
+/**
+ * Postgres SQLSTATE for a CHECK constraint violation.
+ *
+ * Worth picking out from a generic database error: a check violation means the
+ * row itself is implausible (see db/migrations/008_data_constraints.sql), so
+ * retrying the identical write fails identically — unlike a transient error
+ * (deadlock, connection drop), a retry will never succeed. Naming the
+ * constraint turns a cryptic write failure into an actionable data-quality
+ * signal.
+ */
+const PG_CHECK_VIOLATION = '23514';
+
+/** True when the error is a Postgres CHECK constraint violation. */
+export function isCheckViolation(err: unknown): boolean {
+  return typeof err === 'object' && err !== null && (err as { code?: unknown }).code === PG_CHECK_VIOLATION;
+}
+
+/** A short, loggable description of a constraint violation, if it carries one. */
+function describeCheckViolation(err: unknown): string {
+  const e = err as { constraint?: unknown; table?: unknown };
+  if (typeof e.constraint === 'string' && e.constraint) {
+    return `check constraint "${e.constraint}"${typeof e.table === 'string' && e.table ? ` on ${e.table}` : ''}`;
+  }
+  return 'a check constraint';
+}
+
+/**
+ * Report a failed write clearly when it was rejected by a check constraint.
+ *
+ * Called before the error is retried/rewritten by the caller, so the specific
+ * violation is visible alongside the generic retry logging.
+ */
+function logCheckViolation(context: Record<string, unknown>, err: unknown): void {
+  if (!isCheckViolation(err)) return;
+  log.error(
+    { ...context, violation: describeCheckViolation(err), err: err instanceof Error ? err.message : String(err) },
+    'write rejected by a database check constraint; the row is implausible, so retrying will not help'
+  );
+}
+
+/**
+ * JSON replacer that renders bigint as a decimal string.
+ *
+ * Soroban values are full of u128/i128 token amounts, which arrive from
+ * scValToNative as bigint. JSON has no bigint, and the codebase's convention
+ * (see customDecode.ts) is to keep such amounts as canonical decimal text so
+ * they never lose precision — so they are stringified, not rounded.
+ */
+function bigintReplacer(_key: string, value: unknown): unknown {
+  return typeof value === 'bigint' ? value.toString() : value;
+}
 
 /**
  * Pool factory with the idle-client error handled.
@@ -259,6 +311,7 @@ export async function indexLedger(
     await client.query('COMMIT');
   } catch (err) {
     await client.query('ROLLBACK');
+    logCheckViolation({ network, ledger: ledger.sequence, transactions: transactions.length, operations: operations.length }, err);
     throw err;
   } finally {
     client.release();
@@ -317,24 +370,29 @@ export async function insertContractEvents(
   // batch, which is what a subscriber would read up to.
   let highestLedger = 0;
 
-  for (const event of events) {
-    await pool.query(
-      `INSERT INTO contract_events (id, type, contract_id, ledger, created_at, paging_token, topics, value, network)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-       ON CONFLICT (id, network) DO NOTHING`,
-      [
-        event.id,
-        event.type,
-        event.contractId,
-        event.ledger,
-        event.createdAt,
-        event.pagingToken,
-        event.topics,
-        event.value === undefined ? null : JSON.stringify(event.value),
-        network,
-      ]
-    );
-    if (event.ledger > highestLedger) highestLedger = event.ledger;
+  try {
+    for (const event of events) {
+      await pool.query(
+        `INSERT INTO contract_events (id, type, contract_id, ledger, created_at, paging_token, topics, value, network)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+         ON CONFLICT (id, network) DO NOTHING`,
+        [
+          event.id,
+          event.type,
+          event.contractId,
+          event.ledger,
+          event.createdAt,
+          event.pagingToken,
+          event.topics,
+          event.value === undefined ? null : JSON.stringify(event.value),
+          network,
+        ]
+      );
+      if (event.ledger > highestLedger) highestLedger = event.ledger;
+    }
+  } catch (err) {
+    logCheckViolation({ network, events: events.length }, err);
+    throw err;
   }
 
   await notifyIndexed(pool, {
@@ -430,27 +488,119 @@ export async function insertCustomEvents(
 ): Promise<void> {
   if (events.length === 0) return;
 
-  for (const event of events) {
+  try {
+    for (const event of events) {
+      await pool.query(
+        `INSERT INTO custom_events
+           (event_id, contract_id, event_name, ledger, created_at, schema_version, fields, network)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+         ON CONFLICT (event_id, event_name, network) DO UPDATE SET
+           schema_version = EXCLUDED.schema_version,
+           fields = EXCLUDED.fields,
+           indexed_at = NOW()`,
+        [
+          event.eventId,
+          event.contractId,
+          event.eventName,
+          event.ledger,
+          event.createdAt,
+          event.schemaVersion,
+          // The whole point of the JSONB payload: field names travel as data,
+          // never as SQL identifiers.
+          JSON.stringify(event.fields),
+          network,
+        ]
+      );
+    }
+  } catch (err) {
+    logCheckViolation({ network, events: events.length }, err);
+    throw err;
+  }
+}
+
+// ─── Contract storage entries (Soroban) ────────────────────────────────────
+
+/**
+ * Insert or refresh contract storage entries as `active`.
+ *
+ * `ON CONFLICT DO UPDATE` rather than `DO NOTHING`: re-fetching a live entry
+ * produces its current value, and the old value would otherwise survive
+ * forever. An entry that was archived and is later restored (returned by the
+ * RPC again) is flipped back to `active` by the same statement.
+ */
+export async function upsertContractStorageEntries(
+  pool: Pool,
+  network: string,
+  entries: ContractStorageEntry[]
+): Promise<void> {
+  if (entries.length === 0) return;
+
+  for (const entry of entries) {
     await pool.query(
-      `INSERT INTO custom_events
-         (event_id, contract_id, event_name, ledger, created_at, schema_version, fields, network)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-       ON CONFLICT (event_id, event_name, network) DO UPDATE SET
-         schema_version = EXCLUDED.schema_version,
-         fields = EXCLUDED.fields,
+      `INSERT INTO contract_storage_entries
+         (contract_id, key, durability, state, value, value_xdr, live_until_ledger, last_modified_ledger, indexed_at, network)
+       VALUES ($1, $2, $3, 'active', $4, $5, $6, $7, NOW(), $8)
+       ON CONFLICT (contract_id, key, network) DO UPDATE SET
+         durability = EXCLUDED.durability,
+         state = 'active',
+         value = EXCLUDED.value,
+         value_xdr = EXCLUDED.value_xdr,
+         live_until_ledger = EXCLUDED.live_until_ledger,
+         last_modified_ledger = EXCLUDED.last_modified_ledger,
          indexed_at = NOW()`,
       [
-        event.eventId,
-        event.contractId,
-        event.eventName,
-        event.ledger,
-        event.createdAt,
-        event.schemaVersion,
-        // The whole point of the JSONB payload: field names travel as data,
-        // never as SQL identifiers.
-        JSON.stringify(event.fields),
+        entry.contractId,
+        entry.key,
+        entry.durability,
+        entry.value === null ? null : JSON.stringify(entry.value, bigintReplacer),
+        entry.valueXdr,
+        entry.liveUntilLedgerSeq,
+        entry.lastModifiedLedgerSeq,
         network,
       ]
     );
   }
+}
+
+/**
+ * Mark the given storage keys as `archived`, keeping the rows.
+ *
+ * Soroban archives a persistent entry once its TTL expires: the entry is not
+ * deleted, it is inaccessible until restored. Deleting our row would report
+ * the contract as having lost state it still has, so the row is kept and only
+ * its `state` changes — which is what lets a client distinguish "archived"
+ * (a row with `state = 'archived'`) from "absent" (no row at all).
+ *
+ * Only rows that are currently `active` are touched, so re-archiving an
+ * already-archived entry is a no-op rather than a repeated write.
+ */
+export async function markContractStorageEntriesArchived(
+  pool: Pool,
+  network: string,
+  keys: string[]
+): Promise<void> {
+  if (keys.length === 0) return;
+
+  await pool.query(
+    `UPDATE contract_storage_entries
+     SET state = 'archived', indexed_at = NOW()
+     WHERE network = $1 AND key = ANY($2::text[]) AND state = 'active'`,
+    [network, keys]
+  );
+}
+
+/**
+ * Every storage key this network has indexed, regardless of state.
+ *
+ * The polling loop re-fetches these each cycle: a key the RPC stops returning
+ * is the archival signal (see markContractStorageEntriesArchived). Seeding new
+ * keys into the watch list is the caller's job — see INDEXED_CONTRACT_STORAGE_KEYS
+ * in indexer/src/index.ts.
+ */
+export async function getTrackedContractStorageKeys(pool: Pool, network: string): Promise<string[]> {
+  const { rows } = await pool.query<{ key: string }>(
+    `SELECT DISTINCT key FROM contract_storage_entries WHERE network = $1`,
+    [network]
+  );
+  return rows.map(row => row.key);
 }
