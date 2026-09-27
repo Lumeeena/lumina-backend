@@ -130,6 +130,14 @@ driver returns `TIMESTAMPTZ` as JavaScript `Date`, and the API serializes it wit
 `toISOString()` as UTC RFC 3339 (`Z`). Database session timezone does not change
 the represented instant.
 
+## Writing queries from application code
+
+Statements are strings, and several of them are built at runtime from a
+request. The rule they follow — values are bound, identifiers come from fixed
+tables — and the tests that hold them to it are in
+[SQL_CONSTRUCTION.md](SQL_CONSTRUCTION.md). Read it before adding a query that
+takes optional filters.
+
 ## Migrations
 
 Use `npm run migrate -- status` to inspect migration history and

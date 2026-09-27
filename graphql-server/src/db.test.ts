@@ -182,3 +182,77 @@ test('getEventsByContract filters by contract_id and optional topic', async () =
   assert.match(queries[0]?.sql ?? '', /\$3 = ANY\(topics\)/);
   assert.deepEqual(queries[0]?.params, ['CABC', 'mainnet', 'swap', 5]);
 });
+
+// ─── Dynamic SQL shape ───────────────────────────────────────────────────────
+//
+// These two builders grow a WHERE clause one optional filter at a time, which
+// is the shape that makes injection possible if a value is ever written into
+// the string instead of bound. The assertions are anchored to the whole
+// statement, not to a fragment: a fragment match still passes when something
+// extra has been appended after it.
+
+// The cursor row comparisons below reference the network *by position*
+// (`network = $1` here, `$2` in getEventsByContract) rather than binding it
+// again. That is deliberate — the keyset lookup has to stay inside the same
+// network — but it is positional, so reordering the params.push calls would
+// silently point it at another filter's value. Asserting the whole statement
+// pins those positions; a fragment match would not.
+
+test('getOperations emits exactly the expected statement with every filter set', async () => {
+  const { pool, queries } = fakePool([]);
+  await getOperations(pool, { network: 'mainnet', account: 'GABC', type: 'Payment', cursor: 'op-9', limit: 10 });
+
+  assert.equal(
+    queries[0]?.sql,
+    'SELECT * FROM operations WHERE network = $1 AND source_account = $2 AND type = $3 ' +
+      'AND (ledger, id) < (SELECT ledger, id FROM operations WHERE id = $4 AND network = $1) ' +
+      'ORDER BY ledger DESC, id DESC LIMIT $5'
+  );
+  // The type filter is lowercased before binding, so it matches what the index
+  // and the stored column compare against.
+  assert.deepEqual(queries[0]?.params, ['mainnet', 'GABC', 'payment', 'op-9', 10]);
+});
+
+test('getOperations never writes a filter value into the statement', async () => {
+  const { pool, queries } = fakePool([]);
+  const hostile = "GABC'; DROP TABLE operations--";
+  await getOperations(pool, { network: 'mainnet', account: hostile, limit: 10 });
+
+  const sql = queries[0]?.sql ?? '';
+  assert.ok(!sql.includes(hostile), sql);
+  assert.ok(!sql.includes('DROP'), sql);
+  assert.ok(!sql.includes("'"), sql);
+  assert.ok(queries[0]?.params.includes(hostile), 'the value belongs in the params array');
+});
+
+test('getOperations with no filters selects only the network and the limit', async () => {
+  const { pool, queries } = fakePool([]);
+  await getOperations(pool, { network: 'mainnet', limit: 10 });
+
+  assert.equal(queries[0]?.sql, 'SELECT * FROM operations WHERE network = $1 ORDER BY ledger DESC, id DESC LIMIT $2');
+});
+
+test('getEventsByContract emits exactly the expected statement with every filter set', async () => {
+  const { pool, queries } = fakePool([]);
+  await getEventsByContract(pool, { network: 'mainnet', contractId: 'CABC', topic: 'swap', cursor: 'evt-9', limit: 20 });
+
+  assert.equal(
+    queries[0]?.sql,
+    'SELECT * FROM contract_events WHERE contract_id = $1 AND network = $2 AND $3 = ANY(topics) ' +
+      'AND (ledger, id) < (SELECT ledger, id FROM contract_events WHERE id = $4 AND network = $2) ' +
+      'ORDER BY ledger DESC, id DESC LIMIT $5'
+  );
+  assert.deepEqual(queries[0]?.params, ['CABC', 'mainnet', 'swap', 'evt-9', 20]);
+});
+
+test('getEventsByContract never writes a filter value into the statement', async () => {
+  const { pool, queries } = fakePool([]);
+  const hostile = "CABC' OR '1'='1";
+  await getEventsByContract(pool, { network: 'mainnet', contractId: hostile, topic: hostile, limit: 20 });
+
+  const sql = queries[0]?.sql ?? '';
+  assert.ok(!sql.includes(hostile), sql);
+  assert.ok(!sql.includes("'"), sql);
+  assert.ok(queries[0]?.params.includes(hostile));
+});
+

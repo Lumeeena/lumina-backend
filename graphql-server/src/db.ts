@@ -2,6 +2,12 @@
  * PostgreSQL-backed query layer for the GraphQL resolvers. All functions
  * take a `Pool` (or anything with a compatible `.query()`) so tests can
  * inject a fake client the same way indexer/src/db.test.ts does.
+ *
+ * Two functions here build their WHERE clause at runtime from optional
+ * filters. They follow the rule in docs/SQL_CONSTRUCTION.md — values are
+ * bound, identifiers come from fixed tables — and the tests beside them assert
+ * the exact statement that results, so a value that started being interpolated
+ * would fail a test rather than pass review.
  */
 import { Pool } from 'pg';
 
