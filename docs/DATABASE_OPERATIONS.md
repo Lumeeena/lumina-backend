@@ -69,38 +69,57 @@ index has been removed based on unobserved production usage. Run the report
 against a representative deployment and attach its output before deciding on
 any unused-index removal.
 
+## Asynchronous account refreshes
+
+Ledger, transaction, and operation rows are committed together with durable
+account-refresh intents in `account_refresh_queue`. Horizon account lookups run
+after that commit, so slow account responses do not delay ledger indexing. The
+worker upserts account state and removes the exact queue request in one database
+transaction; transient failures stay queued and are retried. On restart, the
+worker scans the queue for pending requests. This is at-least-once work: a crash
+after the Horizon response but before the account transaction commits may cause
+the lookup to run again, but cannot lose the refresh. After applying migration
+008, rerun `db/roles.sql` to grant the indexer its scoped queue privileges.
+
 ## Bulk export
 
-Apply migrations before using `GET /export`. It streams newline-delimited JSON
-records from the indexed data tables (API keys and secrets are excluded). The
-request requires `Authorization: Bearer <key>` for an active key with explicit
-export permission. Grant or revoke it with `npm run manage-keys --
-grant-export <id|hash>` and `revoke-export <id|hash>`. Export traffic has its
-own per-key window limit (`EXPORT_RATE_LIMIT_PER_MINUTE`, default 2) and
-per-process concurrency limit (`MAX_CONCURRENT_EXPORTS`, default 2).
+There are two export formats, and they cover different tables. Both are
+documented in full — every column, its unit (stroops vs. decimal), and a worked
+example — in **[docs/EXPORT_FORMATS.md](EXPORT_FORMATS.md)**.
 
-### Incremental sync pattern
+### CSV, per table, on demand
 
-Downstream syncs (such as daily data warehouse ETL jobs) can avoid full historical
-re-exports by passing the `since_ledger` query parameter:
+`GET /export/:table` streams one table as CSV with a header row, for
+`ledgers`, `transactions` or `operations`. It accepts `min_ledger`,
+`max_ledger`, `min_date` and `max_date` to bound the range:
 
 ```bash
-# Initial full sync (or first sync)
-curl -H "Authorization: Bearer $KEY" -i "http://localhost:4000/export"
-
-# Read the checkpoint header returned in response:
-# Lumina-Max-Exported-Ledger: 123456
-
-# Next incremental sync — returns only rows with ledger sequence > 123456
-curl -H "Authorization: Bearer $KEY" -i "http://localhost:4000/export?since_ledger=123456"
+curl -H "X-Api-Key: $KEY" \
+  "http://localhost:4000/export/transactions?min_ledger=52000000&max_ledger=52001000"
 ```
 
-- **Query Parameter:** `since_ledger` (positive integer). When provided, only records
-  committed *after* the given ledger sequence are exported.
-- **Checkpoint Header:** `Lumina-Max-Exported-Ledger` (also provided as `X-Max-Exported-Ledger`).
-  Indicates the maximum ledger sequence contained in the export stream, or `0` if no new rows were exported.
-- **Incremental Sync Loop:** Save the returned `Lumina-Max-Exported-Ledger` checkpoint in your
-  downstream storage or warehouse metadata, and pass it as `since_ledger` for the subsequent sync run.
+A full export is therefore one request per table.
+
+### NDJSON, all tables, on a schedule
+
+Setting `S3_EXPORT_BUCKET` makes the GraphQL service write one
+newline-delimited JSON file per interval containing all indexed data tables
+(see [POSTGRES_OPERATIONS.md](POSTGRES_OPERATIONS.md)). API keys are excluded.
+Each line is `{"table":"…","record":{…}}`.
+
+### Export permission
+
+`api_keys.export_enabled` and the `grant-export` / `revoke-export` commands
+(`npm run manage-keys -- grant-export <id|hash>`) are backed by
+`hasExportPermission`, which checks for an active key with export permission
+explicitly granted.
+
+**Note:** `GET /export/:table` is currently registered ahead of the shared
+API-key middleware in `graphql-server/src/index.ts`, so Express serves it before
+the auth layer runs and the route is reachable without a key. The
+`hasExportPermission` gate is not enforced on it. Treat this as a known gap to
+close rather than a documented guarantee — the route should be moved behind the
+middleware, or given its own explicit check.
 
 ## Timestamp convention
 

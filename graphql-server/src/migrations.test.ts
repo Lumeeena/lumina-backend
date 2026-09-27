@@ -8,10 +8,17 @@ test('loads migrations in order and expands initial schema include', () => {
   assert.deepEqual(migrations.map(migration => migration.version), [
     '001_init', '002_account_event_columns', '003_custom_event_schemas',
     '004_search_indexes', '005_api_keys', '006_autovacuum', '006_export_permissions',
-    '007_drop_redundant_api_key_index',
+    '006_partition_operations', '007_drop_redundant_api_key_index', '007_networks',
+    '008_account_refresh_queue',
   ]);
   assert.match(migrations[0].sql, /CREATE TABLE IF NOT EXISTS ledgers/);
+  assert.match(migrations[0].sql, /PRIMARY KEY \(id, ledger, network\)/);
   assert.doesNotMatch(migrations[0].sql, /^\\ir/m);
+
+  const networks = migrations.find(migration => migration.version === '007_networks');
+  assert.ok(networks);
+  assert.match(networks?.sql, /ALTER TABLE operations ADD PRIMARY KEY \(id, ledger, network\)/);
+  assert.match(networks?.sql, /FOREIGN KEY \(transaction_hash, network\) REFERENCES transactions \(hash, network\)/);
 });
 
 test('migration status refuses a later migration when an earlier one is pending', async () => {

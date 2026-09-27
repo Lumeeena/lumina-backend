@@ -77,6 +77,28 @@ type Query {
     cursor: String
   ): ContractEventPage!
 
+  """
+  Fetch indexed Soroban contract storage entries for a contract, newest change
+  first. Optionally filtered by durability and by a key prefix.
+
+  `key` is the base64 XDR LedgerKey that addresses the entry, so it round-trips
+  back into a Soroban `getLedgerEntries` call; `keyPrefix` matches that string.
+
+  An entry whose TTL has expired is reported with `state: ARCHIVED` rather than
+  dropped, so a contract that has archived state is distinguishable from one
+  where the key was never set. Requires Soroban RPC indexing to be enabled.
+  """
+  contractStorageEntries(
+    network: Network
+    contractId: String!
+    """Only entries with this durability. Omit for both."""
+    durability: ContractStorageDurability
+    """Only entries whose base64 XDR key starts with this prefix."""
+    keyPrefix: String
+    limit: Int = 20
+    cursor: String
+  ): ContractStorageEntryPage!
+
   """Get a specific ledger by sequence number."""
   ledger(network: Network, sequence: Int!): Ledger
 
@@ -197,6 +219,11 @@ type ContractEventPage {
   pageInfo: PageInfo!
 }
 
+type ContractStorageEntryPage {
+  items: [ContractStorageEntry!]!
+  pageInfo: PageInfo!
+}
+
 # ─── Core Types ───────────────────────────────────────────────────────────────
 
 type Ledger {
@@ -297,6 +324,66 @@ type ContractEvent {
   pagingToken: String!
   topics: [String!]!
   value: String  # JSON-encoded value
+}
+
+"""
+How long a contract storage entry survives without being touched.
+
+Only PERSISTENT entries are archived: they survive a ledger's lifecycle and are
+moved to cold storage ("archived") when their TTL runs out. TEMPORARY entries
+are evicted outright and therefore never come back as ARCHIVED.
+"""
+enum ContractStorageDurability {
+  PERSISTENT
+  TEMPORARY
+}
+
+"""
+Whether an entry is currently readable, or has been archived.
+
+Soroban archives a persistent entry whose TTL has expired: the contract still
+owns the state, but it is inaccessible until restored. An ARCHIVED entry is
+reported here rather than removed, so this is how a client tells "the contract
+has state that is archived" apart from "this key was never set" (which has no
+entry at all).
+"""
+enum ContractStorageEntryState {
+  """Currently live and readable."""
+  ACTIVE
+
+  """TTL expired; retained for the contract, inaccessible until restored."""
+  ARCHIVED
+}
+
+"""
+One indexed Soroban contract storage entry.
+
+`value` is the decoded native value, JSON-encoded, or null when the entry is
+not currently live (an archived entry keeps the key and metadata but has no
+readable value). `valueXdr` is the raw base64 LedgerEntryData XDR, so a client
+that needs the exact wire form — or a value the decoder could not represent —
+still has it. `key` is the base64 XDR LedgerKey that addresses the entry and
+round-trips into a Soroban `getLedgerEntries` call.
+"""
+type ContractStorageEntry {
+  contractId: String!
+
+  """Base64 XDR LedgerKey addressing this entry."""
+  key: String!
+  durability: ContractStorageDurability!
+  state: ContractStorageEntryState!
+
+  """Decoded native value as a JSON string, or null when archived."""
+  value: String
+
+  """Raw base64 LedgerEntryData XDR, or null when archived."""
+  valueXdr: String
+
+  """Ledger in which this entry was last changed."""
+  lastModifiedLedger: Int!
+
+  """Ledger at which this entry's TTL expires, if the RPC reported one."""
+  liveUntilLedger: Int
 }
 
 # ─── Enums ───────────────────────────────────────────────────────────────────

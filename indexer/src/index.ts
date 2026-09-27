@@ -34,9 +34,10 @@
 
 import {
   createPool,
-  ensurePartitions,
+  getAccountsNeedingRefresh,
   getLatestIndexedEventLedger,
   getLatestIndexedLedger,
+  getTrackedContractStorageKeys,
   indexLedger,
   insertContractEvents,
   insertCustomEvents,
@@ -53,16 +54,21 @@ import {
   ledgerIndexDuration,
   recordHorizonTip,
   recordIndexedLedger,
-  lastSuccessfulRegistryDiscoveryTimestamp,
   accountCacheSize,
   sorobanEventsTruncated,
+  contractsWatched,
   sorobanRetentionWindowExceeded,
 } from './metrics';
-import { aggregateNetworkStates, startHealthServer, type NetworkState } from './health';
+import {
+  aggregateNetworkStates,
+  buildDebugConfiguration,
+  startHealthServer,
+  type NetworkState,
+} from './health';
 import { initTracing, shutdownTracing } from './tracing';
 import { initErrorTracking, captureException, shutdownErrorTracking } from './errorTracking';
-import { loadConfig } from './config';
 import { getRetentionInfo } from './soroban';
+import { refreshAccountQueueBatch } from './accountRefresh';
 
 const log = subsystem('indexer');
 
@@ -76,9 +82,9 @@ const config = loadConfig();
 
 const HEALTH_PORT = parseInt(process.env['HEALTH_PORT'] ?? '9090', 10);
 
-import { getAccount, getLatestLedgerSequence, getLedger, getLedgerOperations, getLedgerTransactions, HorizonAccount } from './horizon';
+import { getLatestLedgerSequence, getLedger, getLedgerOperations, getLedgerTransactions } from './horizon';
 import { getActiveContracts } from './registry';
-import { getEvents, getLatestLedgerSequence as getLatestRpcLedgerSequence, type ContractEvent } from './soroban';
+import { getContractStorageEntries, getEvents, getLatestLedgerSequence as getLatestRpcLedgerSequence, type ContractEvent } from './soroban';
 import { resolveNetworks, type NetworkConfig } from './networks';
 import { RetryWorker } from './retryWorker';
 
@@ -87,8 +93,6 @@ import { readFileSync } from 'fs';
 import { join } from 'path';
 const packageJson = JSON.parse(readFileSync(join(__dirname, '../package.json'), 'utf-8'));
 const VERSION = packageJson.version;
-
-const config = loadConfig();
 
 const DATABASE_URL = config.databaseUrl;
 const POLL_INTERVAL_MS = config.pollIntervalMs;
@@ -113,9 +117,6 @@ const REGISTRY_CONTRACT_ID = config.registryContractId;
 const REGISTRY_READ_ACCOUNT = config.registryReadAccount;
 const REGISTRY_NETWORK_PASSPHRASE = config.registryNetworkPassphrase;
 const REGISTRY_POLL_EVERY_N_TICKS = Math.max(1, Math.round(config.registryPollIntervalMs / POLL_INTERVAL_MS));
-
-const LEDGER_RETRY_ATTEMPTS = config.ledgerRetryAttempts;
-const LEDGER_RETRY_BASE_MS = config.ledgerRetryBaseMs;
 
 // How long an account's Horizon data is considered fresh enough to skip
 // re-fetching. Busy accounts (exchanges, bots) show up in most ledgers —
@@ -201,6 +202,7 @@ function createLoop(network: NetworkConfig, primaryName: string): NetworkLoop {
     discoveredContractIds: [],
     accountCache: new Map<string, number>(),
     accountCacheOrder: [],
+    accountRefreshTask: null,
   };
 }
 
@@ -238,29 +240,24 @@ async function fetchAndIndexLedger(loop: NetworkLoop, sequence: number): Promise
 
   const now = Date.now();
   pruneAccountCache(loop.accountCache, loop.accountCacheOrder, now);
-  const addressesToFetch = [...addresses].filter(address => {
+  const expiredAddresses = [...addresses].filter(address => {
     const fetchedAt = loop.accountCache.get(address);
     return fetchedAt === undefined || now - fetchedAt > ACCOUNT_CACHE_TTL_MS;
   });
+  const addressesToFetch = await getAccountsNeedingRefresh(pool, name, expiredAddresses, sequence);
+  const stopTimer = ledgerIndexDuration.startTimer();
+  await indexLedger(pool, name, ledger, transactions, operations, addressesToFetch);
+  stopTimer();
 
-  const accounts = (
-    await Promise.all(
-      addressesToFetch.map(address => getAccount(loop.network.horizonUrl, address))
-    )
-  ).filter((a): a is HorizonAccount => a !== null);
-  for (const address of addressesToFetch) {
+  for (const address of expiredAddresses) {
     loop.accountCache.set(address, now);
     // Update LRU order: remove if exists, then add to end (most recent)
     const idx = loop.accountCacheOrder.indexOf(address);
     if (idx !== -1) loop.accountCacheOrder.splice(idx, 1);
     loop.accountCacheOrder.push(address);
   }
-
   accountCacheSize.set({ network: name }, loop.accountCache.size);
-
-  const stopTimer = ledgerIndexDuration.startTimer();
-  await indexLedger(pool, name, ledger, transactions, operations, accounts);
-  stopTimer();
+  scheduleAccountRefreshes(loop);
 
   loop.state.latestIndexedLedger = sequence;
   loop.state.lastIndexedAt = Date.now();
@@ -361,8 +358,9 @@ async function pollRegistry(loop: NetworkLoop): Promise<void> {
  */
 async function pollContractEvents(loop: NetworkLoop): Promise<void> {
   const contractIds = [...new Set([...loop.staticContractIds, ...loop.discoveredContractIds])];
-  if (!loop.sorobanRpcUrl || contractIds.length === 0) return;
   const name = loop.network.name;
+  contractsWatched.set({ network: name }, loop.sorobanRpcUrl ? contractIds.length : 0);
+  if (!loop.sorobanRpcUrl || contractIds.length === 0) return;
   try {
     if (loop.eventsCursor === 0) {
       const dbCursor = await getLatestIndexedEventLedger(pool, name);
@@ -460,20 +458,72 @@ async function indexCustomEvents(loop: NetworkLoop, events: ContractEvent[]): Pr
   }
 }
 
+/**
+ * Fetches and stores contract storage entries, and detects archival.
+ *
+ * The watch list is the union of every key this network has already indexed
+ * (read back from the database, so a key is never silently dropped from it) and
+ * the configured seed. A watched key the RPC stops returning is the archival
+ * signal: Soroban archives a persistent entry once its TTL expires, so the entry
+ * becomes inaccessible rather than deleted. It is therefore marked `archived`
+ * rather than removed, which is what lets a client tell an archived entry (a row
+ * with `state = 'archived'`) from an absent one (no row at all).
+ *
+ * Archival is only ever inferred from disappearance plus a prior `active`
+ * observation — a seed key that has never been returned has no row and stays
+ * `absent`, never mislabelled `archived`.
+ */
+async function pollContractStorage(loop: NetworkLoop): Promise<void> {
+  if (!loop.sorobanRpcUrl) return;
+  const name = loop.network.name;
+  try {
+    const tracked = await getTrackedContractStorageKeys(pool, name);
+    const keys = [...new Set([...tracked, ...config.indexedContractStorageKeys])];
+    if (keys.length === 0) return;
+
+    const { entries } = await getContractStorageEntries(loop.sorobanRpcUrl, keys);
+    const returnedKeys = new Set(entries.map(entry => entry.key));
+
+    if (entries.length > 0) {
+      routine.success({ network: name, entries: entries.length }, 'indexed contract storage entries');
+      await upsertContractStorageEntries(pool, name, entries);
+    }
+
+    // Watched keys the RPC did not return. Only those previously observed as
+    // `active` are marked; the UPDATE's state guard makes the rest no-ops.
+    const missing = keys.filter(key => !returnedKeys.has(key));
+    if (missing.length > 0) {
+      await markContractStorageEntriesArchived(pool, name, missing);
+    }
+  } catch (err) {
+    indexingErrors.inc({ loop: 'contract-storage' });
+    log.error({ network: name, err: message(err) }, 'contract storage polling failed');
+  }
+}
+
 /** Run one network's polling loop until the process shuts down. */
 async function runNetworkLoop(loop: NetworkLoop, isPrimary: boolean): Promise<void> {
   const name = loop.network.name;
 
-  loop.cursor = await getLatestIndexedLedger(pool, name);
-  if (loop.cursor === 0 && START_LEDGER !== undefined) {
-    loop.cursor = START_LEDGER - 1;
-    log.info({ network: name, ledger: START_LEDGER }, 'starting from configured START_LEDGER');
-  } else if (loop.cursor === 0) {
-    loop.cursor = await getLatestLedgerSequence(loop.network.horizonUrl);
-    log.info({ network: name, ledger: loop.cursor + 1 }, 'starting from latest ledger');
-  } else {
-    log.info({ network: name, ledger: loop.cursor + 1 }, 'resuming from ledger');
-  }
+  // Cursor initialisation talks to the database and Horizon, so it can fail
+  // too. It is retried inside the loop rather than thrown, so one network's bad
+  // start never takes the others down with it.
+  let initialised = false;
+  const initCursor = async (): Promise<void> => {
+    loop.cursor = await getLatestIndexedLedger(pool, name);
+    if (loop.cursor === 0 && START_LEDGER !== undefined) {
+      loop.cursor = START_LEDGER - 1;
+      log.info({ network: name, ledger: START_LEDGER }, 'starting from configured START_LEDGER');
+    } else if (loop.cursor === 0) {
+      loop.cursor = await getLatestLedgerSequence(loop.network.horizonUrl);
+      log.info({ network: name, ledger: loop.cursor + 1 }, 'starting from latest ledger');
+    } else {
+      log.info({ network: name, ledger: loop.cursor + 1 }, 'resuming from ledger');
+    }
+    initialised = true;
+  };
+
+  scheduleAccountRefreshes(loop);
 
   const indexOne = (sequence: number): Promise<boolean> =>
     fetchAndIndexLedgerWithRetry(name, sequence, seq => fetchAndIndexLedger(loop, seq));
@@ -493,6 +543,9 @@ async function runNetworkLoop(loop: NetworkLoop, isPrimary: boolean): Promise<vo
 
   while (!isShuttingDown) {
     try {
+      if (!initialised) {
+        await initCursor();
+      }
       if (isPrimary && loop.loopTick % REGISTRY_POLL_EVERY_N_TICKS === 0) {
         await pollRegistry(loop);
       }
@@ -508,6 +561,7 @@ async function runNetworkLoop(loop: NetworkLoop, isPrimary: boolean): Promise<vo
 
       if (isShuttingDown) break;
       await pollContractEvents(loop);
+      await pollContractStorage(loop);
     } catch (err) {
       indexingErrors.inc({ loop: 'main' });
       log.error({ network: name, err: message(err) }, 'indexer loop error');
@@ -517,6 +571,7 @@ async function runNetworkLoop(loop: NetworkLoop, isPrimary: boolean): Promise<vo
     }
 
     if (isShuttingDown) break;
+    scheduleAccountRefreshes(loop);
     await new Promise(r => setTimeout(r, config!.pollIntervalMs));
   }
   
@@ -553,13 +608,26 @@ async function run() {
     // The flat numbers describe the worst-off network; the per-network detail
     // rides alongside, so one stuck chain cannot hide behind a healthy one.
     getState: () => aggregateNetworkStates(startedAt, loops.map(loop => loop.state)),
+    getDebugConfiguration: () => buildDebugConfiguration(
+      config,
+      registry.primary.name,
+      loops.map(loop => ({
+        network: loop.network.name,
+        horizonUrl: loop.network.horizonUrl,
+        sorobanRpcUrl: loop.sorobanRpcUrl,
+        networkPassphrase: loop.network.networkPassphrase,
+        cursor: loop.cursor,
+        eventsCursor: loop.eventsCursor,
+        latestIndexedLedger: loop.state.latestIndexedLedger,
+        latestHorizonLedger: loop.state.latestHorizonLedger,
+        watchedContracts: [...loop.staticContractIds, ...loop.discoveredContractIds],
+      }))
+    ),
     pool,
   });
 
   isLoopRunning = true;
-  await Promise.all(
-    loops.map(loop => runNetworkLoop(loop, loop.network.name === registry.primary.name))
-  );
+  await runIndependently(loops, loop => runNetworkLoop(loop, loop.network.name === registry.primary.name));
   isLoopRunning = false;
 }
 
@@ -596,6 +664,35 @@ if (require.main === module) {
 /** Errors are logged as a field, not interpolated, so they stay queryable. */
 function message(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
+}
+
+function scheduleAccountRefreshes(loop: NetworkLoop): void {
+  if (loop.accountRefreshTask || isShuttingDown) return;
+
+  let continueQueue = false;
+  const task = (async () => {
+    try {
+      const result = await refreshAccountQueueBatch(
+        pool,
+        loop.network.name,
+        loop.network.horizonUrl
+      );
+      continueQueue = result.hasMore;
+      for (const failure of result.failures) {
+        log.warn(
+          { network: loop.network.name, address: failure.address, err: message(failure.error) },
+          'account refresh failed; durable queue entry will be retried'
+        );
+      }
+    } catch (err) {
+      indexingErrors.inc({ loop: 'account-refresh' });
+      log.error({ network: loop.network.name, err: message(err) }, 'account refresh worker failed');
+    } finally {
+      loop.accountRefreshTask = null;
+      if (continueQueue && !isShuttingDown) scheduleAccountRefreshes(loop);
+    }
+  })();
+  loop.accountRefreshTask = task;
 }
 
 /** Redacts the password from a database URL for logging. */
