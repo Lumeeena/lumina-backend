@@ -1,0 +1,565 @@
+/**
+ * The query catalog: what the audit captures a plan for.
+ *
+ * Each entry names an *application function* and the arguments to call it with,
+ * never SQL. Two consequences worth the indirection:
+ *
+ * - the captured plan is for the statement the server actually sends, so the
+ *   audit cannot pass while the real query regresses;
+ * - a query rewritten in db.ts is re-measured automatically, and the baseline's
+ *   SQL hash reports the change rather than hiding it.
+ *
+ * `expectSeqScan` is written down *before* the capture, deliberately. A
+ * prediction made in advance turns a surprise into a finding to investigate —
+ * either the prediction was wrong or the seed is wrong, and both are worth
+ * knowing before the result is published. `null` means "no prediction".
+ *
+ * `shouldUse` records which index the design intends to serve the query. Where
+ * that index exists and the plan does not use it, that is the ticket's subject:
+ * an index existing is not the same as the planner using it.
+ */
+import type { FixtureLookup } from './capture';
+
+export interface CatalogEntry {
+  /** Stable key in the baseline. Renaming one is a re-baseline, not a regression. */
+  name: string;
+  group: string;
+  /** One line a reader can follow without opening the source. */
+  what: string;
+  engine: 'graphql' | 'indexer';
+  fn: string;
+  args: (f: FixtureLookup, cursor?: string) => unknown[];
+  /** Which index the design intends to serve this query. */
+  shouldUse: string;
+  /** How many times a page of 20 parents fires this, from resolvers.ts. */
+  callsPerParent?: number;
+  /** For keyset pages: which entry supplies the cursor, and how to read it off the result. */
+  cursorFrom?: { entry: string; pick: (result: unknown) => string | null };
+  expectSeqScan: boolean | null;
+  note?: string;
+}
+
+export const CATALOG: CatalogEntry[] = [
+  // ─── Transactions ──────────────────────────────────────────────────────────
+  {
+    name: 'tx.first-page',
+    group: 'transactions',
+    what: 'transactions(limit: 20) — the newest page',
+    engine: 'graphql',
+    fn: 'getTransactions',
+    args: () => [20, null],
+    shouldUse: 'idx_transactions_ledger, ideally composite (ledger DESC, hash DESC) for the sort',
+    expectSeqScan: false,
+  },
+  {
+    name: 'tx.cursor-page',
+    group: 'transactions',
+    what: 'transactions(limit: 20) — the second page, via the keyset cursor',
+    engine: 'graphql',
+    fn: 'getTransactions',
+    args: (_f, cursor) => [20, cursor],
+    shouldUse: 'a (ledger, hash) index matching the row comparison',
+    cursorFrom: { entry: 'tx.first-page', pick: r => (r as { hash: string }[]).at(-1)?.hash ?? null },
+    expectSeqScan: false,
+    note: 'keyset pagination: the row comparison can only use an index whose leading columns match',
+  },
+  {
+    name: 'tx.deep-cursor',
+    group: 'transactions',
+    what: 'transactions(limit: 20) — a cursor a million rows into the order',
+    engine: 'graphql',
+    fn: 'getTransactions',
+    args: f => [20, f('tx.deep')],
+    shouldUse: 'idx_transactions_ledger',
+    expectSeqScan: false,
+    note: 'a keyset page deep into the table is where an unmatched index comparison stops paying',
+  },
+  {
+    name: 'tx.by-hash',
+    group: 'transactions',
+    what: 'transaction(hash:) — a primary key lookup',
+    engine: 'graphql',
+    fn: 'getTransactionByHash',
+    args: f => [f('tx.new')],
+    shouldUse: 'transactions_pkey',
+    expectSeqScan: false,
+  },
+  {
+    name: 'tx.by-ledger-busy',
+    group: 'transactions',
+    what: 'a busy ledger replayed in hash order (the subscription path)',
+    engine: 'graphql',
+    fn: 'getTransactionsByLedger',
+    args: f => [Number(f('ledger.recent'))],
+    shouldUse: 'idx_transactions_ledger',
+    expectSeqScan: false,
+    note: 'ascending hash order is the opposite of the index order, so a sort is expected here',
+  },
+  {
+    name: 'tx.by-ledger-quiet',
+    group: 'transactions',
+    what: 'a sparse ledger replayed in hash order',
+    engine: 'graphql',
+    fn: 'getTransactionsByLedger',
+    args: f => [Number(f('ledger.quiet'))],
+    shouldUse: 'idx_transactions_ledger',
+    expectSeqScan: false,
+  },
+
+  // ─── Operations ────────────────────────────────────────────────────────────
+  {
+    name: 'op.first-page',
+    group: 'operations',
+    what: 'operations(limit: 20) — no filter at all',
+    engine: 'graphql',
+    fn: 'getOperations',
+    args: () => [{ limit: 20 }],
+    shouldUse: 'nothing on this table can serve (ledger DESC, id DESC) — the index is missing, not unused',
+    expectSeqScan: true,
+    note: 'id is the primary key and ledger has no index, so neither the order nor the keyset has an index',
+  },
+  {
+    name: 'op.hot-account',
+    group: 'operations',
+    what: 'operations(account:) — an account holding 2% of the table',
+    engine: 'graphql',
+    fn: 'getOperations',
+    args: f => [{ account: f('account.whale'), limit: 20 }],
+    shouldUse: 'idx_operations_source — but at 2% selectivity the scan may win, which is correct',
+    expectSeqScan: true,
+    note: 'deliberately past the crossover: this is what tells us the fixture is big enough to be meaningful',
+  },
+  {
+    name: 'op.warm-account',
+    group: 'operations',
+    what: 'operations(account:) — an account holding ~0.3% of the table',
+    engine: 'graphql',
+    fn: 'getOperations',
+    args: f => [{ account: f('account.warm'), limit: 20 }],
+    shouldUse: 'idx_operations_source',
+    expectSeqScan: false,
+  },
+  {
+    name: 'op.hot-type',
+    group: 'operations',
+    what: "operations(type: 'payment') — 55% of the table",
+    engine: 'graphql',
+    fn: 'getOperations',
+    args: () => [{ type: 'payment', limit: 20 }],
+    shouldUse: 'idx_operations_type — correctly bypassed at this selectivity',
+    expectSeqScan: true,
+  },
+  {
+    name: 'op.rare-type',
+    group: 'operations',
+    what: "operations(type: 'manage_data') — 1% of the table",
+    engine: 'graphql',
+    fn: 'getOperations',
+    args: () => [{ type: 'manage_data', limit: 20 }],
+    shouldUse: 'idx_operations_type',
+    expectSeqScan: false,
+    note: 'the same SQL shape as op.hot-type with the opposite selectivity: a pair that proves the index works',
+  },
+  {
+    // Declared after op.first-page, which supplies the cursor.
+    name: 'op.cursor-page-unfiltered',
+    group: 'operations',
+    what: 'operations(limit: 20, cursor:) — the second page with no filter',
+    engine: 'graphql',
+    fn: 'getOperations',
+    args: (_f, cursor) => [{ limit: 20, cursor }],
+    shouldUse: 'a (ledger, id) index matching the row comparison',
+    cursorFrom: { entry: 'op.first-page', pick: r => (r as { id: string }[]).at(-1)?.id ?? null },
+    expectSeqScan: true,
+    note: 'the keyset on a table whose primary key is id: the comparison starts with ledger, so it cannot use it',
+  },
+  {
+    name: 'op.cold-account',
+    group: 'operations',
+    what: 'operations(account:) — a long-tail account with a handful of rows',
+    engine: 'graphql',
+    fn: 'getOperations',
+    args: f => [{ account: f('account.tail'), limit: 20 }],
+    shouldUse: 'idx_operations_source',
+    expectSeqScan: null,
+    note: 'the floor of the distribution: the case where an ordering index that has to be walked is worst',
+  },
+  {
+    name: 'op.by-transaction',
+    group: 'operations',
+    what: 'operations(transactionHash:) — the nested resolver behind a transaction',
+    engine: 'graphql',
+    fn: 'getOperationsByTransactionHash',
+    args: f => [f('tx.new')],
+    shouldUse: 'idx_operations_transaction',
+    expectSeqScan: false,
+  },
+  {
+    name: 'op.cursor-page',
+    group: 'operations',
+    what: 'operations(account:, cursor:) — the second page for an account',
+    engine: 'graphql',
+    fn: 'getOperations',
+    args: (f, cursor) => [{ account: f('account.warm'), limit: 20, cursor }],
+    shouldUse: 'a (source_account, ledger DESC, id DESC) index would serve both the filter and the order',
+    cursorFrom: { entry: 'op.warm-account', pick: r => (r as { id: string }[]).at(-1)?.id ?? null },
+    expectSeqScan: null,
+    note: 'the keyset comparison here is filtered by account, so the missing (ledger, id) index is not the whole story',
+  },
+
+  // ─── Asset filtering ───────────────────────────────────────────────────────
+  {
+    name: 'asset.hot',
+    group: 'assets',
+    what: "operations(asset: 'USDC:<issuer>') — the most common non-native asset",
+    engine: 'graphql',
+    fn: 'getOperationsByAsset',
+    args: f => [{ asset: f('asset.hot'), limit: 20 }],
+    shouldUse: 'idx_operations_asset_code + idx_operations_asset_issuer — unusable through the three-role OR',
+    expectSeqScan: true,
+    note: 'only one of the three OR branches is indexed at all, and a BitmapOr cannot include an unindexed branch',
+  },
+  {
+    name: 'asset.rare',
+    group: 'assets',
+    what: "operations(asset: 'ZZ:<issuer>') — ~0.5% of payments",
+    engine: 'graphql',
+    fn: 'getOperationsByAsset',
+    args: f => [{ asset: f('asset.rare'), limit: 20 }],
+    shouldUse: 'idx_operations_asset_code + idx_operations_asset_issuer',
+    expectSeqScan: true,
+    note: 'the decisive entry: a predicate matching a few thousand rows is one an index would obviously help',
+  },
+  {
+    name: 'asset.native',
+    group: 'assets',
+    what: "operations(asset: 'XLM') — the native asset",
+    engine: 'graphql',
+    fn: 'getOperationsByAsset',
+    args: () => [{ asset: 'XLM', limit: 20 }],
+    shouldUse: 'idx_operations_asset_type — one of the three OR branches only',
+    expectSeqScan: true,
+  },
+  {
+    name: 'asset.by-account',
+    group: 'assets',
+    what: 'operations(asset:, account:) — the two filters combined',
+    engine: 'graphql',
+    fn: 'getOperationsByAsset',
+    args: f => [{ asset: f('asset.hot'), account: f('account.warm'), limit: 20 }],
+    shouldUse: 'asset expression indexes + idx_operations_source',
+    expectSeqScan: true,
+  },
+
+  // ─── Subscription replay ───────────────────────────────────────────────────
+  {
+    name: 'replay.whale',
+    group: 'replay',
+    what: 'the whale operations in one busy ledger — the subscription replay path',
+    engine: 'graphql',
+    fn: 'getAccountOperationsInLedger',
+    args: f => [Number(f('ledger.recent')), f('account.whale')],
+    shouldUse: 'nothing: operations.ledger has no index at all, and five OR branches read the JSONB',
+    expectSeqScan: true,
+    note: 'there is no LIMIT on this statement, so a scan here is a full sweep every time a subscriber connects',
+  },
+  {
+    name: 'replay.warm',
+    group: 'replay',
+    what: 'a warm account\'s operations in one busy ledger',
+    engine: 'graphql',
+    fn: 'getAccountOperationsInLedger',
+    args: f => [Number(f('ledger.recent')), f('account.warm')],
+    shouldUse: 'nothing: same statement, different parameters',
+    expectSeqScan: true,
+    note: 'same SQL as replay.whale: captures that selectivity does not rescue the plan',
+  },
+
+  // ─── Contract events ───────────────────────────────────────────────────────
+  {
+    name: 'ev.hot-contract',
+    group: 'events',
+    what: 'events(contractId:) — a contract with 40% of the event table',
+    engine: 'graphql',
+    fn: 'getEventsByContract',
+    args: f => [{ contractId: f('contract.hot'), limit: 20 }],
+    shouldUse: 'idx_events_contract_id, or (contract_id, ledger DESC, id DESC) for the order',
+    expectSeqScan: false,
+    note: 'high density means a ledger-ordered scan finds 20 rows quickly, so an index scan is not the win here',
+  },
+  {
+    name: 'ev.cold-contract',
+    group: 'events',
+    what: 'events(contractId:) — a long-tail contract with ~100 events',
+    engine: 'graphql',
+    fn: 'getEventsByContract',
+    args: f => [{ contractId: f('contract.cold'), limit: 20 }],
+    shouldUse: 'idx_events_contract_id',
+    expectSeqScan: false,
+  },
+  {
+    // Declared after ev.cold-contract because a cursor entry is captured after
+    // the entry that produces its cursor.
+    name: 'ev.mid-contract-cursor',
+    group: 'events',
+    what: 'events(contractId:, cursor:) — a mid-density contract, deep page',
+    engine: 'graphql',
+    fn: 'getEventsByContract',
+    args: (f, cursor) => [{ contractId: f('contract.warm'), limit: 20, cursor }],
+    shouldUse: '(contract_id, ledger DESC, id DESC)',
+    cursorFrom: { entry: 'ev.cold-contract', pick: r => (r as { id: string }[]).at(-1)?.id ?? null },
+    expectSeqScan: null,
+    note: 'where a missing composite actually hurts: the filter is selective enough to need an index and the order is not free',
+  },
+  {
+    name: 'ev.topic',
+    group: 'events',
+    what: "events(contractId:, topic: 'transfer') — the GIN array containment filter",
+    engine: 'graphql',
+    fn: 'getEventsByContract',
+    args: f => [{ contractId: f('contract.hot'), topic: 'transfer', limit: 20 }],
+    shouldUse: 'idx_events_topics (GIN)',
+    expectSeqScan: null,
+    note: '= ANY(topics) is what a GIN array index is for; whether the planner picks it over the contract index is the question',
+  },
+
+  // ─── Memo search ───────────────────────────────────────────────────────────
+  {
+    name: 'search.first',
+    group: 'search',
+    what: 'search(query:) — a memo with an exact match and many fuzzy neighbours',
+    engine: 'graphql',
+    fn: 'searchTransactions',
+    args: f => [{ query: f('search.query'), limit: 20 }],
+    shouldUse: 'idx_transactions_memo_trgm (partial GIN trigram)',
+    expectSeqScan: false,
+    note: 'ranking must sort the candidate set, so the plan cannot be a pure index walk',
+  },
+  {
+    name: 'search.typo',
+    group: 'search',
+    what: 'search(query:) — a transposed memo, matching on similarity alone',
+    engine: 'graphql',
+    fn: 'searchTransactions',
+    args: f => [{ query: f('search.typo.query'), limit: 20 }],
+    shouldUse: 'idx_transactions_memo_trgm',
+    expectSeqScan: false,
+  },
+  {
+    name: 'search.cursor-page',
+    group: 'search',
+    what: 'search(query:, cursor:) — the second page of a ranked search',
+    engine: 'graphql',
+    fn: 'searchTransactions',
+    args: (f, cursor) => [{ query: f('search.query'), limit: 20, cursor }],
+    shouldUse: 'idx_transactions_memo_trgm, then a rank keyset',
+    cursorFrom: { entry: 'search.first', pick: r => (r as { nextCursor: string | null }).nextCursor },
+    expectSeqScan: null,
+    note: 'the keyset is on (rank, ledger, hash) where rank is a computed expression: expect it to be a filter, not a range',
+  },
+
+  // ─── Custom (decoded) events ───────────────────────────────────────────────
+  {
+    name: 'custom.first',
+    group: 'custom',
+    what: 'customEvents(contractId:, event:) — the hot decoded event',
+    engine: 'graphql',
+    fn: 'getCustomEvents',
+    args: f => [{ contractId: f('custom.contract'), event: f('custom.event.hot'), limit: 20 }],
+    shouldUse: 'idx_custom_events_contract_event (contract_id, event_name, ledger DESC)',
+    expectSeqScan: null,
+    note: 'at 70% density the index on the filter may lose to the ledger-ordered index; that is the ticket\'s thesis',
+  },
+  {
+    name: 'custom.string-filter',
+    group: 'custom',
+    what: 'customEvents(where: to = <value shared by 30% of rows>)',
+    engine: 'graphql',
+    fn: 'getCustomEvents',
+    args: f => [
+      {
+        contractId: f('custom.contract'),
+        event: f('custom.event.hot'),
+        where: [{ field: 'to', op: 'EQ', value: f('custom.common.to') }],
+        limit: 20,
+      },
+    ],
+    shouldUse: 'idx_custom_events_fields (GIN) — which cannot serve ->>, only containment',
+    expectSeqScan: null,
+    note: 'the GIN index exists for exactly this filter and cannot be used by the way the filter is written',
+  },
+  {
+    name: 'custom.numeric-filter',
+    group: 'custom',
+    what: 'customEvents(where: amount > 900000) — an ordered comparison on an i128',
+    engine: 'graphql',
+    fn: 'getCustomEvents',
+    args: f => [
+      {
+        contractId: f('custom.contract'),
+        event: f('custom.event.hot'),
+        where: [{ field: 'amount', op: 'GT', value: '900000' }],
+        limit: 20,
+      },
+    ],
+    shouldUse: 'nothing: the cast to numeric cannot match an index on the JSONB',
+    expectSeqScan: null,
+  },
+  {
+    name: 'custom.selective-event',
+    group: 'custom',
+    what: 'customEvents(event: swap) — 300 rows out of a million',
+    engine: 'graphql',
+    fn: 'getCustomEvents',
+    args: f => [{ contractId: f('custom.contract'), event: f('custom.event.cold'), limit: 20 }],
+    shouldUse: 'idx_custom_events_contract_event',
+    expectSeqScan: null,
+  },
+  {
+    name: 'custom.cursor-page',
+    group: 'custom',
+    what: 'customEvents(cursor:) — the second page',
+    engine: 'graphql',
+    fn: 'getCustomEvents',
+    args: (f, cursor) => [
+      { contractId: f('custom.contract'), event: f('custom.event.hot'), limit: 20, cursor },
+    ],
+    shouldUse: 'idx_custom_events_contract_event + the (event_id, event_name) primary key prefix',
+    cursorFrom: { entry: 'custom.first', pick: r => (r as { eventId: string }[]).at(-1)?.eventId ?? null },
+    expectSeqScan: null,
+  },
+
+  // ─── Ledgers and accounts ─────────────────────────────────────────────────
+  {
+    name: 'ledger.by-sequence',
+    group: 'ledgers',
+    what: 'ledger(sequence:) — a primary key lookup',
+    engine: 'graphql',
+    fn: 'getLedgerBySequence',
+    args: f => [Number(f('ledger.recent')) - 1000],
+    shouldUse: 'ledgers_pkey',
+    expectSeqScan: false,
+  },
+  {
+    name: 'ledger.latest',
+    group: 'ledgers',
+    what: 'latestLedger — MAX(sequence)',
+    engine: 'graphql',
+    fn: 'getLatestLedgerFromDb',
+    args: () => [],
+    shouldUse: 'ledgers_pkey read backwards — an Index Scan, not Index Only, because SELECT * needs the heap',
+    expectSeqScan: false,
+    note: 'the sibling entry indexer.max-ledger selects only MAX(sequence), which can be served from the index alone',
+  },
+  {
+    name: 'account.by-address',
+    group: 'accounts',
+    what: 'account(address:) — a primary key lookup',
+    engine: 'graphql',
+    fn: 'getAccountFromDb',
+    args: f => [f('account.whale')],
+    shouldUse: 'accounts_pkey',
+    expectSeqScan: false,
+  },
+  {
+    name: 'account.tx-whale',
+    group: 'accounts',
+    what: 'Account.transactions — fired once per parent row on a page of 20',
+    engine: 'graphql',
+    fn: 'getAccountTransactions',
+    args: f => [f('account.whale'), 10],
+    shouldUse: 'idx_transactions_source, ideally (source_account, ledger DESC) so the order is free',
+    callsPerParent: 20,
+    expectSeqScan: true,
+    note: 'a page of 20 whale transactions means 20 of these; the N+1 multiplier is what makes the scan expensive',
+  },
+  {
+    name: 'account.tx-warm',
+    group: 'accounts',
+    what: 'Account.transactions for a warm account',
+    engine: 'graphql',
+    fn: 'getAccountTransactions',
+    args: f => [f('account.warm'), 10],
+    shouldUse: 'idx_transactions_source',
+    callsPerParent: 20,
+    expectSeqScan: false,
+  },
+  {
+    name: 'account.tx-cold',
+    group: 'accounts',
+    what: 'Account.transactions for a long-tail account',
+    engine: 'graphql',
+    fn: 'getAccountTransactions',
+    args: f => [f('account.tail'), 10],
+    shouldUse: 'idx_transactions_source',
+    callsPerParent: 20,
+    expectSeqScan: null,
+    note: 'the same statement as account.tx-whale with the opposite cardinality',
+  },
+  {
+    name: 'account.ops-cold',
+    group: 'accounts',
+    what: 'Account.operations for a long-tail account',
+    engine: 'graphql',
+    fn: 'getAccountOperations',
+    args: f => [f('account.tail'), 10],
+    shouldUse: 'idx_operations_source',
+    callsPerParent: 20,
+    expectSeqScan: null,
+  },
+  {
+    name: 'account.ops-whale',
+    group: 'accounts',
+    what: 'Account.operations — fired once per parent row on a page of 20',
+    engine: 'graphql',
+    fn: 'getAccountOperations',
+    args: f => [f('account.whale'), 10],
+    shouldUse: 'idx_operations_source, ideally (source_account, ledger DESC)',
+    callsPerParent: 20,
+    expectSeqScan: true,
+  },
+  {
+    name: 'account.ops-warm',
+    group: 'accounts',
+    what: 'Account.operations for a warm account',
+    engine: 'graphql',
+    fn: 'getAccountOperations',
+    args: f => [f('account.warm'), 10],
+    shouldUse: 'idx_operations_source',
+    callsPerParent: 20,
+    expectSeqScan: false,
+  },
+
+  // ─── Indexer read path ─────────────────────────────────────────────────────
+  {
+    name: 'indexer.max-ledger',
+    group: 'indexer',
+    what: 'the indexer resuming: MAX(sequence) over ledgers',
+    engine: 'indexer',
+    fn: 'getLatestIndexedLedger',
+    args: () => [],
+    shouldUse: 'ledgers_pkey backwards',
+    expectSeqScan: false,
+  },
+  {
+    name: 'indexer.max-event-ledger',
+    group: 'indexer',
+    what: 'the indexer resuming its event cursor: MAX(ledger) over contract_events',
+    engine: 'indexer',
+    fn: 'getLatestIndexedEventLedger',
+    args: () => [],
+    shouldUse: 'idx_events_ledger backwards',
+    expectSeqScan: false,
+  },
+  {
+    name: 'indexer.load-schemas',
+    group: 'indexer',
+    what: 'the indexer reading every registered schema on each poll cycle',
+    engine: 'indexer',
+    fn: 'loadContractSchemas',
+    args: () => [],
+    shouldUse: 'a sequential scan, deliberately: the statement reads the whole table',
+    expectSeqScan: true,
+    note: 'recorded so the intended scan is on the record too — an audit that only lists scans cannot tell intended from accidental',
+  },
+];

@@ -156,6 +156,28 @@ effect for these queries, without rewriting every row in `operations`.
 psql $DATABASE_URL -f db/migrations/004_search_indexes.sql
 ```
 
+### Query plans
+
+An index existing is not the same as the planner using it. `db/explain/` builds
+a production-shaped scratch database, runs every main query through
+`EXPLAIN ANALYZE`, and records the *shape* of each plan — nodes, indexes used,
+sequential scans, rows — as `db/explain/baseline.json`, so a query that quietly
+stops using its index shows up as a diff instead of as a latency graph months
+later.
+
+```bash
+npm run explain:seed     # build the scratch database (slow, once)
+npm run explain          # capture plans and report
+npm run explain:check    # compare against the baseline; non-zero on a regression
+npm run explain:update   # re-record the baseline
+```
+
+Point it at a scratch database with `EXPLAIN_DATABASE_URL`; it truncates every
+table. It does not run in CI — on a small dataset the sequential scan is the
+correct plan, so a CI-sized database would report exactly the queries this is
+meant to catch as healthy. The recorded findings, and the indexes that would fix
+them, are in [docs/QUERY_PLANS.md](docs/QUERY_PLANS.md).
+
 ## Run with Docker
 
 ```bash

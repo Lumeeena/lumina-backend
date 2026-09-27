@@ -12,6 +12,10 @@
     "build:graphql": "cd graphql-server && npm run build",
     "build:indexer": "cd indexer && npm run build",
     "test": "npm run test:indexer && npm run test:graphql",
+    "explain": "ts-node-transpile-only --project db/explain/tsconfig.json db/explain/run.ts capture",
+    "explain:seed": "ts-node-transpile-only --project db/explain/tsconfig.json db/explain/run.ts seed",
+    "explain:check": "ts-node-transpile-only --project db/explain/tsconfig.json db/explain/run.ts check",
+    "explain:update": "ts-node-transpile-only --project db/explain/tsconfig.json db/explain/run.ts update",
     "test:indexer": "cd indexer && npm test",
     "test:graphql": "cd graphql-server && npm test"
   },
