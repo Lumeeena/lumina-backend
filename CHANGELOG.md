@@ -34,6 +34,7 @@ Breaking changes are rare and advance the major version. Deprecation notices app
 
 ### Changed
 - Version is now reported in application startup logs
+- The Horizon client is one implementation in the new `shared` workspace package, consumed by both services. The GraphQL server's fallback requests are throttled like the indexer's, the Horizon types and the retry policy exist once, and `indexer/src/throttle.ts` moved there so Soroban RPC pacing and Horizon pacing cannot diverge (#25)
 
 ## How to Release
 

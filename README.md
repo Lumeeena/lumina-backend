@@ -18,6 +18,7 @@ indexer/         Polls Stellar Horizon, writes ledgers/transactions/operations/a
                   to Postgres, and (opt-in) indexes Soroban contract events via RPC
 graphql-server/   Apollo GraphQL API — reads from Postgres, falls back to Horizon
                   only for accounts that haven't been indexed yet
+shared/           The Horizon client and the request throttle both services use, one copy
 db/               PostgreSQL schema, migrations, and role grants
 docker/           Dockerfiles + docker-compose.yml for postgres + indexer + graphql
 ```

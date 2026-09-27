@@ -20,7 +20,7 @@ cd lumina-backend
 npm install
 ```
 
-This installs dependencies for the root workspace and both sub-packages (indexer and graphql-server).
+This installs dependencies for the root workspace, both services, and the shared package they use (indexer, graphql-server and shared).
 
 ## 2. Set Up PostgreSQL
 

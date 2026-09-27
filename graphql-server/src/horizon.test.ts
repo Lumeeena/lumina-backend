@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { getAccount } from './horizon';
+import { getAccount, getRecentTransactions } from './horizon';
 
 function mockFetchSequence(responses: Array<{ status: number; headers?: Record<string, string>; body?: unknown }>) {
   let call = 0;
@@ -43,4 +43,31 @@ test('getAccount gives up and returns null after exhausting retries on repeated 
   ]);
   const result = await getAccount('GABC');
   assert.equal(result, null);
+});
+
+test('requests are spaced by the throttle, so the fallback cannot burst Horizon', async () => {
+  const times: number[] = [];
+  (global as unknown as { fetch: typeof fetch }).fetch = (async () => {
+    times.push(Date.now());
+    return {
+      ok: true,
+      status: 200,
+      headers: { get: () => null },
+      json: async () => ({ _embedded: { records: [] } }),
+    };
+  }) as unknown as typeof fetch;
+
+  await getRecentTransactions();
+  await getRecentTransactions();
+  await getRecentTransactions();
+
+  assert.equal(times.length, 3);
+  assert.ok(
+    times[1] - times[0] >= 80,
+    `expected requests to be at least 80ms apart, got ${times[1] - times[0]}ms`
+  );
+  assert.ok(
+    times[2] - times[1] >= 80,
+    `expected requests to be at least 80ms apart, got ${times[2] - times[1]}ms`
+  );
 });

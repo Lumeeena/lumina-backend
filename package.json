@@ -5,10 +5,11 @@
   "description": "Stellar event indexer + GraphQL API for Lumina",
   "workspaces": [
     "graphql-server",
-    "indexer"
+    "indexer",
+    "shared"
   ],
   "scripts": {
-    "build": "npm run build:graphql && npm run build:indexer",
+    "build": "npm run build:shared && npm run build:graphql && npm run build:indexer",
     "build:graphql": "cd graphql-server && npm run build",
     "build:indexer": "cd indexer && npm run build",
     "lint": "npm run lint:indexer && npm run lint:graphql",
@@ -21,7 +22,8 @@
     "test:indexer": "cd indexer && npm test",
     "test:graphql": "cd graphql-server && npm test",
     "manage-keys": "npm run --prefix graphql-server manage-keys --",
-    "migrate": "npm run --prefix graphql-server migrate --"
+    "migrate": "npm run --prefix graphql-server migrate --",
+    "build:shared": "tsc -p shared/tsconfig.json"
   },
   "engines": {
     "node": ">=18"

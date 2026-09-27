@@ -11,7 +11,7 @@
  */
 import { scValToNative, xdr } from '@stellar/stellar-sdk';
 import { sorobanRequestDuration, sorobanRequests } from './metrics';
-import { createThrottle } from './throttle';
+import { createThrottle } from '@lumina/shared';
 import { subsystem } from './logger';
 
 const log = subsystem('soroban');

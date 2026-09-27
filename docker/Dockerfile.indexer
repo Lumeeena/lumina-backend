@@ -1,5 +1,10 @@
 FROM node:20-alpine@sha256:fb4cd12c85ee03686f6af5362a0b0d56d50c58a04632e6c0fb8363f609372293 AS build
 WORKDIR /app
+# `@lumina/shared` is a file: dependency, so the package it points at has to be
+# in the image before `npm install` runs. It lives at /shared, which is where
+# `file:../shared` resolves from /app, because the build stage has no repository
+# root to mirror.
+COPY shared /shared
 COPY indexer/package.json ./
 RUN npm install --no-audit --no-fund
 COPY indexer/tsconfig.json ./
@@ -16,5 +21,7 @@ ENV NODE_ENV=production
 COPY --from=build --chown=node:node /app/package.json ./package.json
 COPY --from=build --chown=node:node /app/node_modules ./node_modules
 COPY --from=build --chown=node:node /app/dist ./dist
+# The `@lumina/shared` link in node_modules points at this directory.
+COPY --from=build --chown=node:node /shared /shared
 USER node
 CMD ["node", "dist/index.js"]
