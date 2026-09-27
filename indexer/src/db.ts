@@ -562,45 +562,82 @@ export async function upsertContractStorageEntries(
   }
 }
 
+// ─── Retry queue for failed ledgers ────────────────────────────────────────
+
+const MAX_RETRY_ATTEMPTS = 10;
+const RETRY_BACKOFF_BASE_MS = 5000; // 5 seconds
+
 /**
- * Mark the given storage keys as `archived`, keeping the rows.
- *
- * Soroban archives a persistent entry once its TTL expires: the entry is not
- * deleted, it is inaccessible until restored. Deleting our row would report
- * the contract as having lost state it still has, so the row is kept and only
- * its `state` changes — which is what lets a client distinguish "archived"
- * (a row with `state = 'archived'`) from "absent" (no row at all).
- *
- * Only rows that are currently `active` are touched, so re-archiving an
- * already-archived entry is a no-op rather than a repeated write.
+ * Add a failed ledger to the retry queue with exponential backoff.
  */
-export async function markContractStorageEntriesArchived(
+export async function enqueueLedgerRetry(
   pool: Pool,
   network: string,
-  keys: string[]
+  ledger: number,
+  error: string
 ): Promise<void> {
-  if (keys.length === 0) return;
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
 
-  await pool.query(
-    `UPDATE contract_storage_entries
-     SET state = 'archived', indexed_at = NOW()
-     WHERE network = $1 AND key = ANY($2::text[]) AND state = 'active'`,
-    [network, keys]
-  );
+    const { rows } = await client.query<{ attempt_count: number }>(
+      'SELECT attempt_count FROM ledger_retry_queue WHERE ledger = $1 AND network = $2',
+      [ledger, network]
+    );
+
+    const attemptCount = rows[0] ? rows[0].attempt_count + 1 : 1;
+    const isPermanentlyFailed = attemptCount >= MAX_RETRY_ATTEMPTS;
+    const backoffMs = Math.min(RETRY_BACKOFF_BASE_MS * Math.pow(2, attemptCount - 1), 3600000); // Max 1 hour
+
+    await client.query(
+      `INSERT INTO ledger_retry_queue
+         (ledger, network, attempt_count, next_attempt_at, last_error, last_attempted_at, permanently_failed)
+       VALUES ($1, $2, $3, NOW() + INTERVAL '1 millisecond' * $4, $5, NOW(), $6)
+       ON CONFLICT (ledger, network) DO UPDATE SET
+         attempt_count = $3,
+         next_attempt_at = NOW() + INTERVAL '1 millisecond' * $4,
+         last_error = $5,
+         last_attempted_at = NOW(),
+         permanently_failed = $6`,
+      [ledger, network, attemptCount, backoffMs, error, isPermanentlyFailed]
+    );
+
+    await client.query('COMMIT');
+  } catch (err) {
+    await client.query('ROLLBACK');
+    throw err;
+  } finally {
+    client.release();
+  }
 }
 
 /**
- * Every storage key this network has indexed, regardless of state.
- *
- * The polling loop re-fetches these each cycle: a key the RPC stops returning
- * is the archival signal (see markContractStorageEntriesArchived). Seeding new
- * keys into the watch list is the caller's job — see INDEXED_CONTRACT_STORAGE_KEYS
- * in indexer/src/index.ts.
+ * Get ledgers that are due for retry.
  */
-export async function getTrackedContractStorageKeys(pool: Pool, network: string): Promise<string[]> {
-  const { rows } = await pool.query<{ key: string }>(
-    `SELECT DISTINCT key FROM contract_storage_entries WHERE network = $1`,
-    [network]
+export async function getPendingRetries(pool: Pool, network: string, limit = 10): Promise<number[]> {
+  const { rows } = await pool.query<{ ledger: number }>(
+    `SELECT ledger FROM ledger_retry_queue
+     WHERE network = $1
+       AND NOT permanently_failed
+       AND next_attempt_at <= NOW()
+     ORDER BY next_attempt_at ASC
+     LIMIT $2`,
+    [network, limit]
   );
-  return rows.map(row => row.key);
+  return rows.map(r => r.ledger);
 }
+
+/**
+ * Remove a ledger from the retry queue after successful indexing.
+ */
+export async function removeLedgerFromRetryQueue(
+  pool: Pool,
+  network: string,
+  ledger: number
+): Promise<void> {
+  await pool.query(
+    'DELETE FROM ledger_retry_queue WHERE ledger = $1 AND network = $2',
+    [ledger, network]
+  );
+}
+

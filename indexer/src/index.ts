@@ -42,8 +42,7 @@ import {
   insertContractEvents,
   insertCustomEvents,
   loadContractSchemas,
-  markContractStorageEntriesArchived,
-  upsertContractStorageEntries,
+  enqueueLedgerRetry,
 } from './db';
 import { decodeEvents } from './customDecode';
 import { loadConfig } from './config';
@@ -87,6 +86,7 @@ import { getLatestLedgerSequence, getLedger, getLedgerOperations, getLedgerTrans
 import { getActiveContracts } from './registry';
 import { getContractStorageEntries, getEvents, getLatestLedgerSequence as getLatestRpcLedgerSequence, type ContractEvent } from './soroban';
 import { resolveNetworks, type NetworkConfig } from './networks';
+import { RetryWorker } from './retryWorker';
 
 // Read version from package.json for logging
 import { readFileSync } from 'fs';
@@ -174,7 +174,7 @@ interface NetworkLoop {
   discoveredContractIds: string[];
   accountCache: Map<string, number>;
   accountCacheOrder: string[];
-  accountRefreshTask: Promise<void> | null;
+  retryWorker?: RetryWorker;
 }
 
 function createLoop(network: NetworkConfig, primaryName: string): NetworkLoop {
@@ -269,6 +269,7 @@ async function fetchAndIndexLedger(loop: NetworkLoop, sequence: number): Promise
 }
 
 export async function fetchAndIndexLedgerWithRetry(
+  network: string,
   sequence: number,
   indexOne: (sequence: number) => Promise<void>,
   retryAttempts?: number,
@@ -283,12 +284,15 @@ export async function fetchAndIndexLedgerWithRetry(
     } catch (err) {
       if (attempt === actualRetryAttempts) {
         indexingErrors.inc({ loop: 'ledger' });
-        log.error({ ledger: sequence, attempts: attempt, err: message(err) }, 'giving up on ledger');
+        const errorMsg = message(err);
+        log.error({ network, ledger: sequence, attempts: attempt, err: errorMsg }, 'giving up on ledger; enqueueing for durable retry');
+        // Enqueue for durable retry instead of just giving up
+        await enqueueLedgerRetry(pool, network, sequence, errorMsg);
         return false;
       }
       const delay = actualRetryBaseMs * 2 ** (attempt - 1);
       log.warn(
-        { ledger: sequence, attempt, maxAttempts: actualRetryAttempts, retryInMs: delay, err: message(err) },
+        { network, ledger: sequence, attempt, maxAttempts: actualRetryAttempts, retryInMs: delay, err: message(err) },
         'ledger failed, retrying'
       );
       await new Promise(r => setTimeout(r, delay));
@@ -522,7 +526,20 @@ async function runNetworkLoop(loop: NetworkLoop, isPrimary: boolean): Promise<vo
   scheduleAccountRefreshes(loop);
 
   const indexOne = (sequence: number): Promise<boolean> =>
-    fetchAndIndexLedgerWithRetry(sequence, seq => fetchAndIndexLedger(loop, seq));
+    fetchAndIndexLedgerWithRetry(name, sequence, seq => fetchAndIndexLedger(loop, seq));
+
+  // Start the retry worker for this network
+  loop.retryWorker = new RetryWorker({
+    pool,
+    network: name,
+    indexOne,
+    pollIntervalMs: 30000, // Check retry queue every 30 seconds
+  });
+  
+  // Run retry worker in background
+  loop.retryWorker.start().catch(err => {
+    log.error({ network: name, err: message(err) }, 'retry worker crashed');
+  });
 
   while (!isShuttingDown) {
     try {
@@ -557,7 +574,9 @@ async function runNetworkLoop(loop: NetworkLoop, isPrimary: boolean): Promise<vo
     scheduleAccountRefreshes(loop);
     await new Promise(r => setTimeout(r, config!.pollIntervalMs));
   }
-  await loop.accountRefreshTask;
+  
+  // Stop retry worker
+  loop.retryWorker?.stop();
 }
 
 async function run() {

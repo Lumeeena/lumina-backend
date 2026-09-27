@@ -24,6 +24,6 @@
     "migrate": "npm run --prefix graphql-server migrate --"
   },
   "engines": {
-    "node": ">=18"
+    "node": ">=18 <=22"
   }
 }
