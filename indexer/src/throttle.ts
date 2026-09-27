@@ -8,6 +8,10 @@
  * a paced stream.
  */
 
+import { subsystem } from './logger';
+
+const log = subsystem('throttle');
+
 export interface ThrottleMetrics {
   requestsTotal: { inc: (labels: Record<string, string | number>) => void };
   requestDuration?: { startTimer: () => () => void };
@@ -50,6 +54,16 @@ export function createThrottle(options: ThrottleOptions) {
     metrics?.requestsTotal.inc({ status: String(res.status) });
 
     if (!res.ok) {
+      if (res.status === 429) {
+        const retryAfter = res.headers.get('Retry-After');
+        if (retryAfter) {
+          const retryMs = parseRetryAfter(retryAfter);
+          log.info({ retryAfter, retryMs, url }, 'honouring Retry-After on 429');
+          await new Promise(r => setTimeout(r, retryMs));
+          // Retry once after waiting
+          return fetchJson<T>(url, init);
+        }
+      }
       throw new Error(`${name} request failed (${res.status}): ${url}`);
     }
     return (await res.json()) as T;
@@ -80,10 +94,42 @@ export function createThrottle(options: ThrottleOptions) {
     metrics?.requestsTotal.inc({ status: String(res.status) });
 
     if (!res.ok) {
+      if (res.status === 429) {
+        const retryAfter = res.headers.get('Retry-After');
+        if (retryAfter) {
+          const retryMs = parseRetryAfter(retryAfter);
+          log.info({ retryAfter, retryMs, url }, 'honouring Retry-After on 429');
+          await new Promise(r => setTimeout(r, retryMs));
+          // Retry once after waiting
+          return postJson<T>(url, body, init);
+        }
+      }
       throw new Error(`${name} request failed (${res.status}): ${url}`);
     }
     return (await res.json()) as T;
   }
 
   return { throttle, fetchJson, postJson };
+}
+
+/**
+ * Parses the Retry-After header value and returns the delay in milliseconds.
+ * Supports both delay-seconds (integer) and HTTP-date formats.
+ */
+function parseRetryAfter(retryAfter: string): number {
+  // Try parsing as delay-seconds first
+  const seconds = parseInt(retryAfter, 10);
+  if (!isNaN(seconds)) {
+    return seconds * 1000;
+  }
+
+  // Try parsing as HTTP-date
+  const date = Date.parse(retryAfter);
+  if (!isNaN(date)) {
+    return Math.max(0, date - Date.now());
+  }
+
+  // Fall back to default if unparseable
+  log.warn({ retryAfter }, 'could not parse Retry-After header');
+  return 5000; // 5 second fallback
 }
