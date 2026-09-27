@@ -1,0 +1,10 @@
+version: 2
+updates:
+  # Keeps tag@digest pins in Dockerfiles and docker-compose.yml fresh.
+  # CI service images in .github/workflows/ci.yml are mirrored by hand
+  # (see docs/BASE_IMAGES.md).
+  - package-ecosystem: "docker"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5

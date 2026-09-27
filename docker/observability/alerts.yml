@@ -43,6 +43,14 @@ groups:
         annotations:
           summary: "Indexer loops are erroring repeatedly"
 
+      - alert: DatabasePoolErrors
+        expr: increase(lumina_indexer_db_pool_errors_total[5m]) > 0
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Indexer PostgreSQL pool is replacing failed clients"
+
   - name: lumina-graphql
     rules:
       - alert: DatabasePoolExhausted
@@ -72,3 +80,19 @@ groups:
           severity: warning
         annotations:
           summary: "More than 5% of GraphQL operations are failing"
+
+      - alert: ScheduledExportFailed
+        expr: increase(lumina_scheduled_exports_total{outcome="failure"}[25h]) > 0
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: "A scheduled database export failed"
+
+      - alert: GraphQLDatabasePoolErrors
+        expr: increase(lumina_graphql_db_pool_errors_total[5m]) > 0
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: "GraphQL PostgreSQL pool is replacing failed clients"

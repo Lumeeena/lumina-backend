@@ -9,7 +9,10 @@
  * below does.
  *
  * The channel name and the `ledger`/`kind` fields are the compatibility
- * surface. Everything else is optional commentary and may be absent.
+ * surface. Everything else is optional commentary and may be absent — which
+ * includes `network`: an indexer that predates per-network notifications does
+ * not send it, and the reader treats its absence as the one network that
+ * indexer was running.
  */
 
 export const INDEXED_CHANNEL = 'lumina_indexed';
@@ -19,9 +22,16 @@ export type IndexedKind = 'ledger' | 'events';
 export interface IndexedNotification {
   kind: IndexedKind;
   ledger: number;
-  transactions?: number;
-  operations?: number;
-  events?: number;
+  /**
+   * Network the ledger landed on, lowercase (the `network` column's value).
+   *
+   * Present from the multi-network indexer on. Optional so a reader never has
+   * to know which side of that change it is talking to.
+   */
+  network?: string | undefined;
+  transactions?: number | undefined;
+  operations?: number | undefined;
+  events?: number | undefined;
 }
 
 /**
@@ -40,6 +50,7 @@ export function parseNotification(payload: string | undefined): IndexedNotificat
     return {
       kind: parsed.kind,
       ledger: parsed.ledger,
+      network: stringOrUndefined(parsed.network),
       transactions: numberOrUndefined(parsed.transactions),
       operations: numberOrUndefined(parsed.operations),
       events: numberOrUndefined(parsed.events),
@@ -51,4 +62,8 @@ export function parseNotification(payload: string | undefined): IndexedNotificat
 
 function numberOrUndefined(value: unknown): number | undefined {
   return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
+}
+
+function stringOrUndefined(value: unknown): string | undefined {
+  return typeof value === 'string' && value.trim() !== '' ? value : undefined;
 }

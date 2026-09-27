@@ -86,11 +86,12 @@ interface CustomEventRow {
 
 export async function getContractSchema(
   pool: Pool,
+  network: string,
   contractId: string
 ): Promise<StoredContractSchema | null> {
   const { rows } = await pool.query<{ definition: StoredContractSchema }>(
-    'SELECT definition FROM contract_schemas WHERE contract_id = $1',
-    [contractId]
+    'SELECT definition FROM contract_schemas WHERE contract_id = $1 AND network = $2',
+    [contractId, network]
   );
   return rows[0]?.definition ?? null;
 }
@@ -155,6 +156,8 @@ export function buildFilterClause(
 }
 
 export interface CustomEventQuery {
+  /** Network whose events to decode — schemas are registered per network too. */
+  network: string;
   contractId: string;
   event: string;
   where?: CustomEventFilter[] | null;
@@ -163,7 +166,7 @@ export interface CustomEventQuery {
 }
 
 export async function getCustomEvents(pool: Pool, query: CustomEventQuery) {
-  const schema = await getContractSchema(pool, query.contractId);
+  const schema = await getContractSchema(pool, query.network, query.contractId);
   if (!schema) {
     throw new CustomQueryError(`No custom schema registered for contract ${query.contractId}`);
   }
@@ -176,15 +179,15 @@ export async function getCustomEvents(pool: Pool, query: CustomEventQuery) {
     );
   }
 
-  const params: unknown[] = [query.contractId, query.event];
-  const conditions = ['contract_id = $1', 'event_name = $2'];
+  const params: unknown[] = [query.contractId, query.event, query.network];
+  const conditions = ['contract_id = $1', 'event_name = $2', 'network = $3'];
 
   conditions.push(...buildFilterClause(event, query.where ?? [], params));
 
   if (query.cursor) {
     params.push(query.cursor);
     conditions.push(
-      `(ledger, event_id) < (SELECT ledger, event_id FROM custom_events WHERE event_id = $${params.length} LIMIT 1)`
+      `(ledger, event_id) < (SELECT ledger, event_id FROM custom_events WHERE event_id = $${params.length} AND network = $3 LIMIT 1)`
     );
   }
 

@@ -1,0 +1,503 @@
+# Lumina GraphQL Schema — Stellar Network Event Index
+
+"""
+Networks this deployment serves.
+
+The set is fixed rather than derived from configuration because an enum is
+part of the API contract: naming a network that is not here has to be a
+question a client can ask and get a definite answer to, not a string that
+silently resolves to a different dataset. Declaring a network in `NETWORKS`
+that this enum does not carry fails at startup — see docs/MULTI_NETWORK.md.
+"""
+enum Network {
+  MAINNET
+  TESTNET
+  FUTURENET
+}
+
+"""
+Root queries.
+
+Every field takes an optional `network` argument:
+
+- **Omitted** — the primary network configured for this deployment. That is
+  exactly the data every client saw before the argument existed, which is why
+  adding it is additive rather than breaking.
+- **Named** — that network and only that network. A network the deployment
+  does not serve is a `BAD_USER_INPUT` error, never a silent fall back to the
+  primary: "I asked for testnet and got mainnet" is the data-mixing failure
+  this argument exists to prevent.
+"""
+type Query {
+  """Fetch recent transactions, newest first."""
+  transactions(
+    """Network to read; defaults to the primary network configured for this deployment."""
+    network: Network
+    limit: Int = 20
+    cursor: String
+  ): TransactionPage!
+
+  """Get a single transaction by hash."""
+  transaction(network: Network, hash: String!): Transaction
+
+  """Fetch an account by Stellar address."""
+  account(network: Network, address: String!): Account
+
+  """
+  Fetch operations, optionally filtered by account address and type.
+  """
+  operations(
+    network: Network
+    account: String
+    type: OperationType
+    """Filter to operations involving one asset: "CODE:ISSUER", or "XLM" for native."""
+    asset: String
+    limit: Int = 20
+    cursor: String
+  ): OperationPage!
+
+  """
+  Search transactions by memo, ranked by relevance.
+
+  Ranking is trigram similarity rather than full-text search: Stellar memos are
+  order references and short codes rather than prose, and stemming an
+  identifier is wrong. An exact case-insensitive match always ranks first.
+  """
+  search(network: Network, query: String!, limit: Int = 20, cursor: String): TransactionPage!
+
+  """
+  Fetch Soroban contract events by contract ID.
+  Requires Soroban RPC indexing to be enabled.
+  """
+  events(
+    network: Network
+    contractId: String!
+    topic: String
+    limit: Int = 20
+    cursor: String
+  ): ContractEventPage!
+
+  """
+  Fetch indexed Soroban contract storage entries for a contract, newest change
+  first. Optionally filtered by durability and by a key prefix.
+
+  `key` is the base64 XDR LedgerKey that addresses the entry, so it round-trips
+  back into a Soroban `getLedgerEntries` call; `keyPrefix` matches that string.
+
+  An entry whose TTL has expired is reported with `state: ARCHIVED` rather than
+  dropped, so a contract that has archived state is distinguishable from one
+  where the key was never set. Requires Soroban RPC indexing to be enabled.
+  """
+  contractStorageEntries(
+    network: Network
+    contractId: String!
+    """Only entries with this durability. Omit for both."""
+    durability: ContractStorageDurability
+    """Only entries whose base64 XDR key starts with this prefix."""
+    keyPrefix: String
+    limit: Int = 20
+    cursor: String
+  ): ContractStorageEntryPage!
+
+  """Get a specific ledger by sequence number."""
+  ledger(network: Network, sequence: Int!): Ledger
+
+  """Get the latest ledger."""
+  latestLedger(network: Network): Ledger
+
+  """
+  Events decoded against a contract's registered custom schema, with named,
+  typed fields rather than a raw JSON blob.
+  """
+  customEvents(
+    network: Network
+    contractId: String!
+    event: String!
+    where: [CustomEventFilter!]
+    limit: Int = 20
+    cursor: String
+  ): CustomEventPage!
+
+  """The custom schema registered for a contract, if any."""
+  contractSchema(network: Network, contractId: String!): ContractSchema
+
+  """
+  Asset detail in one call: current supply and holder count plus a bucketed
+  volume series. Supply is the sum of indexed `accounts.balances` for the
+  asset (a last-seen snapshot, not ledger state) — see the query docs for
+  limitations. The series reuses the `operations(asset:)` predicate, so its
+  buckets always agree with the operation list.
+  """
+  asset(
+    network: Network
+    """Asset to inspect: "CODE:ISSUER", or "XLM" for native."""
+    asset: String!
+    """Range start (ISO-8601). Defaults to 30 days before `to`."""
+    from: String
+    """Range end (ISO-8601). Defaults to now."""
+    to: String
+    """Bucket width in seconds (min 60). Defaults to 86400 (daily)."""
+    bucketSeconds: Int = 86400
+  ): AssetDetail!
+
+  """
+  How far behind the chain this API data is. Advisory — see IndexerStatus for
+  what it does and does not promise.
+  """
+  indexerStatus(network: Network): IndexerStatus!
+}
+
+type Subscription {
+  """Subscribe to new transactions as they are confirmed."""
+  newTransaction(network: Network): Transaction!
+
+  """Subscribe to new operations for a specific account."""
+  accountActivity(network: Network, address: String!): Operation!
+}
+
+# ─── Indexer freshness ────────────────────────────────────────────────────────
+
+"""
+How current the indexed data is, for one network.
+
+**Advisory.** It is a measurement of lag, not a guarantee: `stale` is derived
+from Horizon tip read at the moment of the call and a lag threshold, and the
+numbers move between calls. Use it to render "data is N ledgers behind" or
+"showing cached data", not as an SLA and not as a gate on showing data at all
+— stale data with an honest label beats no data.
+
+The query is built to answer "how stale?" rather than fail when the indexer
+is down: the indexed side comes from Postgres, the tip comes from Horizon,
+and either being unreachable is reported as a field (`null` plus
+`stale: true`) rather than as an error.
+"""
+type IndexerStatus {
+  """Network these numbers describe."""
+  network: Network!
+
+  """Highest ledger sequence indexed for this network, or null if none yet."""
+  latestIndexedLedger: Int
+
+  """When that ledger was indexed (ISO-8601), or null if none yet."""
+  latestIndexedAt: String
+
+  """Horizon current tip for this network, or null if it could not be read."""
+  horizonLedger: Int
+
+  """`horizonLedger - latestIndexedLedger`, or null if the tip is unknown."""
+  lagLedgers: Int
+
+  """
+  True when the data cannot be assumed current: the tip could not be read, or
+  the indexer is more than a few ledgers behind it.
+  """
+  stale: Boolean!
+
+  """When this status was computed (ISO-8601)."""
+  checkedAt: String!
+}
+
+# ─── Pagination ──────────────────────────────────────────────────────────────
+
+type PageInfo {
+  hasNextPage: Boolean!
+  cursor: String
+}
+
+type TransactionPage {
+  items: [Transaction!]!
+  pageInfo: PageInfo!
+}
+
+type OperationPage {
+  items: [Operation!]!
+  pageInfo: PageInfo!
+}
+
+type ContractEventPage {
+  items: [ContractEvent!]!
+  pageInfo: PageInfo!
+}
+
+type ContractStorageEntryPage {
+  items: [ContractStorageEntry!]!
+  pageInfo: PageInfo!
+}
+
+# ─── Core Types ───────────────────────────────────────────────────────────────
+
+type Ledger {
+  sequence: Int!
+  closedAt: String!
+  transactionCount: Int!
+  operationCount: Int!
+  baseFee: Int!
+  baseReserve: Int!
+}
+
+type Transaction {
+  hash: String!
+  ledger: Int!
+  ledgerData: Ledger
+  createdAt: String!
+  sourceAccount: String!
+  account: Account
+  feeCharged: String!
+  operationCount: Int!
+  successful: Boolean!
+  memoType: String
+  memo: String
+  """Operations may be null when their lookup fails; errors remain local to this field."""
+  operations: [Operation!]
+}
+
+type Account {
+  address: String!
+  sequence: String!
+  subentryCount: Int!
+  lastModifiedLedger: Int!
+  numSponsored: Int!
+  numSponsoring: Int!
+  balances: [Balance!]!
+  flags: AccountFlags!
+  thresholds: Thresholds!
+  """Related rows are optional so a lookup error does not erase the account."""
+  transactions(limit: Int = 10): [Transaction!]
+  operations(limit: Int = 10): [Operation!]
+}
+
+type Balance {
+  assetType: String!
+  assetCode: String
+  assetIssuer: String
+  balance: String!
+  limit: String
+  buyingLiabilities: String
+  sellingLiabilities: String
+}
+
+type AccountFlags {
+  authRequired: Boolean!
+  authRevocable: Boolean!
+  authImmutable: Boolean!
+  authClawbackEnabled: Boolean!
+}
+
+type Thresholds {
+  lowThreshold: Int!
+  medThreshold: Int!
+  highThreshold: Int!
+}
+
+type Operation {
+  id: String!
+  type: OperationType!
+  createdAt: String!
+  transactionHash: String!
+  transaction: Transaction
+  sourceAccount: String!
+  account: Account
+
+  # Payment fields
+  from: String
+  to: String
+  amount: String
+  asset: String
+
+  # Create account fields
+  startingBalance: String
+  funder: String
+
+  # Manage offer fields
+  offerId: String
+  price: String
+  selling: String
+  buying: String
+}
+
+type ContractEvent {
+  id: String!
+  type: String!
+  contractId: String!
+  ledger: Int!
+  createdAt: String!
+  pagingToken: String!
+  topics: [String!]!
+  value: String  # JSON-encoded value
+}
+
+"""
+How long a contract storage entry survives without being touched.
+
+Only PERSISTENT entries are archived: they survive a ledger's lifecycle and are
+moved to cold storage ("archived") when their TTL runs out. TEMPORARY entries
+are evicted outright and therefore never come back as ARCHIVED.
+"""
+enum ContractStorageDurability {
+  PERSISTENT
+  TEMPORARY
+}
+
+"""
+Whether an entry is currently readable, or has been archived.
+
+Soroban archives a persistent entry whose TTL has expired: the contract still
+owns the state, but it is inaccessible until restored. An ARCHIVED entry is
+reported here rather than removed, so this is how a client tells "the contract
+has state that is archived" apart from "this key was never set" (which has no
+entry at all).
+"""
+enum ContractStorageEntryState {
+  """Currently live and readable."""
+  ACTIVE
+
+  """TTL expired; retained for the contract, inaccessible until restored."""
+  ARCHIVED
+}
+
+"""
+One indexed Soroban contract storage entry.
+
+`value` is the decoded native value, JSON-encoded, or null when the entry is
+not currently live (an archived entry keeps the key and metadata but has no
+readable value). `valueXdr` is the raw base64 LedgerEntryData XDR, so a client
+that needs the exact wire form — or a value the decoder could not represent —
+still has it. `key` is the base64 XDR LedgerKey that addresses the entry and
+round-trips into a Soroban `getLedgerEntries` call.
+"""
+type ContractStorageEntry {
+  contractId: String!
+
+  """Base64 XDR LedgerKey addressing this entry."""
+  key: String!
+  durability: ContractStorageDurability!
+  state: ContractStorageEntryState!
+
+  """Decoded native value as a JSON string, or null when archived."""
+  value: String
+
+  """Raw base64 LedgerEntryData XDR, or null when archived."""
+  valueXdr: String
+
+  """Ledger in which this entry was last changed."""
+  lastModifiedLedger: Int!
+
+  """Ledger at which this entry's TTL expires, if the RPC reported one."""
+  liveUntilLedger: Int
+}
+
+# ─── Enums ───────────────────────────────────────────────────────────────────
+
+enum OperationType {
+  PAYMENT
+  CREATE_ACCOUNT
+  PATH_PAYMENT_STRICT_SEND
+  PATH_PAYMENT_STRICT_RECEIVE
+  MANAGE_SELL_OFFER
+  MANAGE_BUY_OFFER
+  CREATE_PASSIVE_SELL_OFFER
+  SET_OPTIONS
+  CHANGE_TRUST
+  ALLOW_TRUST
+  ACCOUNT_MERGE
+  MANAGE_DATA
+  BUMP_SEQUENCE
+  INVOKE_HOST_FUNCTION
+  EXTEND_FOOTPRINT_TTL
+  RESTORE_FOOTPRINT
+}
+
+# ─── Custom per-contract event schemas ───────────────────────────────────────
+
+enum FilterOp {
+  EQ
+  NE
+  GT
+  GTE
+  LT
+  LTE
+}
+
+"""
+One filter clause. `value` is a string for every type — see CustomEventField
+for why — and is coerced server-side using the type the schema declares.
+"""
+input CustomEventFilter {
+  field: String!
+  op: FilterOp!
+  value: String!
+}
+
+"""
+A decoded field.
+
+`value` is a string regardless of `type`, and deliberately so: the type this
+feature exists for is i128, which does not fit in a JSON number. Returning a
+Float would silently round token amounts above 2^53. `type` tells a client how
+to parse the string exactly.
+"""
+type CustomEventField {
+  name: String!
+  type: String!
+  value: String
+}
+
+type CustomEvent {
+  eventId: String!
+  contractId: String!
+  eventName: String!
+  ledger: Int!
+  createdAt: String!
+  schemaVersion: Int!
+  fields: [CustomEventField!]!
+}
+
+type CustomEventPage {
+  items: [CustomEvent!]!
+  pageInfo: PageInfo!
+}
+
+type SchemaField {
+  name: String!
+  type: String!
+  source: String!
+  optional: Boolean!
+}
+
+type SchemaEvent {
+  name: String!
+  topic: String!
+  fields: [SchemaField!]!
+}
+
+type ContractSchema {
+  contractId: String!
+  version: Int!
+  events: [SchemaEvent!]!
+}
+
+# ─── Asset analytics ─────────────────────────────────────────────────────────
+
+"""
+Everything an asset detail page needs: supply and holders from indexed
+balances plus a bucketed volume series from operations.
+"""
+type AssetDetail {
+  asset: String!
+  code: String
+  issuer: String
+  native: Boolean!
+  """Sum of indexed balances, as a decimal string (no float rounding)."""
+  supply: String!
+  holders: Int!
+  series: [VolumeBucket!]!
+}
+
+"""One bucket of the volume series. Empty buckets report zero volume."""
+type VolumeBucket {
+  bucketStart: String!
+  bucketEnd: String!
+  """Summed transfer amounts in the bucket, as a decimal string."""
+  volume: String!
+  operationCount: Int!
+}

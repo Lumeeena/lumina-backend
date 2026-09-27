@@ -1,0 +1,121 @@
+{
+  "ledger": {
+    "sequence": 52481234,
+    "closed_at": "2026-05-06T10:22:14Z",
+    "successful_transaction_count": 25,
+    "failed_transaction_count": 3,
+    "operation_count": 142,
+    "base_fee_in_stroops": 100,
+    "base_reserve_in_stroops": 5000000
+  },
+  "ledgerPage": {
+    "_embedded": {
+      "records": [
+        {
+          "sequence": 52481234,
+          "closed_at": "2026-05-06T10:22:14Z",
+          "successful_transaction_count": 25,
+          "failed_transaction_count": 3,
+          "operation_count": 142,
+          "base_fee_in_stroops": 100,
+          "base_reserve_in_stroops": 5000000
+        }
+      ]
+    },
+    "_links": {
+      "next": { "href": "https://horizon.stellar.org/ledgers?order=desc&limit=1&cursor=52481234" }
+    }
+  },
+  "transaction": {
+    "hash": "f5e15b56f0b3eeac3bdc8f9302b2c2b91f2e2b2c2b2c2b2c2b2c2b2c2b2c2b2",
+    "ledger": 52481234,
+    "created_at": "2026-05-06T10:22:14Z",
+    "source_account": "GBBD47UZQ2RRULJ3UISD3HX2E7E5B57ONDST4NYUAOK5RYSOFSHMARTY",
+    "fee_charged": "300",
+    "operation_count": 3,
+    "successful": true,
+    "memo_type": "text",
+    "memo": "hello world"
+  },
+  "transactionPage": {
+    "_embedded": {
+      "records": [
+        {
+          "hash": "f5e15b56f0b3eeac3bdc8f9302b2c2b91f2e2b2c2b2c2b2c2b2c2b2c2b2c2b2",
+          "ledger": 52481234,
+          "created_at": "2026-05-06T10:22:14Z",
+          "source_account": "GBBD47UZQ2RRULJ3UISD3HX2E7E5B57ONDST4NYUAOK5RYSOFSHMARTY",
+          "fee_charged": "300",
+          "operation_count": 3,
+          "successful": true,
+          "memo_type": "text",
+          "memo": "hello world"
+        }
+      ]
+    },
+    "_links": {
+      "next": { "href": "https://horizon.stellar.org/ledgers/52481234/transactions?order=asc&limit=200&cursor=52481234-3" }
+    }
+  },
+  "operation": {
+    "id": "223456789504897",
+    "type": "payment",
+    "transaction_hash": "f5e15b56f0b3eeac3bdc8f9302b2c2b91f2e2b2c2b2c2b2c2b2c2b2c2b2c2b2",
+    "created_at": "2026-05-06T10:22:14Z",
+    "source_account": "GBBD47UZQ2RRULJ3UISD3HX2E7E5B57ONDST4NYUAOK5RYSOFSHMARTY",
+    "from": "GBBD47UZQ2RRULJ3UISD3HX2E7E5B57ONDST4NYUAOK5RYSOFSHMARTY",
+    "to": "GBUQWP3BOUZX34ULNQG23RQ6F4WHCQXBMCQTKSAXMBTMOYXFRYKRYX3N",
+    "amount": "100.0000000",
+    "asset_type": "native"
+  },
+  "operationPage": {
+    "_embedded": {
+      "records": [
+        {
+          "id": "223456789504897",
+          "type": "payment",
+          "transaction_hash": "f5e15b56f0b3eeac3bdc8f9302b2c2b91f2e2b2c2b2c2b2c2b2c2b2c2b2c2b2",
+          "created_at": "2026-05-06T10:22:14Z",
+          "source_account": "GBBD47UZQ2RRULJ3UISD3HX2E7E5B57ONDST4NYUAOK5RYSOFSHMARTY",
+          "from": "GBBD47UZQ2RRULJ3UISD3HX2E7E5B57ONDST4NYUAOK5RYSOFSHMARTY",
+          "to": "GBUQWP3BOUZX34ULNQG23RQ6F4WHCQXBMCQTKSAXMBTMOYXFRYKRYX3N",
+          "amount": "100.0000000",
+          "asset_type": "native"
+        }
+      ]
+    },
+    "_links": {}
+  },
+  "account": {
+    "account_id": "GBBD47UZQ2RRULJ3UISD3HX2E7E5B57ONDST4NYUAOK5RYSOFSHMARTY",
+    "sequence": "1234567891012",
+    "subentry_count": 5,
+    "last_modified_ledger": 52481234,
+    "num_sponsored": 0,
+    "num_sponsoring": 0,
+    "balances": [
+      {
+        "balance": "500.0000000",
+        "asset_type": "native"
+      },
+      {
+        "balance": "1000.5000000",
+        "limit": "12000.0000000",
+        "asset_type": "credit_alphanum4",
+        "asset_code": "USDC",
+        "asset_issuer": "GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN"
+      }
+    ],
+    "flags": {
+      "auth_required": false,
+      "auth_revocable": false,
+      "auth_immutable": false,
+      "auth_clawback_enabled": false
+    },
+    "thresholds": {
+      "low_threshold": 0,
+      "med_threshold": 0,
+      "high_threshold": 0
+    }
+  }
+}

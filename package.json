@@ -17,9 +17,11 @@
     "explain:check": "ts-node-transpile-only --project db/explain/tsconfig.json db/explain/run.ts check",
     "explain:update": "ts-node-transpile-only --project db/explain/tsconfig.json db/explain/run.ts update",
     "test:indexer": "cd indexer && npm test",
-    "test:graphql": "cd graphql-server && npm test"
+    "test:graphql": "cd graphql-server && npm test",
+    "manage-keys": "npm run --prefix graphql-server manage-keys --",
+    "migrate": "npm run --prefix graphql-server migrate --"
   },
   "engines": {
-    "node": ">=18"
+    "node": ">=18 <=22"
   }
 }

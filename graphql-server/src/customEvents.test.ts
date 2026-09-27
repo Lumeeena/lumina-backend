@@ -95,7 +95,7 @@ test('every whitelisted operator maps to its SQL form', () => {
     ['LTE', '<='],
   ] as const) {
     const params: unknown[] = [];
-    const [clause] = buildFilterClause(transferEvent, [{ field: 'amount', op, value: '1' }], params);
+    const clause = buildFilterClause(transferEvent, [{ field: 'amount', op, value: '1' }], params)[0] ?? '';
     assert.ok(clause.includes(` ${sql} `), `${op} should produce ${sql}, got ${clause}`);
   }
 });
@@ -164,9 +164,9 @@ test('a negative integer is a valid numeric filter', () => {
 test('getCustomEvents scopes to the contract and event', async () => {
   const { pool, calls } = fakePool();
 
-  await getCustomEvents(pool, { contractId: CONTRACT, event: 'transfer', limit: 20 });
+  await getCustomEvents(pool, { network: 'mainnet', contractId: CONTRACT, event: 'transfer', limit: 20 });
 
-  const query = calls[1];
+  const query = calls[1]!;
   assert.match(query.sql, /FROM custom_events/);
   assert.match(query.sql, /contract_id = \$1/);
   assert.match(query.sql, /event_name = \$2/);
@@ -180,7 +180,7 @@ test('getCustomEvents rejects a contract with no registered schema', async () =>
   } as unknown as Pool;
 
   await assert.rejects(
-    () => getCustomEvents(pool, { contractId: CONTRACT, event: 'transfer', limit: 20 }),
+    () => getCustomEvents(pool, { network: 'mainnet', contractId: CONTRACT, event: 'transfer', limit: 20 }),
     (err: unknown) => {
       assert.ok(err instanceof CustomQueryError);
       assert.match(err.message, /No custom schema registered/);
@@ -193,7 +193,7 @@ test('getCustomEvents rejects an event the schema does not declare', async () =>
   const { pool } = fakePool();
 
   await assert.rejects(
-    () => getCustomEvents(pool, { contractId: CONTRACT, event: 'mint', limit: 20 }),
+    () => getCustomEvents(pool, { network: 'mainnet', contractId: CONTRACT, event: 'mint', limit: 20 }),
     (err: unknown) => {
       assert.ok(err instanceof CustomQueryError);
       assert.match(err.message, /has no event "mint"/);
@@ -206,10 +206,10 @@ test('getCustomEvents rejects an event the schema does not declare', async () =>
 test('a cursor adds keyset pagination rather than an offset', async () => {
   const { pool, calls } = fakePool();
 
-  await getCustomEvents(pool, { contractId: CONTRACT, event: 'transfer', limit: 5, cursor: 'evt9' });
+  await getCustomEvents(pool, { network: 'mainnet', contractId: CONTRACT, event: 'transfer', limit: 5, cursor: 'evt9' });
 
-  assert.match(calls[1].sql, /\(ledger, event_id\) </);
-  assert.ok(calls[1].params.includes('evt9'));
+  assert.match(calls[1]!.sql, /\(ledger, event_id\) </);
+  assert.ok(calls[1]!.params.includes('evt9'));
 });
 
 test('results are mapped with each value carrying its declared type', () => {

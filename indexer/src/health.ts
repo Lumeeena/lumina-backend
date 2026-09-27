@@ -13,6 +13,7 @@
  */
 import { createServer, type Server } from 'http';
 import type { Pool } from 'pg';
+import type { Config } from './config';
 import { metricsContentType, renderMetrics } from './metrics';
 import { subsystem } from './logger';
 
@@ -27,12 +28,30 @@ export interface HealthThresholds {
   maxSecondsSinceIndex: number;
   /** Ledgers behind Horizon before reporting unhealthy. */
   maxLagLedgers: number;
+  /**
+   * Seconds after startup within which the service tolerates having never
+   * indexed anything. Defaults to 300s (5 minutes) — long enough for a real
+   * cold start, but prevents a misconfigured service from reporting healthy
+   * indefinitely. Once this window closes and the indexer still has not
+   * indexed anything, the service reports degraded.
+   */
+  startToleranceSeconds: number;
 }
 
 export const DEFAULT_THRESHOLDS: HealthThresholds = {
-  maxSecondsSinceIndex: Number(process.env.HEALTH_MAX_SECONDS_SINCE_INDEX ?? 60),
-  maxLagLedgers: Number(process.env.HEALTH_MAX_LAG_LEDGERS ?? 20),
+  maxSecondsSinceIndex: Number(process.env['HEALTH_MAX_SECONDS_SINCE_INDEX'] ?? 60),
+  maxLagLedgers: Number(process.env['HEALTH_MAX_LAG_LEDGERS'] ?? 20),
+  startToleranceSeconds: Number(process.env['HEALTH_START_TOLERANCE_SECONDS'] ?? 300),
 };
+
+/** One network's position, as a loop maintains it. */
+export interface NetworkState {
+  network: string;
+  latestIndexedLedger: number;
+  latestHorizonLedger: number;
+  /** Unix ms of the last successful index on this network, or null if none yet. */
+  lastIndexedAt: number | null;
+}
 
 export interface IndexerState {
   latestIndexedLedger: number;
@@ -40,6 +59,23 @@ export interface IndexerState {
   /** Unix ms of the last successful index, or null if none yet. */
   lastIndexedAt: number | null;
   startedAt: number;
+  /**
+   * Per-network detail when this process indexes more than one chain.
+   *
+   * The flat fields above describe the network that is worst off — see
+   * `aggregateNetworkStates` — so a single stuck chain cannot be hidden behind
+   * a healthy one. Absent for a single-network deployment.
+   */
+  networks?: NetworkState[] | undefined;
+}
+
+/** Per-network line in a health report. */
+export interface NetworkHealth {
+  network: string;
+  latestIndexedLedger: number;
+  latestHorizonLedger: number;
+  lagLedgers: number;
+  secondsSinceLastIndex: number | null;
 }
 
 export interface HealthReport {
@@ -50,7 +86,151 @@ export interface HealthReport {
   lagLedgers: number;
   secondsSinceLastIndex: number | null;
   database: 'ok' | 'unreachable';
-  checks: { name: string; ok: boolean; detail?: string }[];
+  checks: { name: string; ok: boolean; detail?: string | undefined }[];
+  /** Present when more than one network is indexed. */
+  networks?: NetworkHealth[] | undefined;
+}
+
+export interface DebugNetworkConfiguration {
+  network: string;
+  horizonUrl: string | null;
+  sorobanRpcUrl: string | null;
+  networkPassphrase: string;
+  cursor: number;
+  eventsCursor: number;
+  latestIndexedLedger: number;
+  latestHorizonLedger: number;
+  watchedContracts: string[];
+}
+
+export interface DebugConfiguration {
+  primaryNetwork: string;
+  config: {
+    databaseUrl: string | null;
+    horizonUrl: string | null;
+    pollIntervalMs: number;
+    startLedger: number | null;
+    dbPoolMax: number | null;
+    dbPoolIdleTimeoutMs: number | null;
+    dbPoolConnectionTimeoutMs: number | null;
+    sorobanRpcUrl: string | null;
+    indexedContractIds: string[];
+    registryContractId: string | null;
+    registryReadAccount: string | null;
+    registryNetworkPassphrase: string;
+    registryPollIntervalMs: number;
+    healthPort: number;
+    ledgerRetryAttempts: number;
+    ledgerRetryBaseMs: number;
+    accountCacheTtlMs: number;
+    accountCacheMaxSize: number;
+    eventsSafetyLagLedgers: number;
+    sorobanMinRequestIntervalMs: number;
+    sorobanMaxEventsPerCycle: number;
+    sorobanRetentionWindowLedgers: number;
+  };
+  networks: DebugNetworkConfiguration[];
+}
+
+export type DebugNetworkInput = Omit<DebugNetworkConfiguration, 'horizonUrl' | 'sorobanRpcUrl'> & {
+  horizonUrl: string;
+  sorobanRpcUrl: string | undefined;
+};
+
+/** Expose operational configuration without returning URL credentials or opaque tokens. */
+export function redactEndpoint(value: string | undefined): string | null {
+  if (!value) return null;
+  try {
+    const parsed = new URL(value);
+    const path = parsed.pathname !== '/' ? '/[redacted]' : '';
+    const query = parsed.search ? '?[redacted]' : '';
+    return `${parsed.protocol}//${parsed.host}${path}${query}`;
+  } catch {
+    return null;
+  }
+}
+
+export function buildDebugConfiguration(
+  config: Config,
+  primaryNetwork: string,
+  networks: DebugNetworkInput[]
+): DebugConfiguration {
+  return {
+    primaryNetwork,
+    config: {
+      databaseUrl: redactEndpoint(config.databaseUrl),
+      horizonUrl: redactEndpoint(config.horizonUrl),
+      pollIntervalMs: config.pollIntervalMs,
+      startLedger: config.startLedger ?? null,
+      dbPoolMax: config.dbPoolMax ?? null,
+      dbPoolIdleTimeoutMs: config.dbPoolIdleTimeoutMs ?? null,
+      dbPoolConnectionTimeoutMs: config.dbPoolConnectionTimeoutMs ?? null,
+      sorobanRpcUrl: redactEndpoint(config.sorobanRpcUrl),
+      indexedContractIds: config.indexedContractIds,
+      registryContractId: config.registryContractId ?? null,
+      registryReadAccount: config.registryReadAccount ?? null,
+      registryNetworkPassphrase: config.registryNetworkPassphrase,
+      registryPollIntervalMs: config.registryPollIntervalMs,
+      healthPort: config.healthPort,
+      ledgerRetryAttempts: config.ledgerRetryAttempts,
+      ledgerRetryBaseMs: config.ledgerRetryBaseMs,
+      accountCacheTtlMs: config.accountCacheTtlMs,
+      accountCacheMaxSize: config.accountCacheMaxSize,
+      eventsSafetyLagLedgers: config.eventsSafetyLagLedgers,
+      sorobanMinRequestIntervalMs: config.sorobanMinRequestIntervalMs,
+      sorobanMaxEventsPerCycle: config.sorobanMaxEventsPerCycle,
+      sorobanRetentionWindowLedgers: config.sorobanRetentionWindowLedgers,
+    },
+    networks: networks.map(network => ({
+      ...network,
+      horizonUrl: redactEndpoint(network.horizonUrl),
+      sorobanRpcUrl: redactEndpoint(network.sorobanRpcUrl),
+      watchedContracts: [...new Set(network.watchedContracts)].sort(),
+    })),
+  };
+}
+
+/**
+ * Fold per-network states into the single `IndexerState` the rest of the
+ * health code already works with.
+ *
+ * The flat numbers describe *the worst network*, chosen by never-indexed
+ * first, then the oldest last index, then the largest lag. Averaging or taking
+ * the max over unrelated chains is the bug this avoids: two networks behind by
+ * 100 ledgers each must not look like one network behind by 50, and a chain
+ * that has never indexed must not be papered over by one that indexes every
+ * five seconds.
+ */
+export function aggregateNetworkStates(
+  startedAt: number,
+  entries: NetworkState[]
+): IndexerState {
+  if (entries.length === 0) {
+    return { latestIndexedLedger: 0, latestHorizonLedger: 0, lastIndexedAt: null, startedAt };
+  }
+
+  const lag = (entry: NetworkState): number =>
+    Math.max(0, entry.latestHorizonLedger - entry.latestIndexedLedger);
+
+  const worst = entries.reduce((acc, entry) => {
+    if (entry.lastIndexedAt === null && acc.lastIndexedAt !== null) return entry;
+    if (entry.lastIndexedAt !== null && acc.lastIndexedAt === null) return acc;
+    if (entry.lastIndexedAt !== null && acc.lastIndexedAt !== null && entry.lastIndexedAt < acc.lastIndexedAt) {
+      return entry;
+    }
+    if (entry.lastIndexedAt !== null && acc.lastIndexedAt !== null && entry.lastIndexedAt > acc.lastIndexedAt) {
+      return acc;
+    }
+    return lag(entry) > lag(acc) ? entry : acc;
+  });
+
+  return {
+    latestIndexedLedger: worst.latestIndexedLedger,
+    latestHorizonLedger: worst.latestHorizonLedger,
+    lastIndexedAt: worst.lastIndexedAt,
+    startedAt,
+    networks: entries,
+  };
 }
 
 /**
@@ -88,17 +268,22 @@ export async function buildHealthReport(
 
   const lagLedgers = Math.max(0, state.latestHorizonLedger - state.latestIndexedLedger);
 
+  const uptimeSeconds = (now - state.startedAt) / 1000;
+  const startingTolerance = uptimeSeconds <= thresholds.startToleranceSeconds;
+  const starting = state.lastIndexedAt === null && startingTolerance;
+  const neverIndexedButExpired = state.lastIndexedAt === null && !startingTolerance;
+
   const freshnessOk =
-    secondsSinceLastIndex === null || secondsSinceLastIndex <= thresholds.maxSecondsSinceIndex;
+    secondsSinceLastIndex === null ? !neverIndexedButExpired : secondsSinceLastIndex <= thresholds.maxSecondsSinceIndex;
   checks.push({
     name: 'indexing-freshness',
     ok: freshnessOk,
     detail: freshnessOk
       ? undefined
-      : `no ledger indexed for ${Math.round(secondsSinceLastIndex!)}s (threshold ${thresholds.maxSecondsSinceIndex}s)`,
+      : neverIndexedButExpired
+        ? `no ledger indexed for ${Math.round(uptimeSeconds)}s; start tolerance window closed after ${thresholds.startToleranceSeconds}s`
+        : `no ledger indexed for ${Math.round(secondsSinceLastIndex!)}s (threshold ${thresholds.maxSecondsSinceIndex}s)`,
   });
-
-  const starting = state.lastIndexedAt === null;
 
   // Lag is meaningless before the first ledger lands — at boot the indexer is
   // "behind" by the entire chain — so the check is reported but not counted
@@ -116,15 +301,27 @@ export async function buildHealthReport(
   const failing = checks.some(check => !check.ok);
   const status: HealthReport['status'] = failing ? 'degraded' : starting ? 'starting' : 'ok';
 
+  const networks = state.networks?.map((entry): NetworkHealth => {
+    const age = entry.lastIndexedAt === null ? null : (now - entry.lastIndexedAt) / 1000;
+    return {
+      network: entry.network,
+      latestIndexedLedger: entry.latestIndexedLedger,
+      latestHorizonLedger: entry.latestHorizonLedger,
+      lagLedgers: Math.max(0, entry.latestHorizonLedger - entry.latestIndexedLedger),
+      secondsSinceLastIndex: age,
+    };
+  });
+
   return {
     status,
-    uptimeSeconds: Math.round((now - state.startedAt) / 1000),
+    uptimeSeconds: Math.round(uptimeSeconds),
     latestIndexedLedger: state.latestIndexedLedger,
     latestHorizonLedger: state.latestHorizonLedger,
     lagLedgers,
     secondsSinceLastIndex,
     database,
     checks,
+    ...(networks === undefined ? {} : { networks }),
   };
 }
 
@@ -142,6 +339,7 @@ export function healthStatusCode(report: HealthReport): number {
 export interface HealthServerOptions {
   port: number;
   getState: () => IndexerState;
+  getDebugConfiguration: () => DebugConfiguration;
   pool: Pool | null;
   thresholds?: HealthThresholds;
 }
@@ -160,6 +358,25 @@ export function startHealthServer(options: HealthServerOptions): Server {
           log.error({ err: err instanceof Error ? err.message : err }, 'failed to render metrics');
           res.writeHead(500).end('metrics unavailable');
         });
+      return;
+    }
+
+    if (url === '/debug/config') {
+      if (req.method !== 'GET') {
+        res.writeHead(405, { Allow: 'GET' }).end('method not allowed');
+        return;
+      }
+      try {
+        res.writeHead(200, {
+          'Content-Type': 'application/json',
+          'Cache-Control': 'no-store',
+        });
+        res.end(JSON.stringify(options.getDebugConfiguration(), null, 2));
+      } catch {
+        log.error('failed to render debug configuration');
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'debug configuration unavailable' }));
+      }
       return;
     }
 

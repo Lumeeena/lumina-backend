@@ -17,10 +17,15 @@
  * a project can revise it without a transaction.
  *
  * Usage:
- *   register-schema apply   <schema.json>
- *   register-schema show    <contractId>
- *   register-schema list
- *   register-schema remove  <contractId>
+ *   register-schema [--network <name>] apply   <schema.json>
+ *   register-schema [--network <name>] show    <contractId>
+ *   register-schema [--network <name>] list
+ *   register-schema [--network <name>] remove  <contractId>
+ *
+ * Schemas are per network: the same contract id can decode differently on
+ * mainnet and testnet, and the indexer only reads the rows for the network it
+ * is indexing. Defaults to `--network mainnet` (or the NETWORK environment
+ * variable, which the same flag overrides).
  *
  * Reads DATABASE_URL from the environment.
  */
@@ -28,23 +33,49 @@ import { readFileSync } from 'fs';
 import { createPool, deleteContractSchema, loadContractSchemas, upsertContractSchema } from './db';
 import { parseContractSchema, SchemaValidationError } from './customSchema';
 
-const DATABASE_URL = process.env.DATABASE_URL ?? 'postgresql://localhost:5432/lumina';
+const DATABASE_URL = process.env['DATABASE_URL'] ?? 'postgresql://localhost:5432/lumina';
 
 function usage(): never {
   console.error(
     [
       'Usage:',
-      '  register-schema apply  <schema.json>   Validate and register a schema',
-      '  register-schema show   <contractId>    Print a registered schema',
-      '  register-schema list                   List registered contracts',
-      '  register-schema remove <contractId>    Remove a schema',
+      '  register-schema [--network <name>] apply  <schema.json>   Validate and register a schema',
+      '  register-schema [--network <name>] show   <contractId>    Print a registered schema',
+      '  register-schema [--network <name>] list                   List registered contracts',
+      '  register-schema [--network <name>] remove <contractId>    Remove a schema',
     ].join('\n')
   );
   process.exit(1);
 }
 
+/** Pull `--network <name>` out of the arguments; falls back to NETWORK, then mainnet. */
+function takeNetworkFlag(args: string[]): { network: string; rest: string[] } {
+  const rest: string[] = [];
+  let network = process.env['NETWORK'] ?? 'mainnet';
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i];
+    if (arg === '--network') {
+      const value = args[i + 1];
+      if (!value || value.startsWith('--')) {
+        console.error('--network needs a value');
+        process.exit(1);
+      }
+      network = value;
+      i++;
+      continue;
+    }
+    if (arg?.startsWith('--network=')) {
+      network = arg.slice('--network='.length);
+      continue;
+    }
+    if (arg !== undefined) rest.push(arg);
+  }
+  return { network, rest };
+}
+
 async function main(): Promise<void> {
-  const [command, argument] = process.argv.slice(2);
+  const { network, rest } = takeNetworkFlag(process.argv.slice(2));
+  const [command, argument] = rest;
   if (!command) usage();
 
   const pool = createPool(DATABASE_URL);
@@ -67,9 +98,9 @@ async function main(): Promise<void> {
         // Validated before it touches the database, so a malformed schema is
         // rejected outright rather than stored and skipped later.
         const schema = parseContractSchema(document);
-        await upsertContractSchema(pool, schema);
+        await upsertContractSchema(pool, network, schema);
 
-        console.log(`Registered schema v${schema.version} for ${schema.contractId}`);
+        console.log(`Registered schema v${schema.version} for ${schema.contractId} on ${network}`);
         for (const event of schema.events) {
           const fields = event.fields.map(f => `${f.name}: ${f.type}`).join(', ');
           console.log(`  ${event.name} (topic "${event.topic}") — ${fields}`);
@@ -80,9 +111,9 @@ async function main(): Promise<void> {
 
       case 'show': {
         if (!argument) usage();
-        const schema = (await loadContractSchemas(pool)).get(argument);
+        const schema = (await loadContractSchemas(pool, network)).get(argument);
         if (!schema) {
-          console.error(`No schema registered for ${argument}`);
+          console.error(`No schema registered for ${argument} on ${network}`);
           process.exit(1);
         }
         console.log(JSON.stringify(schema, null, 2));
@@ -90,9 +121,9 @@ async function main(): Promise<void> {
       }
 
       case 'list': {
-        const schemas = await loadContractSchemas(pool);
+        const schemas = await loadContractSchemas(pool, network);
         if (schemas.size === 0) {
-          console.log('No custom schemas registered.');
+          console.log(`No custom schemas registered on ${network}.`);
           break;
         }
         for (const [contractId, schema] of schemas) {
@@ -104,8 +135,8 @@ async function main(): Promise<void> {
 
       case 'remove': {
         if (!argument) usage();
-        await deleteContractSchema(pool, argument);
-        console.log(`Removed schema for ${argument}`);
+        await deleteContractSchema(pool, network, argument);
+        console.log(`Removed schema for ${argument} on ${network}`);
         console.log('Already-decoded rows in custom_events are left in place.');
         break;
       }
