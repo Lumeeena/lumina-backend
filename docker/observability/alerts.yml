@@ -33,7 +33,7 @@ groups:
           severity: warning
         annotations:
           summary: "Horizon is rate limiting us"
-          runbook: "Raise HORIZON_MIN_REQUEST_INTERVAL_MS; see README"
+          runbook: "The adaptive rate limiting will automatically back off. Check lumina_horizon_throttle_interval_ms metric. Consider setting HORIZON_AUTH_TOKEN for higher limits."
 
       - alert: IndexingErrorRateHigh
         expr: rate(lumina_indexing_errors_total[5m]) > 0.05

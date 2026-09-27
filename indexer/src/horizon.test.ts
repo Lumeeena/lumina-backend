@@ -1,8 +1,15 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { getAccount, getLatestLedgerSequence, getLedger, getLedgerTransactions, PAGE_LIMIT } from './horizon';
+import { getLatestLedgerSequence, getLedger, getLedgerTransactions, PAGE_LIMIT, initializeHorizonClient } from './horizon';
 // @ts-expect-error - JSON file imports are enabled at runtime for this test fixture.
 import fixtures from './__fixtures__/horizon.json' assert { type: 'json' };
+
+// Initialize the horizon client with default config for tests
+initializeHorizonClient({
+  minIntervalMs: 100,
+  maxIntervalMs: 10000,
+  tipWeightFactor: 2,
+});
 
 function mockFetchSequence(responses: Array<{ ok: boolean; status?: number; body: unknown }>) {
   let call = 0;
@@ -11,6 +18,9 @@ function mockFetchSequence(responses: Array<{ ok: boolean; status?: number; body
     return {
       ok: res.ok,
       status: res.status ?? 200,
+      headers: {
+        get: () => null,
+      },
       json: async () => res.body,
     };
   }) as unknown as typeof fetch;

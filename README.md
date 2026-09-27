@@ -74,11 +74,25 @@ Subscriptions are served over `graphql-ws` at `ws://localhost:4000/graphql` —
 the same path and port as queries:
 
 ```graphql
-subscription { newTransaction { hash ledger sourceAccount successful } }
-subscription { accountActivity(address: "G…") { id type amount asset } }
+subscription {
+  newTransaction {
+    hash
+    ledger
+    sourceAccount
+    successful
+  }
+}
+subscription {
+  accountActivity(address: "G…") {
+    id
+    type
+    amount
+    asset
+  }
+}
 ```
 
-`accountActivity` matches operations that *touch* the address — `source_account`
+`accountActivity` matches operations that _touch_ the address — `source_account`
 plus the counterparty fields in `details` — not merely those it submitted, so
 being paid counts.
 
@@ -103,8 +117,8 @@ customEvents(
 ```
 
 Registration is a CLI operation against the database, so a schema can be
-iterated on without a transaction, and the Registry keeps deciding *which*
-contracts are indexed rather than *how* they decode:
+iterated on without a transaction, and the Registry keeps deciding _which_
+contracts are indexed rather than _how_ they decode:
 
 ```bash
 npm run register-schema -w @lumina/indexer -- apply transfer-schema.json
@@ -236,30 +250,48 @@ Configuration is shared with the GraphQL server and described in full in
 than one chain; leave it unset and the flat variables below describe a single
 network, exactly as before.
 
-| Variable | Default | Notes |
-|---|---|---|
-| `NETWORKS` | unset | Comma-separated networks to index, in declaration order (`mainnet`, `testnet`, `futurenet`). One polling loop runs per network |
-| `PRIMARY_NETWORK` | first of `NETWORKS` | Which network registry discovery and the default `network` argument use |
-| `<NAME>_HORIZON_URL` | — | Required for every name in `NETWORKS`, e.g. `MAINNET_HORIZON_URL` |
-| `<NAME>_SOROBAN_RPC_URL` | unset | Per-network Soroban RPC; unset disables contract events for that network |
-| `<NAME>_NETWORK_PASSPHRASE` | per network name | Passphrase the network's transactions are signed against |
-| `<NAME>_INDEXED_CONTRACT_IDS` | `INDEXED_CONTRACT_IDS` | Per-network override of the shared contract list |
-| `HORIZON_URL` | `https://horizon.stellar.org` | Single-network deployments: the one Horizon base URL (ignored when `NETWORKS` is set) |
-| `DATABASE_URL` | `postgresql://localhost:5432/lumina` | |
-| `DB_POOL_MAX` | `10` | Database connection pool size. Postgres caps total connections via `max_connections` (default 100). The combined pool size of all indexer and graphql-server replicas plus other clients must stay under this. |
-| `DB_POOL_IDLE_TIMEOUT` | `10000` | Milliseconds before an idle connection is closed |
-| `DB_POOL_CONNECTION_TIMEOUT` | `0` | Milliseconds to wait for a connection before failing (0 = wait forever) |
-| `START_LEDGER` | latest | Only used when the DB is empty |
-| `POLL_INTERVAL_MS` | `5000` | |
-| `ACCOUNT_CACHE_TTL_MS` | `300000` | Milliseconds to cache account data. Longer TTLs reduce Horizon requests but can leave indexed balances stale for longer; shorter TTLs keep balances fresher at the cost of more Horizon load |
-| `LEDGER_RETRY_ATTEMPTS` | `3` | How many times a ledger whose fetch/index fails is retried before the cursor stops at it. More attempts ride out a longer Horizon outage but hold the cursor back while retrying; fewer move the cursor on sooner, at the cost of more history gaps |
-| `LEDGER_RETRY_BASE_MS` | `500` | Delay before the first retry in milliseconds; doubles each attempt, so this also sets the maximum wait between attempts |
-| `HORIZON_MIN_REQUEST_INTERVAL_MS` | `100` | Minimum spacing between outbound Horizon requests, to avoid bursts tripping the per-IP rate limit |
-| `SOROBAN_RPC_URL` | unset | Single-network deployments: enables Soroban contract event indexing |
-| `INDEXED_CONTRACT_IDS` | unset | Comma-separated contract IDs to index events for; requires a Soroban RPC URL |
-| `REGISTRY_CONTRACT_ID` | unset | Lumina Registry contract to poll for additional contract IDs (primary network only); requires a Soroban RPC URL + `REGISTRY_READ_ACCOUNT` |
-| `REGISTRY_READ_ACCOUNT` | unset | Any funded G... account used to simulate the registry's read calls — no secret key needed, simulation doesn't sign or submit |
-| `REGISTRY_NETWORK_PASSPHRASE` | the primary network's passphrase | Overrides the passphrase used for registry simulation |
+| Variable                          | Default                              | Notes                                                                                                                                                                                                                                               |
+| --------------------------------- | ------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `NETWORKS`                        | unset                                | Comma-separated networks to index, in declaration order (`mainnet`, `testnet`, `futurenet`). One polling loop runs per network                                                                                                                      |
+| `PRIMARY_NETWORK`                 | first of `NETWORKS`                  | Which network registry discovery and the default `network` argument use                                                                                                                                                                             |
+| `<NAME>_HORIZON_URL`              | —                                    | Required for every name in `NETWORKS`, e.g. `MAINNET_HORIZON_URL`                                                                                                                                                                                   |
+| `<NAME>_SOROBAN_RPC_URL`          | unset                                | Per-network Soroban RPC; unset disables contract events for that network                                                                                                                                                                            |
+| `<NAME>_NETWORK_PASSPHRASE`       | per network name                     | Passphrase the network's transactions are signed against                                                                                                                                                                                            |
+| `<NAME>_INDEXED_CONTRACT_IDS`     | `INDEXED_CONTRACT_IDS`               | Per-network override of the shared contract list                                                                                                                                                                                                    |
+| `HORIZON_URL`                     | `https://horizon.stellar.org`        | Single-network deployments: the one Horizon base URL (ignored when `NETWORKS` is set)                                                                                                                                                               |
+| `DATABASE_URL`                    | `postgresql://localhost:5432/lumina` |                                                                                                                                                                                                                                                     |
+| `DB_POOL_MAX`                     | `10`                                 | Database connection pool size. Postgres caps total connections via `max_connections` (default 100). The combined pool size of all indexer and graphql-server replicas plus other clients must stay under this.                                      |
+| `DB_POOL_IDLE_TIMEOUT`            | `10000`                              | Milliseconds before an idle connection is closed                                                                                                                                                                                                    |
+| `DB_POOL_CONNECTION_TIMEOUT`      | `0`                                  | Milliseconds to wait for a connection before failing (0 = wait forever)                                                                                                                                                                             |
+| `START_LEDGER`                    | latest                               | Only used when the DB is empty                                                                                                                                                                                                                      |
+| `POLL_INTERVAL_MS`                | `5000`                               |                                                                                                                                                                                                                                                     |
+| `LEDGER_RETRY_ATTEMPTS`           | `3`                                  | How many times a ledger whose fetch/index fails is retried before the cursor stops at it. More attempts ride out a longer Horizon outage but hold the cursor back while retrying; fewer move the cursor on sooner, at the cost of more history gaps |
+| `LEDGER_RETRY_BASE_MS`            | `500`                                | Delay before the first retry in milliseconds; doubles each attempt, so this also sets the maximum wait between attempts                                                                                                                             |
+| `HORIZON_MIN_REQUEST_INTERVAL_MS` | `100`                                | Minimum spacing between outbound Horizon requests; adapts automatically on 429 responses (see adaptive rate limiting below)                                                                                                                         |
+| `HORIZON_MAX_REQUEST_INTERVAL_MS` | `10000`                              | Maximum spacing between Horizon requests when backing off from rate limits                                                                                                                                                                          |
+| `HORIZON_AUTH_TOKEN`              | unset                                | Optional Bearer token for authenticated Horizon endpoints; allows higher rate limits with paid or self-hosted providers. Never logged                                                                                                               |
+| `HORIZON_TIP_WEIGHT_FACTOR`       | `2`                                  | Relative priority factor for tip vs backfill requests; tip requests get weighted higher to prevent backfill from delaying real-time indexing                                                                                                        |
+| `SOROBAN_RPC_URL`                 | unset                                | Single-network deployments: enables Soroban contract event indexing                                                                                                                                                                                 |
+| `INDEXED_CONTRACT_IDS`            | unset                                | Comma-separated contract IDs to index events for; requires a Soroban RPC URL                                                                                                                                                                        |
+| `REGISTRY_CONTRACT_ID`            | unset                                | Lumina Registry contract to poll for additional contract IDs (primary network only); requires a Soroban RPC URL + `REGISTRY_READ_ACCOUNT`                                                                                                           |
+| `REGISTRY_READ_ACCOUNT`           | unset                                | Any funded G... account used to simulate the registry's read calls — no secret key needed, simulation doesn't sign or submit                                                                                                                        |
+| `REGISTRY_NETWORK_PASSPHRASE`     | the primary network's passphrase     | Overrides the passphrase used for registry simulation                                                                                                                                                                                               |
+
+#### Adaptive rate limiting
+
+The indexer automatically adapts its Horizon request rate to avoid 429 responses:
+
+- **Backoff on 429**: Doubles the request interval (up to `HORIZON_MAX_REQUEST_INTERVAL_MS`) when rate-limited
+- **Retry-After support**: Respects the `Retry-After` header when present
+- **Gradual recovery**: After 10 consecutive successful requests, reduces the interval by 10% toward `HORIZON_MIN_REQUEST_INTERVAL_MS`
+- **Separate budgets**: Tip and backfill traffic use separate throttles; backfill yields when tip requests are queued, preventing backfill from delaying real-time indexing
+- **Authentication**: Set `HORIZON_AUTH_TOKEN` to use authenticated endpoints with higher limits; the token is never logged or exposed via the debug endpoint
+
+These metrics expose the throttle state:
+
+- `lumina_horizon_throttle_interval_ms` — Current request interval by purpose (tip/backfill)
+- `lumina_horizon_queued_requests` — Requests waiting in the throttle queue
+- `lumina_horizon_wait_time_seconds` — Time spent waiting before making a request
 
 Soroban event indexing and registry discovery are both entirely opt-in at
 the code level — the indexer behaves exactly as it did before these
@@ -281,14 +313,14 @@ npm run dev
 
 ### Indexer observability environment variables
 
-| Variable | Default |
-|---|---|
-| `HEALTH_PORT` | `9090` — port serving `/health`, `/ready` and `/metrics` |
-| `HEALTH_MAX_SECONDS_SINCE_INDEX` | `60` — stall threshold before `/health` reports 503 |
-| `HEALTH_MAX_LAG_LEDGERS` | `20` — lag threshold before `/health` reports 503 |
-| `LOG_LEVEL` | `info` |
-| `LOG_PRETTY` | unset — `true` for human-readable local logs |
-| `LOG_SAMPLE_RATE` | `0.01` — fraction of routine success logs emitted (see below) |
+| Variable                         | Default                                                       |
+| -------------------------------- | ------------------------------------------------------------- |
+| `HEALTH_PORT`                    | `9090` — port serving `/health`, `/ready` and `/metrics`      |
+| `HEALTH_MAX_SECONDS_SINCE_INDEX` | `60` — stall threshold before `/health` reports 503           |
+| `HEALTH_MAX_LAG_LEDGERS`         | `20` — lag threshold before `/health` reports 503             |
+| `LOG_LEVEL`                      | `info`                                                        |
+| `LOG_PRETTY`                     | unset — `true` for human-readable local logs                  |
+| `LOG_SAMPLE_RATE`                | `0.01` — fraction of routine success logs emitted (see below) |
 
 Routine success logs — one per indexed ledger, plus one per contract-event and
 custom-decode batch — are sampled with `LOG_SAMPLE_RATE`, because at a 5s poll
@@ -309,26 +341,26 @@ indexer from starting.
 
 ### GraphQL server environment variables
 
-| Variable | Default |
-|---|---|
-| `DATABASE_URL` | `postgresql://localhost:5432/lumina` — primary; used for auth, health, metrics, exports and `LISTEN` |
-| `READ_DATABASE_URL` | unset — optional read-only replica used for GraphQL queries. When unset (or equal to `DATABASE_URL`) every query uses the primary, so no separate connection is opened. See `docs/DATABASE_OPERATIONS.md` for the replication-lag caveats. |
-| `DB_POOL_MAX` | `10` | Database connection pool size. Must be sized against Postgres `max_connections` and other service instances. |
-| `DB_POOL_IDLE_TIMEOUT` | `10000` | Milliseconds before an idle connection is closed |
-| `DB_POOL_CONNECTION_TIMEOUT` | `0` | Milliseconds to wait for a connection before failing (0 = wait forever) |
-| `PORT` | `4000` |
-| `LOG_LEVEL` | `info` — `debug` for per-ledger detail |
-| `LOG_PRETTY` | unset — `true` for human-readable local logs |
-| `MAX_SUBSCRIPTIONS` | `500` — concurrent subscriptions before new ones are refused |
-| `SUBSCRIPTION_QUEUE_LIMIT` | `64` — notifications buffered per subscriber before the oldest are dropped |
-| `ALLOW_ANONYMOUS_ACCESS` | `true` — set `false` to require an API key on every query |
-| `API_KEY_HEADER` | `x-api-key` — header the key is read from |
-| `NETWORKS` | unset — same scheme as the indexer; every query takes an optional `network` argument naming one of them |
-| `PRIMARY_NETWORK` | first of `NETWORKS` — which network serves a request that does not name one |
-| `PERSISTED_QUERIES` | `true` — automatic persisted queries; set `false` to refuse hash-only requests |
-| `PERSISTED_QUERIES_TTL_SECONDS` | `604800` | How long a registered hash stays cached (in-memory; a restart empties it) |
-| `LATEST_LEDGER_CACHE_TTL_MS` | `4000` | Milliseconds to cache an indexed `latestLedger` result; Horizon fallback results are never cached |
-| `HORIZON_REQUEST_TIMEOUT_MS` | `2000` | Per-request timeout for GraphQL Horizon fallbacks |
+| Variable                        | Default                                                                                                                                                                                                                                    |
+| ------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------ |
+| `DATABASE_URL`                  | `postgresql://localhost:5432/lumina` — primary; used for auth, health, metrics, exports and `LISTEN`                                                                                                                                       |
+| `READ_DATABASE_URL`             | unset — optional read-only replica used for GraphQL queries. When unset (or equal to `DATABASE_URL`) every query uses the primary, so no separate connection is opened. See `docs/DATABASE_OPERATIONS.md` for the replication-lag caveats. |
+| `DB_POOL_MAX`                   | `10`                                                                                                                                                                                                                                       | Database connection pool size. Must be sized against Postgres `max_connections` and other service instances. |
+| `DB_POOL_IDLE_TIMEOUT`          | `10000`                                                                                                                                                                                                                                    | Milliseconds before an idle connection is closed                                                             |
+| `DB_POOL_CONNECTION_TIMEOUT`    | `0`                                                                                                                                                                                                                                        | Milliseconds to wait for a connection before failing (0 = wait forever)                                      |
+| `PORT`                          | `4000`                                                                                                                                                                                                                                     |
+| `LOG_LEVEL`                     | `info` — `debug` for per-ledger detail                                                                                                                                                                                                     |
+| `LOG_PRETTY`                    | unset — `true` for human-readable local logs                                                                                                                                                                                               |
+| `MAX_SUBSCRIPTIONS`             | `500` — concurrent subscriptions before new ones are refused                                                                                                                                                                               |
+| `SUBSCRIPTION_QUEUE_LIMIT`      | `64` — notifications buffered per subscriber before the oldest are dropped                                                                                                                                                                 |
+| `ALLOW_ANONYMOUS_ACCESS`        | `true` — set `false` to require an API key on every query                                                                                                                                                                                  |
+| `API_KEY_HEADER`                | `x-api-key` — header the key is read from                                                                                                                                                                                                  |
+| `NETWORKS`                      | unset — same scheme as the indexer; every query takes an optional `network` argument naming one of them                                                                                                                                    |
+| `PRIMARY_NETWORK`               | first of `NETWORKS` — which network serves a request that does not name one                                                                                                                                                                |
+| `PERSISTED_QUERIES`             | `true` — automatic persisted queries; set `false` to refuse hash-only requests                                                                                                                                                             |
+| `PERSISTED_QUERIES_TTL_SECONDS` | `604800`                                                                                                                                                                                                                                   | How long a registered hash stays cached (in-memory; a restart empties it)                                    |
+| `LATEST_LEDGER_CACHE_TTL_MS`    | `4000`                                                                                                                                                                                                                                     | Milliseconds to cache an indexed `latestLedger` result; Horizon fallback results are never cached            |
+| `HORIZON_REQUEST_TIMEOUT_MS`    | `2000`                                                                                                                                                                                                                                     | Per-request timeout for GraphQL Horizon fallbacks                                                            |
 
 GraphQL account fallbacks are limited to four concurrent Horizon requests and
 negative account results are cached in-process for 30 seconds. The
@@ -340,13 +372,13 @@ frees its slot. Past it, a new subscription is refused with a clear error rather
 than degrading every existing one.
 
 `SUBSCRIPTION_QUEUE_LIMIT` bounds what one stalled client — a paused browser
-tab, a wedged socket — can accumulate in the server's heap. Past it the *oldest*
+tab, a wedged socket — can accumulate in the server's heap. Past it the _oldest_
 notifications are dropped, because on a live feed a client catching up wants the
 head of the stream, not a replay of a backlog it no longer cares about.
 
 `ALLOW_ANONYMOUS_ACCESS` defaults to `true` because that is the state the API is
 in today: every existing client is anonymous, and introducing keys must not break
-any of them. An unrecognised value resolves to *false* rather than `true`, so a
+any of them. An unrecognised value resolves to _false_ rather than `true`, so a
 typo in a security switch cannot silently leave the API open.
 
 `PERSISTED_QUERIES` decides whether a client may send the SHA-256 of a query
@@ -383,7 +415,7 @@ Three properties of this layer are load-bearing:
   digest is not the secret, so this is a second line of defence rather than the
   primary protection — SHA-256 preimage-resistance is what actually protects a
   leaked `api_keys` table. What it buys is that the accept/reject decision does
-  not depend on *where* two values first differ.
+  not depend on _where_ two values first differ.
 - **A request that cannot be attributed never reaches a resolver.** The
   middleware runs ahead of the body parser as well as the GraphQL layer, so an
   unauthenticated caller cannot make the server buffer a payload, and a 401 comes
@@ -403,17 +435,17 @@ needs its own work before `ALLOW_ANONYMOUS_ACCESS=false` is a complete lock-down
 
 Both services expose Prometheus metrics and a real health endpoint. `docker
 compose ps` reports accurate health rather than "running", because the checks
-measure *progress* rather than liveness — a polling loop that is up and no
+measure _progress_ rather than liveness — a polling loop that is up and no
 longer writing ledgers is the failure that actually happens, and it is
 indistinguishable from a healthy one without this.
 
-| Endpoint | Service |
-| --- | --- |
-| `http://localhost:4000/health` | GraphQL server — runs a real `SELECT 1` |
-| `http://localhost:4000/metrics` | GraphQL server |
-| `http://localhost:9090/health` | Indexer — 503 once indexing stalls |
-| `http://localhost:9090/ready` | Indexer — 503 until the first ledger lands |
-| `http://localhost:9090/metrics` | Indexer |
+| Endpoint                        | Service                                    |
+| ------------------------------- | ------------------------------------------ |
+| `http://localhost:4000/health`  | GraphQL server — runs a real `SELECT 1`    |
+| `http://localhost:4000/metrics` | GraphQL server                             |
+| `http://localhost:9090/health`  | Indexer — 503 once indexing stalls         |
+| `http://localhost:9090/ready`   | Indexer — 503 until the first ledger lands |
+| `http://localhost:9090/metrics` | Indexer                                    |
 
 Run the local stack with Prometheus and a provisioned Grafana dashboard:
 
@@ -436,15 +468,15 @@ Thresholds live in one place — `docker/observability/alerts.yml` — and the
 services' own health checks mirror them, so a page, a red container and a red
 dashboard panel never disagree.
 
-| Condition | Threshold | Severity |
-| --- | --- | --- |
-| No ledger indexed | > 60s | critical |
-| Behind Horizon | > 20 ledgers for 5m | warning |
-| Horizon 429 rate | > 0.1/s for 5m | warning |
-| Indexing errors | > 0.05/s for 10m | warning |
-| Queries waiting on a DB connection | any, for 5m | warning |
-| LISTEN connection down | > 5m | warning |
-| GraphQL error ratio | > 5% for 10m | warning |
+| Condition                          | Threshold           | Severity |
+| ---------------------------------- | ------------------- | -------- |
+| No ledger indexed                  | > 60s               | critical |
+| Behind Horizon                     | > 20 ledgers for 5m | warning  |
+| Horizon 429 rate                   | > 0.1/s for 5m      | warning  |
+| Indexing errors                    | > 0.05/s for 10m    | warning  |
+| Queries waiting on a DB connection | any, for 5m         | warning  |
+| LISTEN connection down             | > 5m                | warning  |
+| GraphQL error ratio                | > 5% for 10m        | warning  |
 
 Both indexer thresholds are configurable with
 `HEALTH_MAX_SECONDS_SINCE_INDEX` and `HEALTH_MAX_LAG_LEDGERS`.
@@ -454,10 +486,10 @@ Both indexer thresholds are configurable with
 1. **Check whether it is Horizon rate limiting.** Look at
    `lumina_horizon_requests_total{status="429"}` — this is the metric the whole
    layer exists for, because a sustained 429 rate silently breaks account
-   lookups and used to be visible only in raw logs. If it is non-zero, raise
-   `HORIZON_MIN_REQUEST_INTERVAL_MS` (the default of 1000ms is already
-   conservative for anonymous access; public Horizon 429s even at 10 req/sec
-   sustained).
+   lookups and used to be visible only in raw logs. If it is non-zero, the
+   adaptive rate limiting will automatically back off and recover. You can also
+   manually adjust `HORIZON_MIN_REQUEST_INTERVAL_MS` and `HORIZON_MAX_REQUEST_INTERVAL_MS`
+   if needed, or use `HORIZON_AUTH_TOKEN` for authenticated access with higher limits.
 2. **Check whether the indexer is writing at all.**
    `time() - lumina_last_successful_index_timestamp_seconds` climbing without
    bound means the loop is wedged rather than slow. `curl localhost:9090/health`
@@ -484,6 +516,7 @@ clients are hitting the `MAX_SUBSCRIPTIONS` ceiling.
 ### Database Backup & Restore Runbook
 
 The indexer records full historical ledger state in PostgreSQL that cannot be reconstructed from chain tip alone. See [docs/DATABASE_RESTORE_RUNBOOK.md](docs/DATABASE_RESTORE_RUNBOOK.md) for the operational runbook covering:
+
 - Backup strategy, snapshot isolation, and recommended cadence
 - Step-by-step restoration procedure and expected duration benchmarks
 - Indexer startup catch-up behavior against restored databases

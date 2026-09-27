@@ -159,29 +159,31 @@ includes each network's ledger cursors and effective watched-contract set.
 
 ### Indexer (`indexer/.env` or shell export)
 
-| Variable | Default | Purpose |
-|---|---|---|
-| `DATABASE_URL` | `postgresql://localhost:5432/lumina` | PostgreSQL connection |
-| `NETWORKS` | unset | Comma-separated networks to index (e.g. `mainnet,testnet`); each needs `<NAME>_HORIZON_URL`. See [`MULTI_NETWORK.md`](MULTI_NETWORK.md) |
-| `HORIZON_URL` | `https://horizon.stellar.org` | Mainnet Horizon API (change for testnet). Single-network deployments only — ignored when `NETWORKS` is set |
-| `START_LEDGER` | Latest ledger | Initial ledger to index; useful for backfilling |
-| `POLL_INTERVAL_MS` | `5000` | Delay between ledger polls |
-| `HORIZON_MIN_REQUEST_INTERVAL_MS` | `100` | Minimum spacing between Horizon requests (raises if 429 rate-limit errors appear) |
-| `HEALTH_PORT` | `9090` | Port for indexer `/health`, `/metrics`, and `/debug/config` endpoints |
-| `LOG_LEVEL` | `info` | `debug` for verbose per-ledger logging |
-| `LOG_PRETTY` | unset | Set to `true` for human-readable logs |
+| Variable                          | Default                              | Purpose                                                                                                                                 |
+| --------------------------------- | ------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------- |
+| `DATABASE_URL`                    | `postgresql://localhost:5432/lumina` | PostgreSQL connection                                                                                                                   |
+| `NETWORKS`                        | unset                                | Comma-separated networks to index (e.g. `mainnet,testnet`); each needs `<NAME>_HORIZON_URL`. See [`MULTI_NETWORK.md`](MULTI_NETWORK.md) |
+| `HORIZON_URL`                     | `https://horizon.stellar.org`        | Mainnet Horizon API (change for testnet). Single-network deployments only — ignored when `NETWORKS` is set                              |
+| `START_LEDGER`                    | Latest ledger                        | Initial ledger to index; useful for backfilling                                                                                         |
+| `POLL_INTERVAL_MS`                | `5000`                               | Delay between ledger polls                                                                                                              |
+| `HORIZON_MIN_REQUEST_INTERVAL_MS` | `100`                                | Minimum spacing between Horizon requests; adapts automatically on 429                                                                   |
+| `HORIZON_MAX_REQUEST_INTERVAL_MS` | `10000`                              | Maximum interval when backing off from rate limits                                                                                      |
+| `HORIZON_AUTH_TOKEN`              | unset                                | Bearer token for authenticated Horizon (never logged)                                                                                   |
+| `HEALTH_PORT`                     | `9090`                               | Port for `/health` endpoint                                                                                                             |
+| `LOG_LEVEL`                       | `info`                               | `debug` for verbose per-ledger logging                                                                                                  |
+| `LOG_PRETTY`                      | unset                                | Set to `true` for human-readable logs                                                                                                   |
 
 ### GraphQL Server (`graphql-server/.env` or shell export)
 
-| Variable | Default | Purpose |
-|---|---|---|
-| `DATABASE_URL` | `postgresql://localhost:5432/lumina` | Same PostgreSQL connection |
-| `PORT` | `4000` | HTTP port for Apollo server |
-| `LOG_LEVEL` | `info` | `debug` for per-request GraphQL detail |
-| `LOG_PRETTY` | unset | Set to `true` for human-readable logs |
-| `MAX_SUBSCRIPTIONS` | `500` | Max concurrent GraphQL subscriptions |
-| `NETWORKS` | unset | Same scheme as the indexer; queries then accept a `network` argument |
-| `PERSISTED_QUERIES` | `true` | Automatic persisted queries; `false` refuses hash-only requests |
+| Variable            | Default                              | Purpose                                                              |
+| ------------------- | ------------------------------------ | -------------------------------------------------------------------- |
+| `DATABASE_URL`      | `postgresql://localhost:5432/lumina` | Same PostgreSQL connection                                           |
+| `PORT`              | `4000`                               | HTTP port for Apollo server                                          |
+| `LOG_LEVEL`         | `info`                               | `debug` for per-request GraphQL detail                               |
+| `LOG_PRETTY`        | unset                                | Set to `true` for human-readable logs                                |
+| `MAX_SUBSCRIPTIONS` | `500`                                | Max concurrent GraphQL subscriptions                                 |
+| `NETWORKS`          | unset                                | Same scheme as the indexer; queries then accept a `network` argument |
+| `PERSISTED_QUERIES` | `true`                               | Automatic persisted queries; `false` refuses hash-only requests      |
 
 ## Switching to Testnet
 
@@ -294,7 +296,7 @@ Then:
 
 1. **Check Horizon connectivity:** `curl https://horizon.stellar.org/ledgers`
 2. **Check database writes:** Verify `ledgers` table is growing: `psql $DATABASE_URL -c "SELECT MAX(sequence) FROM ledgers"`
-3. **Check for 429s:** Look for "horizon rate limited" in logs; if present, raise `HORIZON_MIN_REQUEST_INTERVAL_MS` to 500–1000.
+3. **Check for 429s:** Look for "horizon rate limited" in logs. The adaptive rate limiting will automatically back off, but you can also set `HORIZON_AUTH_TOKEN` for authenticated access.
 4. **Check database performance:** If `psql` is slow, the pool may be exhausted; check `LOG_LEVEL=debug` logs for pool warnings.
 
 ### "GraphQL queries return empty even though indexer is running"
