@@ -13,6 +13,13 @@ API consumers: start with [docs/API_GUIDE.md](docs/API_GUIDE.md), and see
 Bulk-export consumers: [docs/EXPORT_FORMATS.md](docs/EXPORT_FORMATS.md)
 documents every exported column and its unit, with a worked example.
 
+Contributors: the reasoning behind the design — why subscriptions run over
+Postgres `LISTEN`/`NOTIFY` rather than a broker, why decoded contract events
+live in one shared JSONB table rather than a table per contract, why memo search
+is trigram rather than `tsvector` — is in [docs/adr/](docs/adr/). Each record
+states the context, the options that were rejected and why, and the costs that
+were accepted.
+
 ## Structure
 
 ```
