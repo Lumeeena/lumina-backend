@@ -156,6 +156,18 @@ CREATE TABLE IF NOT EXISTS accounts (
     CONSTRAINT accounts_num_sponsoring_check  CHECK (num_sponsoring >= 0)
 );
 
+-- Durable outbox for account state lookups. It is written with each ledger so
+-- committed ledger data always has recoverable account refresh work.
+CREATE TABLE IF NOT EXISTS account_refresh_queue (
+    network                 TEXT NOT NULL,
+    address                 TEXT NOT NULL,
+    last_requested_ledger   BIGINT NOT NULL,
+    queued_at               TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (network, address)
+);
+CREATE INDEX idx_account_refresh_queue_pending
+    ON account_refresh_queue (network, queued_at);
+
 -- ─── Contract Events (Soroban) ────────────────────────────────────────────────
 
 CREATE TABLE IF NOT EXISTS contract_events (

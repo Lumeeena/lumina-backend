@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { getLatestLedgerSequence, getLedger, getLedgerTransactions, PAGE_LIMIT } from './horizon';
+import { getAccount, getLatestLedgerSequence, getLedger, getLedgerTransactions, PAGE_LIMIT } from './horizon';
 // @ts-expect-error - JSON file imports are enabled at runtime for this test fixture.
 import fixtures from './__fixtures__/horizon.json' assert { type: 'json' };
 
@@ -62,4 +62,17 @@ test('getLedgerTransactions stops after a single short page with no next link', 
   ]);
   const txs = await getLedgerTransactions('https://horizon.example.com', 100);
   assert.equal(txs.length, 1);
+});
+
+test('getAccount returns null when Horizon reports an unknown account', async () => {
+  mockFetchSequence([{ ok: false, status: 404, body: {} }]);
+  assert.equal(await getAccount('https://horizon.example.com', 'G-missing'), null);
+});
+
+test('getAccount throws on transient HTTP failures so queued refreshes can retry', async () => {
+  mockFetchSequence([{ ok: false, status: 429, body: {} }]);
+  await assert.rejects(
+    () => getAccount('https://horizon.example.com', 'G-rate-limited'),
+    /status 429/
+  );
 });

@@ -69,6 +69,18 @@ index has been removed based on unobserved production usage. Run the report
 against a representative deployment and attach its output before deciding on
 any unused-index removal.
 
+## Asynchronous account refreshes
+
+Ledger, transaction, and operation rows are committed together with durable
+account-refresh intents in `account_refresh_queue`. Horizon account lookups run
+after that commit, so slow account responses do not delay ledger indexing. The
+worker upserts account state and removes the exact queue request in one database
+transaction; transient failures stay queued and are retried. On restart, the
+worker scans the queue for pending requests. This is at-least-once work: a crash
+after the Horizon response but before the account transaction commits may cause
+the lookup to run again, but cannot lose the refresh. After applying migration
+008, rerun `db/roles.sql` to grant the indexer its scoped queue privileges.
+
 ## Bulk export
 
 There are two export formats, and they cover different tables. Both are
