@@ -11,7 +11,13 @@ test('loads migrations in order and expands initial schema include', () => {
     '006_partition_operations', '007_drop_redundant_api_key_index', '007_networks',
   ]);
   assert.match(migrations[0].sql, /CREATE TABLE IF NOT EXISTS ledgers/);
+  assert.match(migrations[0].sql, /PRIMARY KEY \(id, ledger, network\)/);
   assert.doesNotMatch(migrations[0].sql, /^\\ir/m);
+
+  const networks = migrations.find(migration => migration.version === '007_networks');
+  assert.ok(networks);
+  assert.match(networks?.sql, /ALTER TABLE operations ADD PRIMARY KEY \(id, ledger, network\)/);
+  assert.match(networks?.sql, /FOREIGN KEY \(transaction_hash, network\) REFERENCES transactions \(hash, network\)/);
 });
 
 test('migration status refuses a later migration when an earlier one is pending', async () => {

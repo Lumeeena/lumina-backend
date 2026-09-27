@@ -20,6 +20,8 @@ export interface Config {
   dbPoolConnectionTimeoutMs: number | undefined;
   sorobanRpcUrl: string | undefined;
   indexedContractIds: string[];
+  /** Seed LedgerKey XDRs (base64) to poll contract storage for, before any are discovered. */
+  indexedContractStorageKeys: string[];
   registryContractId: string | undefined;
   registryReadAccount: string | undefined;
   registryNetworkPassphrase: string;
@@ -138,6 +140,10 @@ export function loadConfig(): Config {
       .split(',')
       .map(id => id.trim())
       .filter(Boolean),
+    indexedContractStorageKeys: (process.env['INDEXED_CONTRACT_STORAGE_KEYS'] ?? '')
+      .split(',')
+      .map(key => key.trim())
+      .filter(Boolean),
     registryContractId: optionalString('REGISTRY_CONTRACT_ID'),
     registryReadAccount: optionalString('REGISTRY_READ_ACCOUNT'),
     registryNetworkPassphrase: stringWithDefault('REGISTRY_NETWORK_PASSPHRASE', Networks.TESTNET),
@@ -150,7 +156,7 @@ export function loadConfig(): Config {
     // see the indexer environment-variable table in the README.
     ledgerRetryAttempts: intWithDefault('LEDGER_RETRY_ATTEMPTS', 3, 1),
     ledgerRetryBaseMs: intWithDefault('LEDGER_RETRY_BASE_MS', 500, 1),
-    accountCacheTtlMs: 5 * 60 * 1000,
+    accountCacheTtlMs: intWithDefault('ACCOUNT_CACHE_TTL_MS', 5 * 60 * 1000, 1),
     accountCacheMaxSize: 50_000,
     eventsSafetyLagLedgers: 3,
     sorobanMinRequestIntervalMs: intWithDefault('SOROBAN_MIN_REQUEST_INTERVAL_MS', 100, 1),
@@ -195,6 +201,7 @@ export function loadConfig(): Config {
       dbPoolConnectionTimeoutMs: config.dbPoolConnectionTimeoutMs,
       sorobanRpcUrl: config.sorobanRpcUrl,
       indexedContractIds: config.indexedContractIds,
+      indexedContractStorageKeys: config.indexedContractStorageKeys,
       registryContractId: config.registryContractId,
       registryReadAccount: config.registryReadAccount,
       registryNetworkPassphrase: config.registryNetworkPassphrase,

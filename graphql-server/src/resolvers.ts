@@ -3,6 +3,7 @@ import {
   getAccountFromDb,
   getAccountOperations,
   getAccountTransactions,
+  getContractStorageEntries,
   getEventsByContract,
   getLatestLedgerFromDb,
   getLedgerBySequence,
@@ -22,6 +23,7 @@ import { getIndexerStatus } from './freshness';
 import { getNetworks, resolveNetworkArgument, type NetworkConfig, type NetworkRegistry } from './networks';
 import type { LedgerNotifier } from './pubsub';
 import { ANONYMOUS_CALLER, type ApiCaller } from './auth';
+import { computeBalanceHistory } from './balanceHistory';
 
 export interface BaseContext {
   pool: Pool;
@@ -251,6 +253,37 @@ export const resolvers = {
       };
     },
 
+    async contractStorageEntries(
+      _: unknown,
+      args: {
+        network?: string | null;
+        contractId: string;
+        durability?: string | null;
+        keyPrefix?: string | null;
+        limit?: number;
+        cursor?: string | null;
+      },
+      ctx: Context
+    ) {
+      const network = networkArgument(args, ctx);
+      const limit = args.limit ?? 20;
+      const items = await getContractStorageEntries(ctx.pool, {
+        network: network.name,
+        contractId: args.contractId,
+        durability: args.durability ?? null,
+        keyPrefix: args.keyPrefix ?? null,
+        limit,
+        cursor: args.cursor ?? null,
+      });
+      return {
+        items,
+        pageInfo: {
+          hasNextPage: items.length === limit,
+          cursor: items.at(-1)?.key ?? null,
+        },
+      };
+    },
+
     async latestLedger(_: unknown, args: { network?: string | null }, ctx: Context) {
       const network = networkArgument(args, ctx);
       const cached = latestLedgerCache.get(network.name);
@@ -347,6 +380,28 @@ export const resolvers = {
         to: args.to ?? null,
         bucketSeconds: args.bucketSeconds ?? null,
       });
+    },
+
+    async accountBalanceHistory(
+      _: unknown,
+      args: {
+        network?: string | null;
+        address: string;
+        asset?: string | null;
+        from?: string | null;
+        to?: string | null;
+      },
+      ctx: Context
+    ) {
+      const network = networkArgument(args, ctx);
+      return computeBalanceHistory(
+        ctx.pool,
+        network.name,
+        args.address,
+        args.asset ?? 'XLM',
+        args.from,
+        args.to
+      );
     },
 
     async indexerStatus(_: unknown, args: { network?: string | null }, ctx: Context) {

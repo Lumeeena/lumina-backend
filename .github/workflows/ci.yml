@@ -10,6 +10,9 @@ jobs:
   indexer:
     name: Build Indexer
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        node-version: [18, 20, 22]
     defaults:
       run:
         working-directory: indexer
@@ -17,7 +20,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: ${{ matrix.node-version }}
       - run: npm ci --workspace @lumina/indexer
         working-directory: .
       - run: npm run lint
@@ -27,6 +30,9 @@ jobs:
   graphql-server:
     name: Build GraphQL Server
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        node-version: [18, 20, 22]
     defaults:
       run:
         working-directory: graphql-server
@@ -36,7 +42,7 @@ jobs:
           fetch-depth: 0
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: ${{ matrix.node-version }}
       - run: npm ci --workspace @lumina/graphql-server
         working-directory: .
       - run: npm run lint
@@ -94,6 +100,9 @@ jobs:
   subscriptions:
     name: Integration (live Postgres)
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        node-version: [18, 20, 22]
     # A hung test must fail fast rather than sit until the six-hour default.
     # This job did exactly that: every test passed and the process then refused
     # to exit, because a leaked Postgres connection kept the event loop alive.
@@ -116,7 +125,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: ${{ matrix.node-version }}
       - run: psql postgresql://lumina:lumina_test@localhost:5432/lumina_test -f db/schema.sql
       - run: npm ci --workspace @lumina/graphql-server
         working-directory: .

@@ -158,6 +158,13 @@ export const accountCacheSize = new Gauge({
   registers: [registry],
 });
 
+export const accountFetchDecisions = new Counter({
+  name: 'lumina_account_fetch_decisions_total',
+  help: 'Account Horizon lookups requested or skipped because stored state covers the ledger, by network.',
+  labelNames: ['network', 'outcome'] as const,
+  registers: [registry],
+});
+
 export const sorobanEventsTruncated = new Counter({
   name: 'lumina_soroban_events_truncated_total',
   help: 'Soroban event polling cycles that hit the per-cycle event limit.',

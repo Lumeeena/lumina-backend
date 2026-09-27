@@ -10,6 +10,8 @@ Part of the Lumina project, split across three repos:
 
 API consumers: start with [docs/API_GUIDE.md](docs/API_GUIDE.md), and see
 [docs/AUTHENTICATION.md](docs/AUTHENTICATION.md) for API keys and rate limits.
+Bulk-export consumers: [docs/EXPORT_FORMATS.md](docs/EXPORT_FORMATS.md)
+documents every exported column and its unit, with a worked example.
 
 ## Structure
 
@@ -159,6 +161,28 @@ effect for these queries, without rewriting every row in `operations`.
 psql $DATABASE_URL -f db/migrations/004_search_indexes.sql
 ```
 
+### Query plans
+
+An index existing is not the same as the planner using it. `db/explain/` builds
+a production-shaped scratch database, runs every main query through
+`EXPLAIN ANALYZE`, and records the *shape* of each plan — nodes, indexes used,
+sequential scans, rows — as `db/explain/baseline.json`, so a query that quietly
+stops using its index shows up as a diff instead of as a latency graph months
+later.
+
+```bash
+npm run explain:seed     # build the scratch database (slow, once)
+npm run explain          # capture plans and report
+npm run explain:check    # compare against the baseline; non-zero on a regression
+npm run explain:update   # re-record the baseline
+```
+
+Point it at a scratch database with `EXPLAIN_DATABASE_URL`; it truncates every
+table. It does not run in CI — on a small dataset the sequential scan is the
+correct plan, so a CI-sized database would report exactly the queries this is
+meant to catch as healthy. The recorded findings, and the indexes that would fix
+them, are in [docs/QUERY_PLANS.md](docs/QUERY_PLANS.md).
+
 ## Run with Docker
 
 ```bash
@@ -220,6 +244,7 @@ network, exactly as before.
 | `DB_POOL_CONNECTION_TIMEOUT` | `0` | Milliseconds to wait for a connection before failing (0 = wait forever) |
 | `START_LEDGER` | latest | Only used when the DB is empty |
 | `POLL_INTERVAL_MS` | `5000` | |
+| `ACCOUNT_CACHE_TTL_MS` | `300000` | Milliseconds to cache account data. Longer TTLs reduce Horizon requests but can leave indexed balances stale for longer; shorter TTLs keep balances fresher at the cost of more Horizon load |
 | `LEDGER_RETRY_ATTEMPTS` | `3` | How many times a ledger whose fetch/index fails is retried before the cursor stops at it. More attempts ride out a longer Horizon outage but hold the cursor back while retrying; fewer move the cursor on sooner, at the cost of more history gaps |
 | `LEDGER_RETRY_BASE_MS` | `500` | Delay before the first retry in milliseconds; doubles each attempt, so this also sets the maximum wait between attempts |
 | `HORIZON_MIN_REQUEST_INTERVAL_MS` | `100` | Minimum spacing between outbound Horizon requests, to avoid bursts tripping the per-IP rate limit |
