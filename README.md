@@ -11,6 +11,13 @@ Part of the Lumina project, split across three repos:
 API consumers: start with [docs/API_GUIDE.md](docs/API_GUIDE.md), and see
 [docs/AUTHENTICATION.md](docs/AUTHENTICATION.md) for API keys and rate limits.
 
+Contributors: the reasoning behind the design — why subscriptions run over
+Postgres `LISTEN`/`NOTIFY` rather than a broker, why decoded contract events
+live in one shared JSONB table rather than a table per contract, why memo search
+is trigram rather than `tsvector` — is in [docs/adr/](docs/adr/). Each record
+states the context, the options that were rejected and why, and the costs that
+were accepted.
+
 ## Structure
 
 ```
