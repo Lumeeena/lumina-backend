@@ -120,3 +120,91 @@ before it listens. A PostgreSQL advisory lock serializes concurrent runners;
 the runner rejects unknown, missing, or out-of-order history. Migration SQL
 must record its own filename stem in `schema_migrations` (as existing migration
 files do).
+
+## Migration testing against a populated database
+
+Everywhere else migrations are applied to empty databases — CI's schema jobs and
+`db/check-schema-parity.sh` both do. On an empty database every migration is fast
+and every constraint is trivially satisfied, so the two failures that actually
+break a deployment are invisible:
+
+- a rule the existing rows violate — a `NOT NULL` with no default, a unique
+  constraint the data does not satisfy, or a primary key that a partitioned
+  table is not allowed to have;
+- a step that rewrites or re-indexes every row, whose duration is a function of
+  table size and therefore cannot be learned from an empty table at all.
+
+`graphql-server/src/migrations.integration.test.ts` covers both. It creates a
+scratch database, applies the chain through the production runner one migration
+at a time, seeds volume data at the point where a real deployment would already
+have it (after `005_api_keys`, the last migration that only adds tables, columns
+and indexes), then applies the rest — timing each one and asserting after every
+step that every seeded table still holds the same rows and the same content
+checksum.
+
+```bash
+MIGRATION_TEST_BASE_URL=postgresql://lumina:lumina_test@localhost:5432/postgres \
+  npm run test:migrations --prefix graphql-server
+```
+
+`MIGRATION_TEST_BASE_URL` is a maintenance connection used only to create and
+drop the scratch database, the same convention as `check-schema-parity.sh`'s
+`PARITY_BASE_URL`. The test is skipped when it is unset. No production data is
+involved: every row comes from md5 of a row index via
+`db/migration-test-seed.sql`, which is why two runs can be compared by checksum
+at all. On success the scratch database is dropped; on failure it is left in
+place and the connection string is printed.
+
+The row counts are the ones the run actually used, printed with the durations,
+because a duration without a row count says nothing. They default to 30,000
+ledgers, 60,000 transactions, 180,000 operations, 20,000 accounts and 50,000
+events — large enough that a rewrite or an index rebuild is measurable, small
+enough to run on demand. They are the `migration_seed_scale` row at the top of
+the seed file; raise them to model a larger deployment, and read the durations
+against the counts printed beside them.
+
+The test is deliberately not part of `npm test`, which needs no database, and it
+is not wired into a CI job yet: it cannot pass until the defects below are
+fixed, and a permanently red job teaches people to ignore red jobs. Adding a
+job that runs it next to `db-schema-parity` is the intended follow-up.
+
+### Durations recorded so far
+
+At the default scale — 180,000 operations, 30,000 ledgers, 60,000 transactions,
+20,000 accounts, 50,000 contract events, 50,000 custom events — the two
+migrations that apply cleanly to populated tables are catalog-only and fast:
+
+| step | duration |
+|---|---|
+| `006_autovacuum` (storage parameters on 60,000 transactions + 180,000 operations) | 6ms |
+| `006_export_permissions` (adds a column with a default) | 5ms |
+| seeding the database in the first place | ~26s |
+
+Neither of those rewrites rows, which is why they are milliseconds; they are
+recorded because "fast" is only meaningful next to a row count. The durations
+that matter — `006_partition_operations` and `007_networks`, which rebuild
+primary keys over every row — cannot be recorded until the defects below are
+fixed, because they do not run at all. That is the gap the test exists to close.
+
+### What the test reports today
+
+The chain cannot build a populated database. Five separate defects, each
+reproducible on its own; the test stops at the first and names it.
+
+| # | Where | Symptom |
+|---|---|---|
+| 1 | `graphql-server/src/migrations.ts:12` | `loadMigrations` expands `\ir ../schema.sql` with `String.replace`, whose replacement text treats `$$` as an escaped `$`. The PL/pgSQL delimiters added by 006 collapse, and 001 fails: `syntax error at or near "$"`. |
+| 2 | `db/schema.sql:122` | The file defines `operations` without `PARTITION BY` but still calls `ensure_operations_partitions(3)`: `"operations" is not partitioned`. This is why the `Verify DB Schema Parity` job is red. |
+| 3 | `graphql-server/src/migrations.ts:59` | 004 is sent to the server as one multi-statement query, which node-postgres wraps in an implicit transaction: `CREATE INDEX CONCURRENTLY cannot run inside a transaction block`. |
+| 4 | `db/migrations/006_partition_operations.sql:109` | Its foreign key references `transactions(hash)`, but since 007 the unique constraint is `(hash, network)`: `there is no unique constraint matching given keys for referenced table "transactions"`. |
+| 5 | `db/migrations/007_networks.sql:74` | `ADD PRIMARY KEY (id, network)` on a table that 006 partitioned by `ledger`: `unique constraint on partitioned table must include all partitioning columns`. |
+
+Defects 1 and 3 break only the Node runner, which is the path production
+actually uses (`npm run migrate up`, `RUN_MIGRATIONS_ON_STARTUP`). Defects 2, 4
+and 5 break the chain however it is applied. They share one cause: the
+partitioning work (#170) and the multi-network work (#176) were merged without
+being reconciled — `006_partition_operations.sql` assumes the pre-network
+schema, `007_networks.sql` assumes the pre-partitioning one, and `db/schema.sql`
+is a hybrid that satisfies neither. Its own comment at `db/schema.sql:51-54`
+still documents the range partitioning and the partition-key rule that defect 5
+violates.
