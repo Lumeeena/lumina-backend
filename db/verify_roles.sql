@@ -20,9 +20,10 @@ DECLARE
   -- in indexer/src/db.ts require on top of SELECT.
   indexed_tables text[] := ARRAY[
     'ledgers', 'transactions', 'operations',
-    'accounts', 'contract_events', 'contract_schemas', 'custom_events'
+    'accounts', 'account_refresh_queue', 'contract_events', 'contract_schemas', 'custom_events'
   ];
-  update_tables  text[] := ARRAY['accounts', 'contract_schemas', 'custom_events'];
+  update_tables  text[] := ARRAY['accounts', 'account_refresh_queue', 'contract_schemas', 'custom_events'];
+  delete_tables  text[] := ARRAY['account_refresh_queue', 'contract_schemas'];
 BEGIN
   -- ── The GraphQL server cannot write ───────────────────────────────────────
   IF NOT has_database_privilege('lumina_graphql', current_database(), 'CONNECT') THEN
@@ -98,7 +99,7 @@ BEGIN
       RAISE EXCEPTION 'lumina_indexer UPDATE on % does not match the allowlist', t;
     END IF;
     IF has_table_privilege('lumina_indexer', format('public.%I', t), 'DELETE')
-       <> (t = 'contract_schemas') THEN
+       <> (t = ANY (delete_tables)) THEN
       RAISE EXCEPTION 'lumina_indexer DELETE on % does not match the allowlist', t;
     END IF;
   END LOOP;

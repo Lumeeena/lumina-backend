@@ -135,12 +135,14 @@ export function getLedgerOperations(horizonUrl: string, sequence: number, purpos
   );
 }
 
-/** Returns null (rather than throwing) for accounts that don't exist or have been merged away. */
+/** Returns null for accounts that don't exist; transient HTTP failures throw so durable jobs can retry. */
 export async function getAccount(horizonUrl: string, address: string): Promise<HorizonAccount | null> {
   const stopTimer = horizonRequestDuration.startTimer();
   let res: Response;
   try {
-    res = await fetch(`${horizonUrl}/accounts/${address}`);
+    res = await fetch(`${horizonUrl}/accounts/${address}`, {
+      signal: AbortSignal.timeout(ACCOUNT_REQUEST_TIMEOUT_MS),
+    });
   } catch (err) {
     horizonRequests.inc({ status: 'error' });
     stopTimer();
@@ -150,8 +152,9 @@ export async function getAccount(horizonUrl: string, address: string): Promise<H
   horizonRequests.inc({ status: String(res.status) });
 
   if (!res.ok) {
-    if (res.status !== 404) log.warn({ address, status: res.status }, 'horizon account fetch failed');
-    return null;
+    if (res.status === 404) return null;
+    log.warn({ address, status: res.status }, 'horizon account fetch failed');
+    throw new Error(`Horizon account fetch failed with status ${res.status}`);
   }
   return (await res.json()) as HorizonAccount;
 }

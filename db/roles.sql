@@ -158,27 +158,32 @@ DECLARE
 BEGIN
   FOR g IN
     SELECT * FROM (VALUES
-      -- ON CONFLICT (sequence) DO NOTHING
+      -- ON CONFLICT (sequence, network) DO NOTHING
       ('ledgers',          'SELECT'),
       ('ledgers',          'INSERT'),
-      -- ON CONFLICT (hash) DO NOTHING
+      -- ON CONFLICT (hash, network) DO NOTHING
       ('transactions',     'SELECT'),
       ('transactions',     'INSERT'),
-      -- ON CONFLICT (id) DO NOTHING
+      -- ON CONFLICT (id, ledger, network) DO NOTHING
       ('operations',       'SELECT'),
       ('operations',       'INSERT'),
-      -- ON CONFLICT (id) DO NOTHING
+      -- ON CONFLICT (id, network) DO NOTHING
       ('contract_events',  'SELECT'),
       ('contract_events',  'INSERT'),
-      -- ON CONFLICT (address) DO UPDATE
+      -- ON CONFLICT (address, network) DO UPDATE
       ('accounts',         'SELECT'),
       ('accounts',         'INSERT'),
       ('accounts',         'UPDATE'),
-      -- ON CONFLICT (event_id, event_name) DO UPDATE
+      -- ON CONFLICT (network, address) plus worker polling and completion.
+      ('account_refresh_queue', 'SELECT'),
+      ('account_refresh_queue', 'INSERT'),
+      ('account_refresh_queue', 'UPDATE'),
+      ('account_refresh_queue', 'DELETE'),
+      -- ON CONFLICT (event_id, event_name, network) DO UPDATE
       ('custom_events',    'SELECT'),
       ('custom_events',    'INSERT'),
       ('custom_events',    'UPDATE'),
-      -- upsert, plus DELETE when a contract is removed from the registry
+      -- ON CONFLICT (contract_id, network) DO UPDATE, plus registry deletion
       ('contract_schemas', 'SELECT'),
       ('contract_schemas', 'INSERT'),
       ('contract_schemas', 'UPDATE'),

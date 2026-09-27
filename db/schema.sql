@@ -19,7 +19,12 @@ CREATE TABLE IF NOT EXISTS ledgers (
     base_reserve        BIGINT NOT NULL DEFAULT 5000000,
     indexed_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     network             TEXT NOT NULL DEFAULT 'mainnet',
-    PRIMARY KEY (sequence, network)
+    PRIMARY KEY (sequence, network),
+    -- Data-quality guards for values the indexer and query layer assume are
+    -- well-formed. See db/migrations/008_data_constraints.sql.
+    CONSTRAINT ledgers_sequence_check          CHECK (sequence > 0),
+    CONSTRAINT ledgers_transaction_count_check CHECK (transaction_count >= 0),
+    CONSTRAINT ledgers_operation_count_check   CHECK (operation_count >= 0)
 );
 
 CREATE INDEX idx_ledgers_closed_at ON ledgers (closed_at DESC);
@@ -39,7 +44,11 @@ CREATE TABLE IF NOT EXISTS transactions (
     indexed_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     network             TEXT NOT NULL DEFAULT 'mainnet',
     PRIMARY KEY (hash, network),
-    FOREIGN KEY (ledger, network) REFERENCES ledgers (sequence, network)
+    FOREIGN KEY (ledger, network) REFERENCES ledgers (sequence, network),
+    CONSTRAINT transactions_hash_check              CHECK (hash <> ''),
+    CONSTRAINT transactions_ledger_check            CHECK (ledger > 0),
+    CONSTRAINT transactions_source_account_check    CHECK (source_account <> ''),
+    CONSTRAINT transactions_operation_count_check   CHECK (operation_count >= 0)
 );
 
 CREATE INDEX idx_transactions_ledger     ON transactions (ledger DESC);
@@ -48,10 +57,11 @@ CREATE INDEX idx_transactions_created_at ON transactions (created_at DESC);
 
 -- ─── Operations ───────────────────────────────────────────────────────────────
 --
--- Range-partitioned by ledger (see db/migrations/006_partition_operations.sql
--- for the full rationale and the migration path for a pre-existing table).
--- The primary key includes `ledger` because Postgres requires a partitioned
--- table's unique constraints to include the partition key.
+-- A plain table, not partitioned. It was range-partitioned by ledger for a
+-- while (see db/migrations/006_partition_operations.sql), but a partitioned
+-- table's primary key must include the partition key, and the multi-network
+-- key (id, network) cannot also carry `ledger` — so the partitioning was
+-- reverted and the primary key is (id, network).
 
 CREATE TABLE IF NOT EXISTS operations (
     id                  TEXT NOT NULL,
@@ -65,7 +75,12 @@ CREATE TABLE IF NOT EXISTS operations (
     indexed_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     network             TEXT NOT NULL DEFAULT 'mainnet',
     PRIMARY KEY (id, network),
-    FOREIGN KEY (transaction_hash, network) REFERENCES transactions (hash, network)
+    FOREIGN KEY (transaction_hash, network) REFERENCES transactions (hash, network),
+    CONSTRAINT operations_id_check                CHECK (id <> ''),
+    CONSTRAINT operations_type_check              CHECK (type <> ''),
+    CONSTRAINT operations_transaction_hash_check  CHECK (transaction_hash <> ''),
+    CONSTRAINT operations_ledger_check            CHECK (ledger > 0),
+    CONSTRAINT operations_source_account_check    CHECK (source_account <> '')
 );
 
 CREATE INDEX idx_operations_transaction   ON operations (transaction_hash);
@@ -75,13 +90,11 @@ CREATE INDEX idx_operations_created_at    ON operations (created_at DESC);
 -- GIN index for JSONB queries (e.g. filter by "to" address in payment details)
 CREATE INDEX idx_operations_details       ON operations USING GIN (details);
 
--- Creates partitions covering [0, partitions_ahead * 2,000,000) so a fresh
--- database has somewhere to write immediately. The indexer keeps calling this
--- periodically afterward (see indexer/src/db.ts ensurePartitions) so future
--- partitions always exist before the chain reaches them. Idempotent: always
--- continues from whatever the current highest partition's upper bound
--- actually is, so repeated calls only create the newly-needed partitions
--- (see db/migrations/006_partition_operations.sql for the full rationale).
+-- Retained only so this file stays at parity with db/migrations/006_partition_operations.sql,
+-- which creates it. `operations` is no longer partitioned (see the note above),
+-- so the initial-partition call that used to run here would fail; the function
+-- is defined but not invoked. The indexer's ensurePartitions wrapper
+-- (indexer/src/db.ts) is currently unused.
 CREATE OR REPLACE FUNCTION ensure_operations_partitions(partitions_ahead INTEGER DEFAULT 3)
 RETURNS void AS $$
 DECLARE
@@ -119,8 +132,6 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
-SELECT ensure_operations_partitions(3);
-
 -- ─── Accounts ─────────────────────────────────────────────────────────────────
 
 CREATE TABLE IF NOT EXISTS accounts (
@@ -136,8 +147,26 @@ CREATE TABLE IF NOT EXISTS accounts (
     indexed_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     network             TEXT NOT NULL DEFAULT 'mainnet',
-    PRIMARY KEY (address, network)
+    PRIMARY KEY (address, network),
+    CONSTRAINT accounts_address_check         CHECK (address <> ''),
+    CONSTRAINT accounts_sequence_check        CHECK (sequence <> ''),
+    CONSTRAINT accounts_subentry_count_check  CHECK (subentry_count >= 0),
+    CONSTRAINT accounts_last_modified_ledger_check CHECK (last_modified_ledger > 0),
+    CONSTRAINT accounts_num_sponsored_check   CHECK (num_sponsored >= 0),
+    CONSTRAINT accounts_num_sponsoring_check  CHECK (num_sponsoring >= 0)
 );
+
+-- Durable outbox for account state lookups. It is written with each ledger so
+-- committed ledger data always has recoverable account refresh work.
+CREATE TABLE IF NOT EXISTS account_refresh_queue (
+    network                 TEXT NOT NULL,
+    address                 TEXT NOT NULL,
+    last_requested_ledger   BIGINT NOT NULL,
+    queued_at               TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (network, address)
+);
+CREATE INDEX idx_account_refresh_queue_pending
+    ON account_refresh_queue (network, queued_at);
 
 -- ─── Contract Events (Soroban) ────────────────────────────────────────────────
 
@@ -152,7 +181,11 @@ CREATE TABLE IF NOT EXISTS contract_events (
     value               JSONB,
     indexed_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     network             TEXT NOT NULL DEFAULT 'mainnet',
-    PRIMARY KEY (id, network)
+    PRIMARY KEY (id, network),
+    CONSTRAINT contract_events_id_check          CHECK (id <> ''),
+    CONSTRAINT contract_events_contract_id_check  CHECK (contract_id <> ''),
+    CONSTRAINT contract_events_ledger_check       CHECK (ledger > 0),
+    CONSTRAINT contract_events_paging_token_check CHECK (paging_token <> '')
 );
 
 CREATE INDEX idx_events_contract_id  ON contract_events (contract_id);
@@ -197,7 +230,11 @@ CREATE TABLE IF NOT EXISTS custom_events (
     fields          JSONB NOT NULL DEFAULT '{}',
     indexed_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     network         TEXT NOT NULL DEFAULT 'mainnet',
-    PRIMARY KEY (event_id, event_name, network)
+    PRIMARY KEY (event_id, event_name, network),
+    CONSTRAINT custom_events_event_id_check      CHECK (event_id <> ''),
+    CONSTRAINT custom_events_contract_id_check   CHECK (contract_id <> ''),
+    CONSTRAINT custom_events_event_name_check    CHECK (event_name <> ''),
+    CONSTRAINT custom_events_ledger_check        CHECK (ledger > 0)
 );
 CREATE INDEX IF NOT EXISTS idx_custom_events_contract_event
     ON custom_events (contract_id, event_name, ledger DESC);
@@ -206,6 +243,40 @@ CREATE INDEX IF NOT EXISTS idx_custom_events_ledger
 -- Containment queries on exact-match filters go through the payload directly.
 CREATE INDEX IF NOT EXISTS idx_custom_events_fields
     ON custom_events USING GIN (fields);
+
+-- ─── Contract storage entries (Soroban) ────────────────────────────────────
+--
+-- One row per contract storage entry the indexer has fetched, addressed by the
+-- full LedgerKey XDR that `getLedgerEntries` was called with. `state` is the
+-- archival distinction: Soroban archives a persistent entry once its TTL
+-- expires (it becomes inaccessible, not deleted), so an archived entry keeps
+-- its row with `state = 'archived'` rather than being removed — which is what
+-- lets a client tell "archived" apart from "absent" (no row at all).
+--
+-- `key` is the base64 XDR LedgerKey, so it round-trips back into a
+-- getLedgerEntries call and is what the `keyPrefix` filter matches against.
+-- `value` is the decoded native value (JSONB); `value_xdr` is the raw
+-- LedgerEntryData XDR. Both are null when the entry is not currently live.
+CREATE TABLE IF NOT EXISTS contract_storage_entries (
+    contract_id          TEXT NOT NULL,
+    key                  TEXT NOT NULL,
+    durability           TEXT NOT NULL,
+    state                TEXT NOT NULL DEFAULT 'active',
+    value                JSONB,
+    value_xdr            TEXT,
+    live_until_ledger    BIGINT,
+    last_modified_ledger BIGINT NOT NULL,
+    indexed_at           TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    network              TEXT NOT NULL DEFAULT 'mainnet',
+    PRIMARY KEY (contract_id, key, network),
+    CONSTRAINT contract_storage_entries_durability_check CHECK (durability IN ('persistent', 'temporary')),
+    CONSTRAINT contract_storage_entries_state_check      CHECK (state IN ('active', 'archived')),
+    CONSTRAINT contract_storage_entries_ledger_check     CHECK (last_modified_ledger > 0)
+);
+-- Keyset pagination orders by (last_modified_ledger, key); this index serves
+-- the contract-scoped, durability-filtered, cursor-paginated read.
+CREATE INDEX IF NOT EXISTS idx_contract_storage_entries_lookup
+    ON contract_storage_entries (contract_id, network, last_modified_ledger DESC, key DESC);
 
 -- ─── Search and asset-filter indexes ──────────────────────────────────────
 --
@@ -250,6 +321,23 @@ CREATE TABLE IF NOT EXISTS api_keys (
 );
 
 CREATE INDEX IF NOT EXISTS idx_api_keys_revoked_at ON api_keys (revoked_at);
+
+-- ─── Ledger Retry Queue ───────────────────────────────────────────────────────
+
+CREATE TABLE IF NOT EXISTS ledger_retry_queue (
+    ledger              BIGINT NOT NULL,
+    network             TEXT NOT NULL DEFAULT 'mainnet',
+    attempt_count       INTEGER NOT NULL DEFAULT 0,
+    next_attempt_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    last_error          TEXT,
+    first_failed_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    last_attempted_at   TIMESTAMPTZ,
+    permanently_failed  BOOLEAN NOT NULL DEFAULT FALSE,
+    PRIMARY KEY (ledger, network)
+);
+
+CREATE INDEX IF NOT EXISTS idx_retry_queue_next_attempt ON ledger_retry_queue (next_attempt_at)
+    WHERE NOT permanently_failed;
 
 -- Lower insert-triggered vacuum/analyze thresholds for the append-heavy tables.
 ALTER TABLE transactions SET (

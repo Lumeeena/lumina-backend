@@ -29,18 +29,26 @@ Every field takes an optional `network` argument:
   this argument exists to prevent.
 """
 type Query {
-  """Fetch recent transactions, newest first."""
+  """
+  Fetch recent transactions, newest first.
+  """
   transactions(
-    """Network to read; defaults to the primary network configured for this deployment."""
+    """
+    Network to read; defaults to the primary network configured for this deployment.
+    """
     network: Network
     limit: Int = 20
     cursor: String
   ): TransactionPage!
 
-  """Get a single transaction by hash."""
+  """
+  Get a single transaction by hash.
+  """
   transaction(network: Network, hash: String!): Transaction
 
-  """Fetch an account by Stellar address."""
+  """
+  Fetch an account by Stellar address.
+  """
   account(network: Network, address: String!): Account
 
   """
@@ -50,7 +58,9 @@ type Query {
     network: Network
     account: String
     type: OperationType
-    """Filter to operations involving one asset: "CODE:ISSUER", or "XLM" for native."""
+    """
+    Filter to operations involving one asset: "CODE:ISSUER", or "XLM" for native.
+    """
     asset: String
     limit: Int = 20
     cursor: String
@@ -63,7 +73,12 @@ type Query {
   order references and short codes rather than prose, and stemming an
   identifier is wrong. An exact case-insensitive match always ranks first.
   """
-  search(network: Network, query: String!, limit: Int = 20, cursor: String): TransactionPage!
+  search(
+    network: Network
+    query: String!
+    limit: Int = 20
+    cursor: String
+  ): TransactionPage!
 
   """
   Fetch Soroban contract events by contract ID.
@@ -77,10 +92,14 @@ type Query {
     cursor: String
   ): ContractEventPage!
 
-  """Get a specific ledger by sequence number."""
+  """
+  Get a specific ledger by sequence number.
+  """
   ledger(network: Network, sequence: Int!): Ledger
 
-  """Get the latest ledger."""
+  """
+  Get the latest ledger.
+  """
   latestLedger(network: Network): Ledger
 
   """
@@ -96,7 +115,9 @@ type Query {
     cursor: String
   ): CustomEventPage!
 
-  """The custom schema registered for a contract, if any."""
+  """
+  The custom schema registered for a contract, if any.
+  """
   contractSchema(network: Network, contractId: String!): ContractSchema
 
   """
@@ -108,15 +129,49 @@ type Query {
   """
   asset(
     network: Network
-    """Asset to inspect: "CODE:ISSUER", or "XLM" for native."""
+    """
+    Asset to inspect: "CODE:ISSUER", or "XLM" for native.
+    """
     asset: String!
-    """Range start (ISO-8601). Defaults to 30 days before `to`."""
+    """
+    Range start (ISO-8601). Defaults to 30 days before `to`.
+    """
     from: String
-    """Range end (ISO-8601). Defaults to now."""
+    """
+    Range end (ISO-8601). Defaults to now.
+    """
     to: String
-    """Bucket width in seconds (min 60). Defaults to 86400 (daily)."""
+    """
+    Bucket width in seconds (min 60). Defaults to 86400 (daily).
+    """
     bucketSeconds: Int = 86400
   ): AssetDetail!
+
+  """
+  Account balance history for an asset over time.
+
+  Derives balances by replaying balance-affecting operations from the operations table.
+  Default range is 30 days, maximum is 90 days.
+  """
+  accountBalanceHistory(
+    network: Network
+    """
+    Account address to get balance history for.
+    """
+    address: String!
+    """
+    Asset to track: "CODE:ISSUER", or "XLM" for native. Defaults to XLM.
+    """
+    asset: String = "XLM"
+    """
+    Range start (ISO-8601). Defaults to 30 days before `to`.
+    """
+    from: String
+    """
+    Range end (ISO-8601). Defaults to now.
+    """
+    to: String
+  ): BalanceHistory!
 
   """
   How far behind the chain this API data is. Advisory — see IndexerStatus for
@@ -126,10 +181,14 @@ type Query {
 }
 
 type Subscription {
-  """Subscribe to new transactions as they are confirmed."""
+  """
+  Subscribe to new transactions as they are confirmed.
+  """
   newTransaction(network: Network): Transaction!
 
-  """Subscribe to new operations for a specific account."""
+  """
+  Subscribe to new operations for a specific account.
+  """
   accountActivity(network: Network, address: String!): Operation!
 }
 
@@ -150,19 +209,29 @@ and either being unreachable is reported as a field (`null` plus
 `stale: true`) rather than as an error.
 """
 type IndexerStatus {
-  """Network these numbers describe."""
+  """
+  Network these numbers describe.
+  """
   network: Network!
 
-  """Highest ledger sequence indexed for this network, or null if none yet."""
+  """
+  Highest ledger sequence indexed for this network, or null if none yet.
+  """
   latestIndexedLedger: Int
 
-  """When that ledger was indexed (ISO-8601), or null if none yet."""
+  """
+  When that ledger was indexed (ISO-8601), or null if none yet.
+  """
   latestIndexedAt: String
 
-  """Horizon current tip for this network, or null if it could not be read."""
+  """
+  Horizon current tip for this network, or null if it could not be read.
+  """
   horizonLedger: Int
 
-  """`horizonLedger - latestIndexedLedger`, or null if the tip is unknown."""
+  """
+  `horizonLedger - latestIndexedLedger`, or null if the tip is unknown.
+  """
   lagLedgers: Int
 
   """
@@ -171,7 +240,9 @@ type IndexerStatus {
   """
   stale: Boolean!
 
-  """When this status was computed (ISO-8601)."""
+  """
+  When this status was computed (ISO-8601).
+  """
   checkedAt: String!
 }
 
@@ -194,6 +265,11 @@ type OperationPage {
 
 type ContractEventPage {
   items: [ContractEvent!]!
+  pageInfo: PageInfo!
+}
+
+type ContractStorageEntryPage {
+  items: [ContractStorageEntry!]!
   pageInfo: PageInfo!
 }
 
@@ -220,7 +296,9 @@ type Transaction {
   successful: Boolean!
   memoType: String
   memo: String
-  """Operations may be null when their lookup fails; errors remain local to this field."""
+  """
+  Operations may be null when their lookup fails; errors remain local to this field.
+  """
   operations: [Operation!]
 }
 
@@ -234,7 +312,9 @@ type Account {
   balances: [Balance!]!
   flags: AccountFlags!
   thresholds: Thresholds!
-  """Related rows are optional so a lookup error does not erase the account."""
+  """
+  Related rows are optional so a lookup error does not erase the account.
+  """
   transactions(limit: Int = 10): [Transaction!]
   operations(limit: Int = 10): [Operation!]
 }
@@ -296,7 +376,67 @@ type ContractEvent {
   createdAt: String!
   pagingToken: String!
   topics: [String!]!
-  value: String  # JSON-encoded value
+  value: String # JSON-encoded value
+}
+
+"""
+How long a contract storage entry survives without being touched.
+
+Only PERSISTENT entries are archived: they survive a ledger's lifecycle and are
+moved to cold storage ("archived") when their TTL runs out. TEMPORARY entries
+are evicted outright and therefore never come back as ARCHIVED.
+"""
+enum ContractStorageDurability {
+  PERSISTENT
+  TEMPORARY
+}
+
+"""
+Whether an entry is currently readable, or has been archived.
+
+Soroban archives a persistent entry whose TTL has expired: the contract still
+owns the state, but it is inaccessible until restored. An ARCHIVED entry is
+reported here rather than removed, so this is how a client tells "the contract
+has state that is archived" apart from "this key was never set" (which has no
+entry at all).
+"""
+enum ContractStorageEntryState {
+  """Currently live and readable."""
+  ACTIVE
+
+  """TTL expired; retained for the contract, inaccessible until restored."""
+  ARCHIVED
+}
+
+"""
+One indexed Soroban contract storage entry.
+
+`value` is the decoded native value, JSON-encoded, or null when the entry is
+not currently live (an archived entry keeps the key and metadata but has no
+readable value). `valueXdr` is the raw base64 LedgerEntryData XDR, so a client
+that needs the exact wire form — or a value the decoder could not represent —
+still has it. `key` is the base64 XDR LedgerKey that addresses the entry and
+round-trips into a Soroban `getLedgerEntries` call.
+"""
+type ContractStorageEntry {
+  contractId: String!
+
+  """Base64 XDR LedgerKey addressing this entry."""
+  key: String!
+  durability: ContractStorageDurability!
+  state: ContractStorageEntryState!
+
+  """Decoded native value as a JSON string, or null when archived."""
+  value: String
+
+  """Raw base64 LedgerEntryData XDR, or null when archived."""
+  valueXdr: String
+
+  """Ledger in which this entry was last changed."""
+  lastModifiedLedger: Int!
+
+  """Ledger at which this entry's TTL expires, if the RPC reported one."""
+  liveUntilLedger: Int
 }
 
 # ─── Enums ───────────────────────────────────────────────────────────────────
@@ -400,17 +540,63 @@ type AssetDetail {
   code: String
   issuer: String
   native: Boolean!
-  """Sum of indexed balances, as a decimal string (no float rounding)."""
+  """
+  Sum of indexed balances, as a decimal string (no float rounding).
+  """
   supply: String!
   holders: Int!
   series: [VolumeBucket!]!
 }
 
-"""One bucket of the volume series. Empty buckets report zero volume."""
+"""
+One bucket of the volume series. Empty buckets report zero volume.
+"""
 type VolumeBucket {
   bucketStart: String!
   bucketEnd: String!
-  """Summed transfer amounts in the bucket, as a decimal string."""
+  """
+  Summed transfer amounts in the bucket, as a decimal string.
+  """
   volume: String!
   operationCount: Int!
+}
+
+# ─── Balance history ─────────────────────────────────────────────────────────
+
+"""
+Balance history for an account and asset, derived from operations.
+"""
+type BalanceHistory {
+  address: String!
+  asset: String!
+  """
+  Time range start (ISO-8601).
+  """
+  from: String!
+  """
+  Time range end (ISO-8601).
+  """
+  to: String!
+  """
+  Balance snapshots at operation timestamps.
+  """
+  snapshots: [BalanceSnapshot!]!
+}
+
+"""
+One point in the balance history timeline.
+"""
+type BalanceSnapshot {
+  """
+  Timestamp of the operation that changed the balance (ISO-8601).
+  """
+  timestamp: String!
+  """
+  Balance after the operation, as a decimal string.
+  """
+  balance: String!
+  """
+  Operation ID that caused this balance change.
+  """
+  operationId: String!
 }

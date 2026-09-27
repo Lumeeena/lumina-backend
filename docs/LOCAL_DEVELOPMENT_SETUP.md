@@ -145,6 +145,16 @@ curl http://localhost:4000/health
 
 A healthy response is `{"status":"ok","checks":...}`. An unhealthy one includes `"status":"error"` and names the problem.
 
+The indexer also exposes its current resolved settings and per-network runtime
+state on the health port:
+
+```bash
+curl http://localhost:9090/debug/config
+```
+
+Endpoint URLs have credentials, paths, and query values redacted. The response
+includes each network's ledger cursors and effective watched-contract set.
+
 ## Environment Variables
 
 ### Indexer (`indexer/.env` or shell export)
