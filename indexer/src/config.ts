@@ -12,6 +12,10 @@ const log = subsystem('config');
 
 export interface Config {
   horizonUrl: string;
+  horizonAuthToken: string | undefined;
+  horizonMinRequestIntervalMs: number;
+  horizonMaxRequestIntervalMs: number;
+  horizonTipWeightFactor: number;
   databaseUrl: string;
   pollIntervalMs: number;
   startLedger: number | undefined;
@@ -127,6 +131,10 @@ function redactDatabaseUrl(url: string): string {
 export function loadConfig(): Config {
   const config: Config = {
     horizonUrl: stringWithDefault('HORIZON_URL', 'https://horizon.stellar.org'),
+    horizonAuthToken: optionalString('HORIZON_AUTH_TOKEN'),
+    horizonMinRequestIntervalMs: intWithDefault('HORIZON_MIN_REQUEST_INTERVAL_MS', 100, 1),
+    horizonMaxRequestIntervalMs: intWithDefault('HORIZON_MAX_REQUEST_INTERVAL_MS', 10000, 1),
+    horizonTipWeightFactor: intWithDefault('HORIZON_TIP_WEIGHT_FACTOR', 2, 1),
     databaseUrl: stringWithDefault('DATABASE_URL', 'postgresql://localhost:5432/lumina'),
     pollIntervalMs: intWithDefault('POLL_INTERVAL_MS', 5000, 100),
     startLedger: optionalInt('START_LEDGER', 1),
@@ -187,6 +195,10 @@ export function loadConfig(): Config {
   log.info(
     {
       horizonUrl: config.horizonUrl,
+      horizonAuthToken: config.horizonAuthToken ? '***' : undefined,
+      horizonMinRequestIntervalMs: config.horizonMinRequestIntervalMs,
+      horizonMaxRequestIntervalMs: config.horizonMaxRequestIntervalMs,
+      horizonTipWeightFactor: config.horizonTipWeightFactor,
       databaseUrl: redactDatabaseUrl(config.databaseUrl),
       pollIntervalMs: config.pollIntervalMs,
       startLedger: config.startLedger,

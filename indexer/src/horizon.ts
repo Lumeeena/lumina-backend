@@ -3,9 +3,9 @@
  * graphql-server's Horizon clients so this service has no cross-package imports.
  */
 
-import { horizonRequestDuration, horizonRequests } from './metrics';
+import { horizonRequestDuration, horizonRequests, horizonThrottleInterval, horizonQueuedRequests, horizonWaitTime } from './metrics';
 import { subsystem } from './logger';
-import { createThrottle } from './throttle';
+import { createThrottle, type RequestPurpose } from './throttle';
 
 const log = subsystem('horizon');
 
@@ -69,22 +69,43 @@ interface HorizonPage<T> {
   _links: { next?: { href: string } };
 }
 
-const MIN_REQUEST_INTERVAL_MS = parseInt(process.env.HORIZON_MIN_REQUEST_INTERVAL_MS ?? '100', 10);
+interface HorizonClientConfig {
+  minIntervalMs: number;
+  maxIntervalMs: number;
+  authToken?: string;
+  tipWeightFactor: number;
+}
 
-const { throttle, fetchJson, postJson } = createThrottle({
-  name: 'horizon',
-  minIntervalMs: MIN_REQUEST_INTERVAL_MS,
-  metrics: {
-    requestsTotal: horizonRequests,
-    requestDuration: horizonRequestDuration,
-  },
-});
+let throttle: ReturnType<typeof createThrottle>['throttle'];
+let fetchJson: ReturnType<typeof createThrottle>['fetchJson'];
+let postJson: ReturnType<typeof createThrottle>['postJson'];
 
-async function fetchAllPages<T>(url: string): Promise<T[]> {
+export function initializeHorizonClient(config: HorizonClientConfig): void {
+  const client = createThrottle({
+    name: 'horizon',
+    minIntervalMs: config.minIntervalMs,
+    maxIntervalMs: config.maxIntervalMs,
+    authToken: config.authToken,
+    tipWeightFactor: config.tipWeightFactor,
+    metrics: {
+      requestsTotal: horizonRequests,
+      requestDuration: horizonRequestDuration,
+      currentInterval: horizonThrottleInterval,
+      queuedRequests: horizonQueuedRequests,
+      waitTime: horizonWaitTime,
+    },
+  });
+  
+  throttle = client.throttle;
+  fetchJson = client.fetchJson;
+  postJson = client.postJson;
+}
+
+async function fetchAllPages<T>(url: string, purpose: RequestPurpose = 'default'): Promise<T[]> {
   const records: T[] = [];
   let next: string | undefined = url;
   while (next) {
-    const page: HorizonPage<T> = await fetchJson<HorizonPage<T>>(next);
+    const page: HorizonPage<T> = await fetchJson<HorizonPage<T>>(next, undefined, purpose);
     records.push(...page._embedded.records);
     next = page._embedded.records.length === PAGE_LIMIT ? page._links.next?.href : undefined;
   }
@@ -92,23 +113,25 @@ async function fetchAllPages<T>(url: string): Promise<T[]> {
 }
 
 export async function getLatestLedgerSequence(horizonUrl: string): Promise<number> {
-  const page = await fetchJson<HorizonPage<HorizonLedger>>(`${horizonUrl}/ledgers?order=desc&limit=1`);
+  const page = await fetchJson<HorizonPage<HorizonLedger>>(`${horizonUrl}/ledgers?order=desc&limit=1`, undefined, 'tip');
   return page._embedded.records[0]?.sequence ?? 0;
 }
 
-export function getLedger(horizonUrl: string, sequence: number): Promise<HorizonLedger> {
-  return fetchJson<HorizonLedger>(`${horizonUrl}/ledgers/${sequence}`);
+export function getLedger(horizonUrl: string, sequence: number, purpose: RequestPurpose = 'tip'): Promise<HorizonLedger> {
+  return fetchJson<HorizonLedger>(`${horizonUrl}/ledgers/${sequence}`, undefined, purpose);
 }
 
-export function getLedgerTransactions(horizonUrl: string, sequence: number): Promise<HorizonTransaction[]> {
+export function getLedgerTransactions(horizonUrl: string, sequence: number, purpose: RequestPurpose = 'tip'): Promise<HorizonTransaction[]> {
   return fetchAllPages<HorizonTransaction>(
-    `${horizonUrl}/ledgers/${sequence}/transactions?order=asc&limit=${PAGE_LIMIT}`
+    `${horizonUrl}/ledgers/${sequence}/transactions?order=asc&limit=${PAGE_LIMIT}`,
+    purpose
   );
 }
 
-export function getLedgerOperations(horizonUrl: string, sequence: number): Promise<HorizonOperation[]> {
+export function getLedgerOperations(horizonUrl: string, sequence: number, purpose: RequestPurpose = 'tip'): Promise<HorizonOperation[]> {
   return fetchAllPages<HorizonOperation>(
-    `${horizonUrl}/ledgers/${sequence}/operations?order=asc&limit=${PAGE_LIMIT}`
+    `${horizonUrl}/ledgers/${sequence}/operations?order=asc&limit=${PAGE_LIMIT}`,
+    purpose
   );
 }
 

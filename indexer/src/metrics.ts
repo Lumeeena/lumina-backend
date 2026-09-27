@@ -172,6 +172,28 @@ export const sorobanRetentionWindowExceeded = new Counter({
   registers: [registry],
 });
 
+export const horizonThrottleInterval = new Gauge({
+  name: 'lumina_horizon_throttle_interval_ms',
+  help: 'Current Horizon request throttle interval in milliseconds.',
+  labelNames: ['name', 'purpose'] as const,
+  registers: [registry],
+});
+
+export const horizonQueuedRequests = new Gauge({
+  name: 'lumina_horizon_queued_requests',
+  help: 'Number of Horizon requests waiting in the throttle queue.',
+  labelNames: ['name', 'purpose'] as const,
+  registers: [registry],
+});
+
+export const horizonWaitTime = new Histogram({
+  name: 'lumina_horizon_wait_time_seconds',
+  help: 'Time spent waiting in the Horizon throttle queue.',
+  labelNames: ['name', 'purpose'] as const,
+  buckets: [0.01, 0.05, 0.1, 0.25, 0.5, 1, 2, 5],
+  registers: [registry],
+});
+
 /** Record a completed ledger and move the freshness gauges with it. */
 export function recordIndexedLedger(
   network: string,

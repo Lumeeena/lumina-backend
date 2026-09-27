@@ -60,8 +60,18 @@ import {
 import { aggregateNetworkStates, startHealthServer, type NetworkState } from './health';
 import { initTracing, shutdownTracing } from './tracing';
 import { initErrorTracking, captureException, shutdownErrorTracking } from './errorTracking';
-import { loadConfig } from './config';
 import { getRetentionInfo } from './soroban';
+import { getAccount, getLatestLedgerSequence, getLedger, getLedgerOperations, getLedgerTransactions, HorizonAccount, initializeHorizonClient } from './horizon';
+import type { RequestPurpose } from './throttle';
+import { getActiveContracts } from './registry';
+import { getEvents, getLatestLedgerSequence as getLatestRpcLedgerSequence, type ContractEvent } from './soroban';
+import { resolveNetworks, type NetworkConfig } from './networks';
+
+// Read version from package.json for logging
+import { readFileSync } from 'fs';
+import { join } from 'path';
+const packageJson = JSON.parse(readFileSync(join(__dirname, '../package.json'), 'utf-8'));
+const VERSION = packageJson.version;
 
 const log = subsystem('indexer');
 
@@ -74,19 +84,6 @@ const routine = routineLogger('indexer');
 const config = loadConfig();
 
 const HEALTH_PORT = parseInt(process.env['HEALTH_PORT'] ?? '9090', 10);
-
-import { getAccount, getLatestLedgerSequence, getLedger, getLedgerOperations, getLedgerTransactions, HorizonAccount } from './horizon';
-import { getActiveContracts } from './registry';
-import { getEvents, getLatestLedgerSequence as getLatestRpcLedgerSequence, type ContractEvent } from './soroban';
-import { resolveNetworks, type NetworkConfig } from './networks';
-
-// Read version from package.json for logging
-import { readFileSync } from 'fs';
-import { join } from 'path';
-const packageJson = JSON.parse(readFileSync(join(__dirname, '../package.json'), 'utf-8'));
-const VERSION = packageJson.version;
-
-const config = loadConfig();
 
 const DATABASE_URL = config.databaseUrl;
 const POLL_INTERVAL_MS = config.pollIntervalMs;
@@ -223,10 +220,14 @@ function pruneAccountCache(cache: Map<string, number>, order: string[], now: num
 async function fetchAndIndexLedger(loop: NetworkLoop, sequence: number): Promise<void> {
   const name = loop.network.name;
   log.debug({ network: name, ledger: sequence }, 'indexing ledger');
+  
+  const isBackfill = loop.state.latestHorizonLedger - sequence > 10;
+  const purpose: RequestPurpose = isBackfill ? 'backfill' : 'tip';
+  
   const [ledger, transactions, operations] = await Promise.all([
-    getLedger(loop.network.horizonUrl, sequence),
-    getLedgerTransactions(loop.network.horizonUrl, sequence),
-    getLedgerOperations(loop.network.horizonUrl, sequence),
+    getLedger(loop.network.horizonUrl, sequence, purpose),
+    getLedgerTransactions(loop.network.horizonUrl, sequence, purpose),
+    getLedgerOperations(loop.network.horizonUrl, sequence, purpose),
   ]);
 
   const addresses = new Set<string>();
@@ -504,6 +505,14 @@ async function runNetworkLoop(loop: NetworkLoop, isPrimary: boolean): Promise<vo
 async function run() {
   initErrorTracking();
   initTracing();
+  
+  // Initialize the horizon client with config
+  initializeHorizonClient({
+    minIntervalMs: config.horizonMinRequestIntervalMs,
+    maxIntervalMs: config.horizonMaxRequestIntervalMs,
+    authToken: config.horizonAuthToken,
+    tipWeightFactor: config.horizonTipWeightFactor,
+  });
 
   // Fails loudly here rather than inside a loop: a misconfigured network
   // otherwise means one chain silently stops while the others keep indexing.
