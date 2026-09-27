@@ -156,7 +156,7 @@ export function loadConfig(): Config {
     // see the indexer environment-variable table in the README.
     ledgerRetryAttempts: intWithDefault('LEDGER_RETRY_ATTEMPTS', 3, 1),
     ledgerRetryBaseMs: intWithDefault('LEDGER_RETRY_BASE_MS', 500, 1),
-    accountCacheTtlMs: 5 * 60 * 1000,
+    accountCacheTtlMs: intWithDefault('ACCOUNT_CACHE_TTL_MS', 5 * 60 * 1000, 1),
     accountCacheMaxSize: 50_000,
     eventsSafetyLagLedgers: 3,
     sorobanMinRequestIntervalMs: intWithDefault('SOROBAN_MIN_REQUEST_INTERVAL_MS', 100, 1),
