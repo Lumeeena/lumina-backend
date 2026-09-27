@@ -9,7 +9,6 @@ test('loads migrations in order and expands initial schema include', () => {
     '001_init', '002_account_event_columns', '003_custom_event_schemas',
     '004_search_indexes', '005_api_keys', '006_autovacuum', '006_export_permissions',
     '006_partition_operations', '007_drop_redundant_api_key_index', '007_networks',
-    '008_account_refresh_queue',
   ]);
   assert.match(migrations[0].sql, /CREATE TABLE IF NOT EXISTS ledgers/);
   assert.match(migrations[0].sql, /PRIMARY KEY \(id, ledger, network\)/);
