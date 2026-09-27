@@ -52,9 +52,126 @@ export async function ensurePartitions(pool: Pool, partitionsAhead = 5): Promise
 }
 
 /**
- * Writes a ledger and all of its transactions/operations in a single DB
- * transaction, so a crash mid-ledger leaves no partial rows behind — the
- * ledger sequence simply gets re-fetched and re-indexed on restart.
+ * Return accounts whose stored state may not include the ledger being indexed.
+ * A snapshot modified at or after that ledger already reflects its account state.
+ */
+export async function getAccountsNeedingRefresh(
+  pool: Pool,
+  network: string,
+  addresses: string[],
+  ledger: number
+): Promise<string[]> {
+  if (addresses.length === 0) return [];
+
+  const { rows } = await pool.query<{ address: string; last_modified_ledger: string }>(
+    `SELECT address, last_modified_ledger
+     FROM accounts
+     WHERE network = $1 AND address = ANY($2)`,
+    [network, addresses]
+  );
+  const modifiedAt = new Map<string, number>();
+  for (const row of rows) modifiedAt.set(row.address, Number(row.last_modified_ledger));
+
+  return addresses.filter(address => {
+    const lastModifiedLedger = modifiedAt.get(address);
+    return lastModifiedLedger === undefined || lastModifiedLedger < ledger;
+  });
+}
+
+export interface AccountRefreshRequest {
+  address: string;
+  lastRequestedLedger: number;
+  lastModifiedLedger: number | null;
+}
+
+export async function getPendingAccountRefreshes(
+  pool: Pool,
+  network: string,
+  limit: number
+): Promise<AccountRefreshRequest[]> {
+  const { rows } = await pool.query<{
+    address: string;
+    last_requested_ledger: string;
+    last_modified_ledger: string | null;
+  }>(
+    `SELECT q.address, q.last_requested_ledger, a.last_modified_ledger
+     FROM account_refresh_queue q
+     LEFT JOIN accounts a ON a.network = q.network AND a.address = q.address
+     WHERE q.network = $1
+       AND q.queued_at <= NOW()
+     ORDER BY q.queued_at, q.address
+     LIMIT $2`,
+    [network, limit]
+  );
+
+  return rows.map(row => ({
+    address: row.address,
+    lastRequestedLedger: Number(row.last_requested_ledger),
+    lastModifiedLedger: row.last_modified_ledger === null ? null : Number(row.last_modified_ledger),
+  }));
+}
+
+export async function completeAccountRefreshes(
+  pool: Pool,
+  network: string,
+  completed: Array<{ request: AccountRefreshRequest; account: HorizonAccount | null }>
+): Promise<void> {
+  if (completed.length === 0) return;
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    for (const { account } of completed) {
+      if (account) await upsertAccount(client, network, account);
+    }
+
+    await client.query(
+      `DELETE FROM account_refresh_queue q
+       USING unnest($2::text[], $3::bigint[]) AS completed(address, last_requested_ledger)
+       WHERE q.network = $1
+         AND q.address = completed.address
+         AND q.last_requested_ledger = completed.last_requested_ledger`,
+      [
+        network,
+        completed.map(item => item.request.address),
+        completed.map(item => item.request.lastRequestedLedger),
+      ]
+    );
+    await client.query('COMMIT');
+  } catch (err) {
+    await client.query('ROLLBACK');
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
+export async function deferAccountRefreshes(
+  pool: Pool,
+  network: string,
+  deferred: AccountRefreshRequest[]
+): Promise<void> {
+  if (deferred.length === 0) return;
+
+  await pool.query(
+    `UPDATE account_refresh_queue q
+    SET queued_at = NOW() + INTERVAL '5 seconds'
+     FROM unnest($2::text[], $3::bigint[]) AS deferred(address, last_requested_ledger)
+     WHERE q.network = $1
+       AND q.address = deferred.address
+       AND q.last_requested_ledger = deferred.last_requested_ledger`,
+    [
+      network,
+      deferred.map(request => request.address),
+      deferred.map(request => request.lastRequestedLedger),
+    ]
+  );
+}
+
+/**
+ * Writes a ledger, transactions, operations, and account refresh intents in a
+ * single transaction. If it rolls back, the ledger is retried; after commit,
+ * the outbox survives a crash and the account worker resumes it on startup.
  */
 export async function indexLedger(
   pool: Pool,
@@ -62,7 +179,7 @@ export async function indexLedger(
   ledger: HorizonLedger,
   transactions: HorizonTransaction[],
   operations: HorizonOperation[],
-  accounts: HorizonAccount[] = []
+  accountAddresses: string[] = []
 ): Promise<void> {
   const client = await pool.connect();
   try {
@@ -104,7 +221,7 @@ export async function indexLedger(
     }
 
     for (const op of operations) {
-      // ON CONFLICT target is (id, ledger), not just (id): operations is
+      // ON CONFLICT target includes the network and partition key: operations is
       // partitioned by ledger (see db/migrations/006_partition_operations.sql),
       // and Postgres requires a partitioned table's unique constraints to
       // include the partition key. This isn't a behavior change — a given
@@ -112,13 +229,20 @@ export async function indexLedger(
       await client.query(
         `INSERT INTO operations (id, type, transaction_hash, ledger, created_at, source_account, details, network)
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-         ON CONFLICT (id, network) DO NOTHING`,
+         ON CONFLICT (id, ledger, network) DO NOTHING`,
         [op.id, op.type, op.transaction_hash, ledger.sequence, op.created_at, op.source_account, JSON.stringify(op), network]
       );
     }
 
-    for (const account of accounts) {
-      await upsertAccount(client, network, account);
+    if (accountAddresses.length > 0) {
+      await client.query(
+        `INSERT INTO account_refresh_queue (network, address, last_requested_ledger)
+         SELECT $1, address, $3
+         FROM unnest($2::text[]) AS addresses(address)
+         ON CONFLICT (network, address) DO UPDATE SET
+           last_requested_ledger = GREATEST(account_refresh_queue.last_requested_ledger, EXCLUDED.last_requested_ledger)`,
+        [network, accountAddresses, ledger.sequence]
+      );
     }
 
     // Queued inside the transaction on purpose: Postgres delivers notifications

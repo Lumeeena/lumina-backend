@@ -4,6 +4,7 @@ import type { Pool, PoolClient } from 'pg';
 import {
   createPool,
   ensurePartitions,
+  getAccountsNeedingRefresh,
   getLatestIndexedEventLedger,
   getLatestIndexedLedger,
   indexLedger,
@@ -97,6 +98,35 @@ test('getLatestIndexedLedger returns the numeric max sequence', async () => {
   assert.equal(await getLatestIndexedLedger(pool, 'mainnet'), 4242);
 });
 
+test('getAccountsNeedingRefresh skips snapshots that already include the ledger', async () => {
+  const queries: { sql: string; params: unknown[] }[] = [];
+  const pool = {
+    query: async (sql: string, params: unknown[]) => {
+      queries.push({ sql, params });
+      return { rows: [
+        { address: 'current', last_modified_ledger: '200' },
+        { address: 'stale', last_modified_ledger: '199' },
+      ] };
+    },
+  } as unknown as Pool;
+
+  const candidates = await getAccountsNeedingRefresh(
+    pool,
+    'testnet',
+    ['current', 'stale', 'missing'],
+    200
+  );
+
+  assert.deepEqual(candidates, ['stale', 'missing']);
+  assert.match(queries[0]!.sql, /network = \$1 AND address = ANY\(\$2\)/);
+  assert.deepEqual(queries[0]!.params, ['testnet', ['current', 'stale', 'missing']]);
+});
+
+test('getAccountsNeedingRefresh avoids a database round trip for no addresses', async () => {
+  const pool = { query: async () => { throw new Error('unexpected query'); } } as unknown as Pool;
+  assert.deepEqual(await getAccountsNeedingRefresh(pool, 'mainnet', [], 200), []);
+});
+
 test('a resume cursor is read for one network, never across all of them', async () => {
   // MAX(sequence) over every network returns the other chain's tip, which
   // makes a freshly declared network look like it had already indexed.
@@ -119,17 +149,38 @@ test('a resume cursor is read for one network, never across all of them', async 
 
 const account = makeAccount();
 
-test('indexLedger writes accounts inside the same commit when provided', async () => {
+test('indexLedger queues account refreshes in the ledger transaction', async () => {
   const { client, calls } = makeFakeClient();
-  await indexLedger(fakePool(client), 'mainnet', ledger, [tx], [op], [account]);
+  await indexLedger(fakePool(client), 'mainnet', ledger, [tx], [op], [account.account_id]);
   assert.deepEqual(calls, [
     'BEGIN',
     'ledgers',
     'transactions',
     'operations',
-    'accounts',
+    'account_refresh_queue',
     'SELECT pg_notify($1, $2)',
     'COMMIT',
+    'RELEASE',
+  ]);
+});
+
+test('a failed refresh enqueue rolls the ledger transaction back for restart recovery', async () => {
+  const { client, calls } = makeFakeClient({ failOn: 'INSERT INTO account_refresh_queue' });
+  await assert.rejects(() => indexLedger(
+    fakePool(client),
+    'mainnet',
+    ledger,
+    [tx],
+    [op],
+    [account.account_id]
+  ));
+  assert.deepEqual(calls, [
+    'BEGIN',
+    'ledgers',
+    'transactions',
+    'operations',
+    'account_refresh_queue',
+    'ROLLBACK',
     'RELEASE',
   ]);
 });
@@ -229,15 +280,15 @@ test('every insert conflicts on the composite key, so two chains can share a led
     },
   } as unknown as Pool;
 
-  await indexLedger(fakePool(client), 'mainnet', ledger, [tx], [op], [account]);
+  await indexLedger(fakePool(client), 'mainnet', ledger, [tx], [op], [account.account_id]);
   await insertContractEvents(eventPool, 'mainnet', [event]);
 
   const conflicts = queries.filter(q => q.includes('ON CONFLICT')).map(q => q.match(/ON CONFLICT \(([^)]+)\)/)?.[1]);
   assert.deepEqual(conflicts, [
     'sequence, network',
     'hash, network',
-    'id, network',
-    'address, network',
+    'id, ledger, network',
+    'network, address',
     'id, network',
   ]);
 });

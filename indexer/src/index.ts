@@ -34,7 +34,7 @@
 
 import {
   createPool,
-  ensurePartitions,
+  getAccountsNeedingRefresh,
   getLatestIndexedEventLedger,
   getLatestIndexedLedger,
   indexLedger,
@@ -52,16 +52,21 @@ import {
   ledgerIndexDuration,
   recordHorizonTip,
   recordIndexedLedger,
-  lastSuccessfulRegistryDiscoveryTimestamp,
   accountCacheSize,
   sorobanEventsTruncated,
   contractsWatched,
   sorobanRetentionWindowExceeded,
 } from './metrics';
-import { aggregateNetworkStates, startHealthServer, type NetworkState } from './health';
+import {
+  aggregateNetworkStates,
+  buildDebugConfiguration,
+  startHealthServer,
+  type NetworkState,
+} from './health';
 import { initTracing, shutdownTracing } from './tracing';
 import { initErrorTracking, captureException, shutdownErrorTracking } from './errorTracking';
 import { getRetentionInfo } from './soroban';
+import { refreshAccountQueueBatch } from './accountRefresh';
 
 const log = subsystem('indexer');
 
@@ -75,7 +80,7 @@ const config = loadConfig();
 
 const HEALTH_PORT = parseInt(process.env['HEALTH_PORT'] ?? '9090', 10);
 
-import { getAccount, getLatestLedgerSequence, getLedger, getLedgerOperations, getLedgerTransactions, HorizonAccount } from './horizon';
+import { getLatestLedgerSequence, getLedger, getLedgerOperations, getLedgerTransactions } from './horizon';
 import { getActiveContracts } from './registry';
 import { getEvents, getLatestLedgerSequence as getLatestRpcLedgerSequence, type ContractEvent } from './soroban';
 import { resolveNetworks, type NetworkConfig } from './networks';
@@ -109,9 +114,6 @@ const REGISTRY_CONTRACT_ID = config.registryContractId;
 const REGISTRY_READ_ACCOUNT = config.registryReadAccount;
 const REGISTRY_NETWORK_PASSPHRASE = config.registryNetworkPassphrase;
 const REGISTRY_POLL_EVERY_N_TICKS = Math.max(1, Math.round(config.registryPollIntervalMs / POLL_INTERVAL_MS));
-
-const LEDGER_RETRY_ATTEMPTS = config.ledgerRetryAttempts;
-const LEDGER_RETRY_BASE_MS = config.ledgerRetryBaseMs;
 
 // How long an account's Horizon data is considered fresh enough to skip
 // re-fetching. Busy accounts (exchanges, bots) show up in most ledgers —
@@ -169,6 +171,7 @@ interface NetworkLoop {
   discoveredContractIds: string[];
   accountCache: Map<string, number>;
   accountCacheOrder: string[];
+  accountRefreshTask: Promise<void> | null;
 }
 
 function createLoop(network: NetworkConfig, primaryName: string): NetworkLoop {
@@ -196,6 +199,7 @@ function createLoop(network: NetworkConfig, primaryName: string): NetworkLoop {
     discoveredContractIds: [],
     accountCache: new Map<string, number>(),
     accountCacheOrder: [],
+    accountRefreshTask: null,
   };
 }
 
@@ -233,29 +237,24 @@ async function fetchAndIndexLedger(loop: NetworkLoop, sequence: number): Promise
 
   const now = Date.now();
   pruneAccountCache(loop.accountCache, loop.accountCacheOrder, now);
-  const addressesToFetch = [...addresses].filter(address => {
+  const expiredAddresses = [...addresses].filter(address => {
     const fetchedAt = loop.accountCache.get(address);
     return fetchedAt === undefined || now - fetchedAt > ACCOUNT_CACHE_TTL_MS;
   });
+  const addressesToFetch = await getAccountsNeedingRefresh(pool, name, expiredAddresses, sequence);
+  const stopTimer = ledgerIndexDuration.startTimer();
+  await indexLedger(pool, name, ledger, transactions, operations, addressesToFetch);
+  stopTimer();
 
-  const accounts = (
-    await Promise.all(
-      addressesToFetch.map(address => getAccount(loop.network.horizonUrl, address))
-    )
-  ).filter((a): a is HorizonAccount => a !== null);
-  for (const address of addressesToFetch) {
+  for (const address of expiredAddresses) {
     loop.accountCache.set(address, now);
     // Update LRU order: remove if exists, then add to end (most recent)
     const idx = loop.accountCacheOrder.indexOf(address);
     if (idx !== -1) loop.accountCacheOrder.splice(idx, 1);
     loop.accountCacheOrder.push(address);
   }
-
   accountCacheSize.set({ network: name }, loop.accountCache.size);
-
-  const stopTimer = ledgerIndexDuration.startTimer();
-  await indexLedger(pool, name, ledger, transactions, operations, accounts);
-  stopTimer();
+  scheduleAccountRefreshes(loop);
 
   loop.state.latestIndexedLedger = sequence;
   loop.state.lastIndexedAt = Date.now();
@@ -491,6 +490,8 @@ async function runNetworkLoop(loop: NetworkLoop, isPrimary: boolean): Promise<vo
     initialised = true;
   };
 
+  scheduleAccountRefreshes(loop);
+
   const indexOne = (sequence: number): Promise<boolean> =>
     fetchAndIndexLedgerWithRetry(sequence, seq => fetchAndIndexLedger(loop, seq));
 
@@ -523,8 +524,10 @@ async function runNetworkLoop(loop: NetworkLoop, isPrimary: boolean): Promise<vo
     }
 
     if (isShuttingDown) break;
+    scheduleAccountRefreshes(loop);
     await new Promise(r => setTimeout(r, config!.pollIntervalMs));
   }
+  await loop.accountRefreshTask;
 }
 
 async function run() {
@@ -556,6 +559,21 @@ async function run() {
     // The flat numbers describe the worst-off network; the per-network detail
     // rides alongside, so one stuck chain cannot hide behind a healthy one.
     getState: () => aggregateNetworkStates(startedAt, loops.map(loop => loop.state)),
+    getDebugConfiguration: () => buildDebugConfiguration(
+      config,
+      registry.primary.name,
+      loops.map(loop => ({
+        network: loop.network.name,
+        horizonUrl: loop.network.horizonUrl,
+        sorobanRpcUrl: loop.sorobanRpcUrl,
+        networkPassphrase: loop.network.networkPassphrase,
+        cursor: loop.cursor,
+        eventsCursor: loop.eventsCursor,
+        latestIndexedLedger: loop.state.latestIndexedLedger,
+        latestHorizonLedger: loop.state.latestHorizonLedger,
+        watchedContracts: [...loop.staticContractIds, ...loop.discoveredContractIds],
+      }))
+    ),
     pool,
   });
 
@@ -597,6 +615,35 @@ if (require.main === module) {
 /** Errors are logged as a field, not interpolated, so they stay queryable. */
 function message(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
+}
+
+function scheduleAccountRefreshes(loop: NetworkLoop): void {
+  if (loop.accountRefreshTask || isShuttingDown) return;
+
+  let continueQueue = false;
+  const task = (async () => {
+    try {
+      const result = await refreshAccountQueueBatch(
+        pool,
+        loop.network.name,
+        loop.network.horizonUrl
+      );
+      continueQueue = result.hasMore;
+      for (const failure of result.failures) {
+        log.warn(
+          { network: loop.network.name, address: failure.address, err: message(failure.error) },
+          'account refresh failed; durable queue entry will be retried'
+        );
+      }
+    } catch (err) {
+      indexingErrors.inc({ loop: 'account-refresh' });
+      log.error({ network: loop.network.name, err: message(err) }, 'account refresh worker failed');
+    } finally {
+      loop.accountRefreshTask = null;
+      if (continueQueue && !isShuttingDown) scheduleAccountRefreshes(loop);
+    }
+  })();
+  loop.accountRefreshTask = task;
 }
 
 /** Redacts the password from a database URL for logging. */

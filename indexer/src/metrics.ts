@@ -158,10 +158,10 @@ export const accountCacheSize = new Gauge({
   registers: [registry],
 });
 
-export const contractsWatched = new Gauge({
-  name: 'lumina_contracts_watched',
-  help: 'Distinct contract ids whose events are being indexed.',
-  labelNames: ['network'] as const,
+export const accountFetchDecisions = new Counter({
+  name: 'lumina_account_fetch_decisions_total',
+  help: 'Account Horizon lookups requested or skipped because stored state covers the ledger, by network.',
+  labelNames: ['network', 'outcome'] as const,
   registers: [registry],
 });
 

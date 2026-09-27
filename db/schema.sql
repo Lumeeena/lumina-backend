@@ -64,7 +64,7 @@ CREATE TABLE IF NOT EXISTS operations (
     details             JSONB NOT NULL DEFAULT '{}',
     indexed_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     network             TEXT NOT NULL DEFAULT 'mainnet',
-    PRIMARY KEY (id, network),
+    PRIMARY KEY (id, ledger, network),
     FOREIGN KEY (transaction_hash, network) REFERENCES transactions (hash, network)
 );
 
@@ -138,6 +138,18 @@ CREATE TABLE IF NOT EXISTS accounts (
     network             TEXT NOT NULL DEFAULT 'mainnet',
     PRIMARY KEY (address, network)
 );
+
+-- Durable outbox for account state lookups. It is written with each ledger so
+-- committed ledger data always has recoverable account refresh work.
+CREATE TABLE IF NOT EXISTS account_refresh_queue (
+    network                 TEXT NOT NULL,
+    address                 TEXT NOT NULL,
+    last_requested_ledger   BIGINT NOT NULL,
+    queued_at               TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (network, address)
+);
+CREATE INDEX idx_account_refresh_queue_pending
+    ON account_refresh_queue (network, queued_at);
 
 -- ─── Contract Events (Soroban) ────────────────────────────────────────────────
 

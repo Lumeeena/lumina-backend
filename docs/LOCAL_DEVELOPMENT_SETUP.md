@@ -145,6 +145,16 @@ curl http://localhost:4000/health
 
 A healthy response is `{"status":"ok","checks":...}`. An unhealthy one includes `"status":"error"` and names the problem.
 
+The indexer also exposes its current resolved settings and per-network runtime
+state on the health port:
+
+```bash
+curl http://localhost:9090/debug/config
+```
+
+Endpoint URLs have credentials, paths, and query values redacted. The response
+includes each network's ledger cursors and effective watched-contract set.
+
 ## Environment Variables
 
 ### Indexer (`indexer/.env` or shell export)
@@ -157,7 +167,7 @@ A healthy response is `{"status":"ok","checks":...}`. An unhealthy one includes 
 | `START_LEDGER` | Latest ledger | Initial ledger to index; useful for backfilling |
 | `POLL_INTERVAL_MS` | `5000` | Delay between ledger polls |
 | `HORIZON_MIN_REQUEST_INTERVAL_MS` | `100` | Minimum spacing between Horizon requests (raises if 429 rate-limit errors appear) |
-| `HEALTH_PORT` | `9090` | Port for `/health` endpoint |
+| `HEALTH_PORT` | `9090` | Port for indexer `/health`, `/metrics`, and `/debug/config` endpoints |
 | `LOG_LEVEL` | `info` | `debug` for verbose per-ledger logging |
 | `LOG_PRETTY` | unset | Set to `true` for human-readable logs |
 
