@@ -1,17 +1,23 @@
 import type { Pool } from 'pg';
 import {
+  ACCOUNT_ORDER_NAMES,
+  ACCOUNT_ORDERS,
   getAccountFromDb,
   getAccountOperations,
   getAccountTransactions,
+  getAccounts,
   getEventsByContract,
   getLatestLedgerFromDb,
   getLedgerBySequence,
+  getLedgers,
   getOperations,
   getOperationsByTransactionHash,
   getTransactionByHash,
   getTransactions,
   mapAccount,
+  type AccountOrder,
 } from './db';
+import { DEFAULT_PAGE_LIMIT, KEYSETS, pageInfo } from './pagination';
 import { createLoaders, type RequestLoaders } from './loaders';
 import { getAccount as getAccountFromHorizon, getLatestLedger as getLatestLedgerFromHorizon } from './horizon';
 import { createSubscriptionResolvers } from './subscriptions';
@@ -86,6 +92,11 @@ function networkArgument(args: { network?: string | null }, ctx: Context): Netwo
   return resolveNetworkArgument(args.network, ctx.registry);
 }
 
+/** Narrow an optional enum argument to a declared ordering. */
+function isAccountOrder(value?: string | null): value is AccountOrder {
+  return value != null && (ACCOUNT_ORDER_NAMES as string[]).includes(value);
+}
+
 /**
  * The configured network a parent row was indexed on.
  *
@@ -140,15 +151,9 @@ export const resolvers = {
       ctx: Context
     ) {
       const network = networkArgument(args, ctx);
-      const limit = args.limit ?? 20;
+      const limit = args.limit ?? DEFAULT_PAGE_LIMIT;
       const items = await getTransactions(ctx.pool, network.name, limit, args.cursor ?? null);
-      return {
-        items,
-        pageInfo: {
-          hasNextPage: items.length === limit,
-          cursor: items.at(-1)?.hash ?? null,
-        },
-      };
+      return { items, pageInfo: pageInfo(KEYSETS.transactions, items, limit, transaction => [transaction.ledger, transaction.hash]) };
     },
 
     async transaction(_: unknown, args: { network?: string | null; hash: string }, ctx: Context) {
@@ -159,6 +164,29 @@ export const resolvers = {
     async account(_: unknown, args: { network?: string | null; address: string }, ctx: Context) {
       const network = networkArgument(args, ctx);
       return resolveAccount(args.address, ctx, network);
+    },
+
+    async accounts(
+      _: unknown,
+      args: { network?: string | null; orderBy?: string | null; limit?: number; cursor?: string | null },
+      ctx: Context
+    ) {
+      const network = networkArgument(args, ctx);
+      const limit = args.limit ?? DEFAULT_PAGE_LIMIT;
+      // The enum cannot name an unknown value, and every declared order is in
+      // ACCOUNT_ORDERS, so the fallback is unreachable in practice — but a bad
+      // order must not reach SQL as an ORDER BY.
+      const orderBy = isAccountOrder(args.orderBy) ? args.orderBy : 'RECENT_ACTIVITY';
+      const items = await getAccounts(ctx.pool, {
+        network: network.name,
+        orderBy,
+        limit,
+        cursor: args.cursor ?? null,
+      });
+      return {
+        items,
+        pageInfo: pageInfo(ACCOUNT_ORDERS[orderBy].keyset, items, limit, account => ACCOUNT_ORDERS[orderBy].keyOf(account)),
+      };
     },
 
     async operations(
@@ -174,7 +202,7 @@ export const resolvers = {
       ctx: Context
     ) {
       const network = networkArgument(args, ctx);
-      const limit = args.limit ?? 20;
+      const limit = args.limit ?? DEFAULT_PAGE_LIMIT;
 
       // The asset filter needs its own query: an asset can appear as the
       // payment asset or either side of an offer, which the generic operations
@@ -198,10 +226,8 @@ export const resolvers = {
 
       return {
         items,
-        pageInfo: {
-          hasNextPage: items.length === limit,
-          cursor: items.at(-1)?.id ?? null,
-        },
+        // The asset filter keyset is the same ordering on the same table.
+        pageInfo: pageInfo(args.asset ? KEYSETS.assetOperations : KEYSETS.operations, items, limit, operation => [operation.ledger, operation.id]),
       };
     },
 
@@ -211,21 +237,16 @@ export const resolvers = {
       ctx: Context
     ) {
       const network = networkArgument(args, ctx);
-      const limit = args.limit ?? 20;
+      const limit = args.limit ?? DEFAULT_PAGE_LIMIT;
       const { items, nextCursor } = await searchTransactions(ctx.pool, {
         network: network.name,
         query: args.query,
         limit,
         cursor: args.cursor ?? null,
       });
-      return {
-        items,
-        pageInfo: {
-          hasNextPage: items.length === limit,
-          // The search cursor encodes the ranking tuple, not just a row id.
-          cursor: nextCursor,
-        },
-      };
+      // Search already computed the cursor for the next page from the ranking
+      // tuple, so its own value is used rather than one rebuilt from the rows.
+      return { items, pageInfo: { hasNextPage: items.length === limit, cursor: nextCursor } };
     },
 
     async events(
@@ -234,7 +255,7 @@ export const resolvers = {
       ctx: Context
     ) {
       const network = networkArgument(args, ctx);
-      const limit = args.limit ?? 20;
+      const limit = args.limit ?? DEFAULT_PAGE_LIMIT;
       const items = await getEventsByContract(ctx.pool, {
         network: network.name,
         contractId: args.contractId,
@@ -242,13 +263,7 @@ export const resolvers = {
         limit,
         cursor: args.cursor ?? null,
       });
-      return {
-        items,
-        pageInfo: {
-          hasNextPage: items.length === limit,
-          cursor: items.at(-1)?.id ?? null,
-        },
-      };
+      return { items, pageInfo: pageInfo(KEYSETS.events, items, limit, event => [event.ledger, event.id]) };
     },
 
     async latestLedger(_: unknown, args: { network?: string | null }, ctx: Context) {
@@ -280,6 +295,17 @@ export const resolvers = {
       return getLedgerBySequence(ctx.pool, network.name, args.sequence);
     },
 
+    async ledgers(
+      _: unknown,
+      args: { network?: string | null; limit?: number; cursor?: string | null },
+      ctx: Context
+    ) {
+      const network = networkArgument(args, ctx);
+      const limit = args.limit ?? DEFAULT_PAGE_LIMIT;
+      const items = await getLedgers(ctx.pool, network.name, limit, args.cursor ?? null);
+      return { items, pageInfo: pageInfo(KEYSETS.ledgers, items, limit, ledger => ledger.sequence) };
+    },
+
     async customEvents(
       _: unknown,
       args: {
@@ -293,7 +319,7 @@ export const resolvers = {
       ctx: Context
     ) {
       const network = networkArgument(args, ctx);
-      const limit = args.limit ?? 20;
+      const limit = args.limit ?? DEFAULT_PAGE_LIMIT;
       const items = await getCustomEvents(ctx.pool, {
         network: network.name,
         contractId: args.contractId,
@@ -302,13 +328,9 @@ export const resolvers = {
         limit,
         cursor: args.cursor ?? null,
       });
-      return {
-        items,
-        pageInfo: {
-          hasNextPage: items.length === limit,
-          cursor: items.at(-1)?.eventId ?? null,
-        },
-      };
+      // The sort key is (ledger, eventId): the id alone is not unique within a
+      // ledger, so keysetting on it would skip and repeat rows.
+      return { items, pageInfo: pageInfo(KEYSETS.customEvents, items, limit, event => [event.ledger, event.eventId]) };
     },
 
     async contractSchema(

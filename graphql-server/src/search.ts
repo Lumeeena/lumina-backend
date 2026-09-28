@@ -24,6 +24,14 @@
  */
 import type { Pool } from 'pg';
 import { mapOperation, mapTransaction, type OperationRow, type TransactionRow } from './db';
+import {
+  cursorCondition,
+  decodeCursor as decodeKeysetCursor,
+  encodeCursor as encodeKeysetCursor,
+  InvalidCursorError,
+  KEYSETS,
+  type CursorValue,
+} from './pagination';
 
 /**
  * Below this, trigram matches are noise — two unrelated short strings share
@@ -51,26 +59,25 @@ export interface SearchCursor {
 /**
  * Cursors are opaque to clients, so they are base64 rather than a readable
  * tuple — a client that starts constructing them by hand becomes a
- * compatibility constraint on the ranking function.
+ * compatibility constraint on the ranking function. The encoding and the
+ * rejection are the shared ones every paginated query uses; only the tuple's
+ * shape is specific to search.
  */
 export function encodeCursor(cursor: SearchCursor): string {
-  return Buffer.from(JSON.stringify(cursor), 'utf-8').toString('base64url');
+  return encodeKeysetCursor(KEYSETS.search.query, [cursor.rank, cursor.ledger, cursor.hash]);
 }
 
+/** Returns null for anything this server did not issue; callers turn that into an error. */
 export function decodeCursor(raw: string): SearchCursor | null {
+  let values: CursorValue[];
   try {
-    const parsed = JSON.parse(Buffer.from(raw, 'base64url').toString('utf-8'));
-    if (
-      typeof parsed?.rank !== 'number' ||
-      typeof parsed?.ledger !== 'number' ||
-      typeof parsed?.hash !== 'string'
-    ) {
-      return null;
-    }
-    return { rank: parsed.rank, ledger: parsed.ledger, hash: parsed.hash };
+    values = decodeKeysetCursor(raw, KEYSETS.search.query, KEYSETS.search.columns.length);
   } catch {
     return null;
   }
+  const [rank, ledger, hash] = values;
+  if (typeof rank !== 'number' || typeof ledger !== 'number' || typeof hash !== 'string') return null;
+  return { rank, ledger, hash };
 }
 
 export interface SearchOptions {
@@ -116,16 +123,16 @@ export async function searchTransactions(pool: Pool, options: SearchOptions) {
   ];
 
   if (options.cursor) {
+    // The one rule every paginated query shares: a cursor it cannot read is an
+    // error, never a silently restarted or truncated page.
     const cursor = decodeCursor(options.cursor);
-    if (!cursor) {
-      throw new SearchError('Invalid cursor.');
-    }
+    if (!cursor) throw new InvalidCursorError('it is not a cursor this server issued.');
     params.push(cursor.rank, cursor.ledger, cursor.hash);
     const base = params.length - 2;
     // Keyset on the full ordering tuple, so the boundary is stable as new
     // ledgers land rather than shifting the way an OFFSET would.
     conditions.push(
-      `(${rankExpression}, ledger, hash) < ($${base}::real, $${base + 1}::bigint, $${base + 2})`
+      `(${rankExpression}, ledger, hash) < ($${base}::real, $${base + 1}::bigint, $${base + 2}::text)`
     );
   }
 
@@ -235,12 +242,8 @@ export async function getOperationsByAsset(pool: Pool, options: AssetOperationsO
     params.push(options.type.toLowerCase());
     conditions.push(`type = $${params.length}`);
   }
-  if (options.cursor) {
-    params.push(options.cursor);
-    conditions.push(
-      `(ledger, id) < (SELECT ledger, id FROM operations WHERE id = $${params.length} LIMIT 1)`
-    );
-  }
+  const cursorClause = cursorCondition(params, KEYSETS.assetOperations, options.cursor);
+  if (cursorClause) conditions.push(cursorClause);
 
   params.push(options.limit);
 

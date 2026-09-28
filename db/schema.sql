@@ -139,6 +139,12 @@ CREATE TABLE IF NOT EXISTS accounts (
     PRIMARY KEY (address, network)
 );
 
+-- Serves the `accounts` listing ordered by recent activity. `network` leads
+-- because every query filters on it, and `address` is in the key rather than
+-- left out because several accounts are typically modified in the same ledger —
+-- without a deterministic tiebreaker a keyset walk repeats the same page.
+CREATE INDEX idx_accounts_last_modified ON accounts (network, last_modified_ledger DESC, address);
+
 -- ─── Contract Events (Soroban) ────────────────────────────────────────────────
 
 CREATE TABLE IF NOT EXISTS contract_events (
