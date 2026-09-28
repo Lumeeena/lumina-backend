@@ -43,6 +43,9 @@ import {
   insertCustomEvents,
   loadContractSchemas,
   enqueueLedgerRetry,
+  markContractStorageEntriesArchived,
+  recordContractStorageHistory,
+  upsertContractStorageEntries,
 } from './db';
 import { decodeEvents } from './customDecode';
 import { loadConfig } from './config';
@@ -71,7 +74,7 @@ import { getRetentionInfo } from './soroban';
 import { getAccount, getLatestLedgerSequence, getLedger, getLedgerOperations, getLedgerTransactions, HorizonAccount, initializeHorizonClient } from './horizon';
 import type { RequestPurpose } from './throttle';
 import { getActiveContracts } from './registry';
-import { getEvents, getLatestLedgerSequence as getLatestRpcLedgerSequence, type ContractEvent } from './soroban';
+import { getEvents, getLatestLedgerSequence as getLatestRpcLedgerSequence, getContractStorageEntries, type ContractEvent } from './soroban';
 import { resolveNetworks, type NetworkConfig } from './networks';
 
 // Read version from package.json for logging
@@ -489,6 +492,7 @@ async function pollContractStorage(loop: NetworkLoop): Promise<void> {
     if (entries.length > 0) {
       routine.success({ network: name, entries: entries.length }, 'indexed contract storage entries');
       await upsertContractStorageEntries(pool, name, entries);
+      await recordContractStorageHistory(pool, name, entries);
     }
 
     // Watched keys the RPC did not return. Only those previously observed as

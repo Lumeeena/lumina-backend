@@ -10,6 +10,7 @@ import { createThrottle, type RequestPurpose } from './throttle';
 const log = subsystem('horizon');
 
 export const PAGE_LIMIT = 200;
+const ACCOUNT_REQUEST_TIMEOUT_MS = 10_000; // 10 seconds
 
 export interface HorizonLedger {
   sequence: number;
