@@ -138,12 +138,27 @@ export const resolvers = {
   Query: {
     async transactions(
       _: unknown,
-      args: { network?: string | null; limit?: number; cursor?: string | null; order?: 'ASC' | 'DESC' | null },
+      args: {
+        network?: string | null;
+        limit?: number;
+        cursor?: string | null;
+        order?: 'ASC' | 'DESC' | null;
+        successful?: boolean | null;
+        from?: string | null;
+        to?: string | null;
+        sourceAccount?: string | null;
+      },
       ctx: Context
     ) {
       const network = networkArgument(args, ctx);
       const limit = args.limit ?? 20;
-      const items = await getTransactions(ctx.pool, network.name, limit, args.cursor ?? null, args.order ?? 'DESC');
+      const items = await getTransactions(ctx.pool, network.name, limit, args.cursor ?? null, {
+        order: args.order ?? 'DESC',
+        successful: args.successful,
+        from: args.from,
+        to: args.to,
+        sourceAccount: args.sourceAccount,
+      });
       return {
         items,
         pageInfo: {

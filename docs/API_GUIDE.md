@@ -97,9 +97,20 @@ the selected direction.
 
 ### Fetch recent transactions
 
+The transaction list can be filtered before pagination. `successful` matches
+the transaction result, `from` and `to` are inclusive ISO-8601 bounds on
+`createdAt`, and `sourceAccount` matches the submitting account. Keep the same
+filters and order when passing a cursor to the next page.
+
 ```graphql
 query {
-  transactions(limit: 20) {
+  transactions(
+    successful: true
+    from: "2026-01-01T00:00:00Z"
+    to: "2026-01-31T23:59:59Z"
+    sourceAccount: "G..."
+    limit: 20
+  ) {
     items {
       hash
       ledger

@@ -45,6 +45,10 @@ type Query {
     limit: Int = 20
     cursor: String
     order: LedgerOrder = DESC
+    successful: Boolean
+    from: String
+    to: String
+    sourceAccount: String
   ): TransactionPage!
 
   """

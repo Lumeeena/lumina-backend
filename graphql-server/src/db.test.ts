@@ -152,16 +152,39 @@ test('getTransactions maps rows and passes limit/cursor params', async () => {
   assert.equal(items[0]?.hash, 'a');
   // The network is bound first and repeated in the cursor subquery: the same
   // hash exists on every network, so the keyset has to know which one.
-  assert.deepEqual(queries[0]?.params, ['mainnet', 20, 'cursor-hash']);
+  assert.deepEqual(queries[0]?.params, ['mainnet', 'cursor-hash', 20]);
   assert.match(queries[0]?.sql ?? '', /\(ledger, hash\) </);
   assert.match(queries[0]?.sql ?? '', /ORDER BY ledger DESC, hash DESC/);
 });
 
 test('getTransactions uses an ascending tuple keyset when requested', async () => {
   const { pool, queries } = fakePool([]);
-  await getTransactions(pool, 'mainnet', 20, 'cursor-hash', 'ASC');
+  await getTransactions(pool, 'mainnet', 20, 'cursor-hash', { order: 'ASC' });
   assert.match(queries[0]?.sql ?? '', /\(ledger, hash\) >/);
   assert.match(queries[0]?.sql ?? '', /ORDER BY ledger ASC, hash ASC/);
+});
+
+test('getTransactions composes filters with its stable keyset cursor', async () => {
+  const { pool, queries } = fakePool([]);
+  await getTransactions(pool, 'mainnet', 10, 'cursor-hash', {
+    order: 'ASC',
+    successful: false,
+    from: '2026-01-01T00:00:00Z',
+    to: '2026-01-31T23:59:59Z',
+    sourceAccount: 'GACCOUNT',
+  });
+
+  assert.equal(
+    queries[0]?.sql,
+    'SELECT * FROM transactions WHERE network = $1 AND successful = $2 ' +
+      'AND created_at >= $3::timestamptz AND created_at <= $4::timestamptz ' +
+      'AND source_account = $5 AND (ledger, hash) > ' +
+      '(SELECT ledger, hash FROM transactions WHERE hash = $6 AND network = $1) ' +
+      'ORDER BY ledger ASC, hash ASC LIMIT $7'
+  );
+  assert.deepEqual(queries[0]?.params, [
+    'mainnet', false, '2026-01-01T00:00:00Z', '2026-01-31T23:59:59Z', 'GACCOUNT', 'cursor-hash', 10,
+  ]);
 });
 
 test('getOperations builds WHERE clause only for provided filters', async () => {

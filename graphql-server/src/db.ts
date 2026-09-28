@@ -252,21 +252,56 @@ export function mapContractStorageEntry(row: ContractStorageEntryRow) {
 
 type LedgerOrder = 'ASC' | 'DESC';
 
+export interface TransactionQueryOptions {
+  order?: LedgerOrder;
+  successful?: boolean | null;
+  from?: string | null;
+  to?: string | null;
+  sourceAccount?: string | null;
+}
+
 export async function getTransactions(
   pool: Pool,
   network: string,
   limit: number,
   cursor?: string | null,
-  order: LedgerOrder = 'DESC'
+  options: TransactionQueryOptions = {}
 ) {
+  const order = options.order ?? 'DESC';
   const cursorOperator = order === 'ASC' ? '>' : '<';
+  const conditions = ['network = $1'];
+  const params: unknown[] = [network];
+
+  if (options.successful !== undefined && options.successful !== null) {
+    params.push(options.successful);
+    conditions.push(`successful = $${params.length}`);
+  }
+  if (options.from) {
+    params.push(options.from);
+    conditions.push(`created_at >= $${params.length}::timestamptz`);
+  }
+  if (options.to) {
+    params.push(options.to);
+    conditions.push(`created_at <= $${params.length}::timestamptz`);
+  }
+  if (options.sourceAccount) {
+    params.push(options.sourceAccount);
+    conditions.push(`source_account = $${params.length}`);
+  }
+  if (cursor) {
+    params.push(cursor);
+    conditions.push(
+      `(ledger, hash) ${cursorOperator} (SELECT ledger, hash FROM transactions WHERE hash = $${params.length} AND network = $1)`
+    );
+  }
+  params.push(limit);
+
   const { rows } = await pool.query<TransactionRow>(
     `SELECT * FROM transactions
-     WHERE network = $1
-       AND ($3::text IS NULL OR (ledger, hash) ${cursorOperator} (SELECT ledger, hash FROM transactions WHERE hash = $3 AND network = $1))
+     WHERE ${conditions.join(' AND ')}
      ORDER BY ledger ${order}, hash ${order}
-     LIMIT $2`,
-    [network, limit, cursor ?? null]
+     LIMIT $${params.length}`,
+    params
   );
   return rows.map(mapTransaction);
 }
