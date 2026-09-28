@@ -1,7 +1,11 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import { readdirSync } from 'node:fs';
+import { join } from 'node:path';
 import type { Pool } from 'pg';
 import { loadMigrations, migrationStatus } from './migrations';
+
+const MIGRATIONS_DIR = join(__dirname, '..', '..', 'db', 'migrations');
 
 test('loads migrations in order and expands initial schema include', () => {
   const migrations = loadMigrations();
@@ -18,7 +22,8 @@ test('loads migrations in order and expands initial schema include', () => {
 
   const networks = migrations.find(migration => migration.version === '007_networks');
   assert.ok(networks);
-  assert.match(networks?.sql, /ALTER TABLE operations ADD PRIMARY KEY \(id, ledger, network\)/);
+  assert.match(networks?.sql, /ALTER TABLE operations ADD PRIMARY KEY \(id, network\)/);
+  assert.doesNotMatch(networks?.sql, /ADD PRIMARY KEY \(id, ledger, network\)/);
   assert.match(networks?.sql, /FOREIGN KEY \(transaction_hash, network\) REFERENCES transactions \(hash, network\)/);
 });
 

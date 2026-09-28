@@ -62,6 +62,11 @@ CREATE INDEX idx_transactions_created_at ON transactions (created_at DESC);
 -- table's primary key must include the partition key, and the multi-network
 -- key (id, network) cannot also carry `ledger` — so the partitioning was
 -- reverted and the primary key is (id, network).
+--
+-- A deployment that ran the *original* 006_partition_operations still has a
+-- partitioned table keyed (id, ledger, network). indexer/src/db.ts inserts
+-- without an ON CONFLICT inference clause precisely so one insert statement
+-- works against both shapes.
 
 CREATE TABLE IF NOT EXISTS operations (
     id                  TEXT NOT NULL,
@@ -90,11 +95,13 @@ CREATE INDEX idx_operations_created_at    ON operations (created_at DESC);
 -- GIN index for JSONB queries (e.g. filter by "to" address in payment details)
 CREATE INDEX idx_operations_details       ON operations USING GIN (details);
 
--- Retained only so this file stays at parity with db/migrations/006_partition_operations.sql,
--- which creates it. `operations` is no longer partitioned (see the note above),
--- so the initial-partition call that used to run here would fail; the function
--- is defined but not invoked. The indexer's ensurePartitions wrapper
--- (indexer/src/db.ts) is currently unused.
+-- Defined for parity with db/migrations/006_partition_operations.sql, which
+-- also creates it — the parity check diffs the two dumps, so the definition has
+-- to appear in both. `operations` is not partitioned (see the note above), so
+-- the function is never invoked: creating a partition of a plain table is an
+-- error, and the initial-partition call that used to run here would fail. The
+-- indexer's ensurePartitions wrapper (indexer/src/db.ts) is unused for the same
+-- reason.
 CREATE OR REPLACE FUNCTION ensure_operations_partitions(partitions_ahead INTEGER DEFAULT 3)
 RETURNS void AS $$
 DECLARE
@@ -125,6 +132,7 @@ BEGIN
         'CREATE TABLE %I PARTITION OF operations FOR VALUES FROM (%L) TO (%L)',
         v_name, v_from, v_to
       );
+      RAISE NOTICE 'created partition % for ledger range [%, %)', v_name, v_from, v_to;
     END IF;
 
     v_from := v_to;
@@ -167,6 +175,12 @@ CREATE TABLE IF NOT EXISTS account_refresh_queue (
 );
 CREATE INDEX idx_account_refresh_queue_pending
     ON account_refresh_queue (network, queued_at);
+
+-- Serves the `accounts` listing ordered by recent activity. `network` leads
+-- because every query filters on it, and `address` is in the key rather than
+-- left out because several accounts are typically modified in the same ledger —
+-- without a deterministic tiebreaker a keyset walk repeats the same page.
+CREATE INDEX idx_accounts_last_modified ON accounts (network, last_modified_ledger DESC, address);
 
 -- ─── Contract Events (Soroban) ────────────────────────────────────────────────
 
@@ -240,6 +254,10 @@ CREATE INDEX IF NOT EXISTS idx_custom_events_contract_event
     ON custom_events (contract_id, event_name, ledger DESC);
 CREATE INDEX IF NOT EXISTS idx_custom_events_ledger
     ON custom_events (ledger DESC);
+-- Chain-time index, serving the retention prune (db/migrations/010_retention_prune_indexes.sql).
+-- Every other prunable table has one; without it this prune is a sequential scan.
+CREATE INDEX IF NOT EXISTS idx_custom_events_created_at
+    ON custom_events (created_at DESC);
 -- Containment queries on exact-match filters go through the payload directly.
 CREATE INDEX IF NOT EXISTS idx_custom_events_fields
     ON custom_events USING GIN (fields);
@@ -277,6 +295,94 @@ CREATE TABLE IF NOT EXISTS contract_storage_entries (
 -- the contract-scoped, durability-filtered, cursor-paginated read.
 CREATE INDEX IF NOT EXISTS idx_contract_storage_entries_lookup
     ON contract_storage_entries (contract_id, network, last_modified_ledger DESC, key DESC);
+
+-- ─── Trustlines (Asset Analytics) ────────────────────────────────────────────
+
+CREATE TABLE IF NOT EXISTS trustlines (
+    account             TEXT NOT NULL,
+    asset_code          TEXT NOT NULL,
+    asset_issuer        TEXT NOT NULL,
+    trust_limit         TEXT NOT NULL DEFAULT '922337203685.4775807',
+    balance             TEXT NOT NULL DEFAULT '0',
+    authorized          BOOLEAN NOT NULL DEFAULT TRUE,
+    last_modified_ledger BIGINT NOT NULL,
+    created_at          TIMESTAMPTZ NOT NULL,
+    updated_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    network             TEXT NOT NULL DEFAULT 'mainnet',
+    PRIMARY KEY (account, asset_code, asset_issuer, network),
+    CONSTRAINT trustlines_account_check           CHECK (account <> ''),
+    CONSTRAINT trustlines_asset_code_check        CHECK (asset_code <> ''),
+    CONSTRAINT trustlines_asset_issuer_check      CHECK (asset_issuer <> ''),
+    CONSTRAINT trustlines_last_modified_ledger_check CHECK (last_modified_ledger > 0)
+);
+
+CREATE INDEX IF NOT EXISTS idx_trustlines_asset
+    ON trustlines (asset_code, asset_issuer, network);
+
+CREATE INDEX IF NOT EXISTS idx_trustlines_asset_active
+    ON trustlines (asset_code, asset_issuer, network)
+    WHERE balance <> '0';
+
+CREATE INDEX IF NOT EXISTS idx_trustlines_account
+    ON trustlines (account, network);
+
+CREATE INDEX IF NOT EXISTS idx_trustlines_ledger
+    ON trustlines (last_modified_ledger DESC);
+
+-- ─── Assets (Asset Analytics) ────────────────────────────────────────────────
+
+CREATE TABLE IF NOT EXISTS assets (
+    asset_code          TEXT NOT NULL,
+    asset_issuer        TEXT NOT NULL,
+    holder_count        INTEGER NOT NULL DEFAULT 0,
+    first_seen_ledger   BIGINT NOT NULL,
+    last_activity_ledger BIGINT NOT NULL,
+    created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    network             TEXT NOT NULL DEFAULT 'mainnet',
+    PRIMARY KEY (asset_code, asset_issuer, network),
+    CONSTRAINT assets_asset_code_check          CHECK (asset_code <> ''),
+    CONSTRAINT assets_asset_issuer_check        CHECK (asset_issuer <> ''),
+    CONSTRAINT assets_holder_count_check        CHECK (holder_count >= 0),
+    CONSTRAINT assets_first_seen_ledger_check   CHECK (first_seen_ledger > 0),
+    CONSTRAINT assets_last_activity_ledger_check CHECK (last_activity_ledger > 0)
+);
+
+CREATE INDEX IF NOT EXISTS idx_assets_holder_count
+    ON assets (holder_count DESC, asset_code, asset_issuer);
+
+CREATE INDEX IF NOT EXISTS idx_assets_activity
+    ON assets (last_activity_ledger DESC);
+
+CREATE INDEX IF NOT EXISTS idx_assets_network
+    ON assets (network);
+
+-- ─── Asset Volume Buckets (Asset Analytics) ───────────────────────────────────
+
+CREATE TABLE IF NOT EXISTS asset_volume_buckets (
+    asset_code          TEXT NOT NULL,
+    asset_issuer        TEXT NOT NULL,
+    bucket_time         TIMESTAMPTZ NOT NULL,
+    volume              NUMERIC(20, 7) NOT NULL DEFAULT 0,
+    operation_count     INTEGER NOT NULL DEFAULT 0,
+    network             TEXT NOT NULL DEFAULT 'mainnet',
+    PRIMARY KEY (asset_code, asset_issuer, bucket_time, network),
+    CONSTRAINT asset_volume_buckets_asset_code_check    CHECK (asset_code <> ''),
+    CONSTRAINT asset_volume_buckets_asset_issuer_check  CHECK (asset_issuer <> ''),
+    CONSTRAINT asset_volume_buckets_volume_check        CHECK (volume >= 0),
+    CONSTRAINT asset_volume_buckets_operation_count_check CHECK (operation_count >= 0)
+);
+
+CREATE INDEX IF NOT EXISTS idx_asset_volume_buckets_asset_time
+    ON asset_volume_buckets (asset_code, asset_issuer, network, bucket_time DESC);
+
+CREATE INDEX IF NOT EXISTS idx_asset_volume_buckets_time
+    ON asset_volume_buckets (bucket_time DESC);
+
+CREATE OR REPLACE FUNCTION bucket_hour(ts TIMESTAMPTZ)
+RETURNS TIMESTAMPTZ AS $$
+    SELECT date_trunc('hour', ts);
+$$ LANGUAGE SQL IMMUTABLE;
 
 -- ─── Search and asset-filter indexes ──────────────────────────────────────
 --

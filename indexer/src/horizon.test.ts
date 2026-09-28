@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { getLatestLedgerSequence, getLedger, getLedgerTransactions, PAGE_LIMIT, initializeHorizonClient } from './horizon';
+import { getLatestLedgerSequence, getLedger, getLedgerTransactions, getAccount, PAGE_LIMIT, initializeHorizonClient } from './horizon';
 // @ts-expect-error - JSON file imports are enabled at runtime for this test fixture.
 import fixtures from './__fixtures__/horizon.json' assert { type: 'json' };
 

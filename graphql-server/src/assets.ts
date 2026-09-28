@@ -243,3 +243,218 @@ export async function getAssetDetail(pool: Pool, query: AssetDetailQuery): Promi
     series,
   };
 }
+
+// ─── Assets browsing (Issue #74) ─────────────────────────────────────────────
+
+export interface AssetsQuery {
+  network: string;
+  sortBy?: 'HOLDERS' | 'VOLUME';
+  search?: string | null;
+  limit?: number;
+  cursor?: string | null;
+}
+
+export interface Asset {
+  code: string;
+  issuer: string;
+  holderCount: number;
+  firstSeenLedger: number;
+  lastActivityLedger: number;
+  recentVolume?: string;
+}
+
+export interface AssetPageInfo {
+  hasNextPage: boolean;
+  cursor: string | null;
+}
+
+export interface AssetPage {
+  items: Asset[];
+  pageInfo: AssetPageInfo;
+}
+
+interface AssetRow {
+  asset_code: string;
+  asset_issuer: string;
+  holder_count: number;
+  first_seen_ledger: number;
+  last_activity_ledger: number;
+  recent_volume: string | null;
+}
+
+/**
+ * Parse keyset pagination cursor for assets.
+ * Format: "holderCount|code|issuer" or "volume|code|issuer"
+ */
+function parseCursor(cursor: string): { value: string; code: string; issuer: string } {
+  const parts = cursor.split('|');
+  if (parts.length !== 3) {
+    throw new AssetError('Invalid cursor format');
+  }
+  return { value: parts[0], code: parts[1], issuer: parts[2] };
+}
+
+/**
+ * Encode keyset pagination cursor for assets.
+ */
+function encodeCursor(value: string | number, code: string, issuer: string): string {
+  return `${value}|${code}|${issuer}`;
+}
+
+/**
+ * Get a single asset by code and issuer.
+ */
+export async function getAssetByKey(
+  pool: Pool,
+  network: string,
+  code: string,
+  issuer: string
+): Promise<Asset | null> {
+  const { rows } = await pool.query<AssetRow>(
+    `SELECT a.asset_code, a.asset_issuer, a.holder_count, a.first_seen_ledger, a.last_activity_ledger,
+            COALESCE(
+              (SELECT SUM(volume)::text 
+               FROM asset_volume_buckets 
+               WHERE asset_code = a.asset_code 
+                 AND asset_issuer = a.asset_issuer 
+                 AND network = a.network
+                 AND bucket_time >= NOW() - INTERVAL '7 days'),
+              '0'
+            ) AS recent_volume
+       FROM assets a
+      WHERE a.asset_code = $1 AND a.asset_issuer = $2 AND a.network = $3`,
+    [code, issuer, network]
+  );
+
+  if (rows.length === 0) {
+    return null;
+  }
+
+  const row = rows[0];
+  return {
+    code: row.asset_code,
+    issuer: row.asset_issuer,
+    holderCount: row.holder_count,
+    firstSeenLedger: row.first_seen_ledger,
+    lastActivityLedger: row.last_activity_ledger,
+    recentVolume: row.recent_volume ?? '0',
+  };
+}
+
+/**
+ * Browse assets with keyset pagination.
+ * Sorted by holder count (descending) or recent volume (descending).
+ */
+export async function getAssets(pool: Pool, query: AssetsQuery): Promise<AssetPage> {
+  const limit = query.limit ?? 20;
+  const sortBy = query.sortBy ?? 'HOLDERS';
+  const params: unknown[] = [query.network, limit + 1]; // Fetch one extra to check hasNextPage
+  let whereClauses: string[] = ['a.network = $1'];
+  let orderClause: string;
+  let cursorClause = '';
+
+  // Add search filter
+  if (query.search && query.search.trim() !== '') {
+    params.push(`%${query.search.trim()}%`);
+    whereClauses.push(`a.asset_code ILIKE $${params.length}`);
+  }
+
+  // Handle cursor for pagination
+  if (query.cursor) {
+    try {
+      const { value, code, issuer } = parseCursor(query.cursor);
+      
+      if (sortBy === 'VOLUME') {
+        params.push(value, code, issuer);
+        cursorClause = `AND (
+          v.recent_volume < $${params.length - 2}::numeric 
+          OR (v.recent_volume = $${params.length - 2}::numeric AND (a.asset_code > $${params.length - 1} OR (a.asset_code = $${params.length - 1} AND a.asset_issuer > $${params.length})))
+        )`;
+      } else {
+        params.push(value, code, issuer);
+        cursorClause = `AND (
+          a.holder_count < $${params.length - 2}::int 
+          OR (a.holder_count = $${params.length - 2}::int AND (a.asset_code > $${params.length - 1} OR (a.asset_code = $${params.length - 1} AND a.asset_issuer > $${params.length})))
+        )`;
+      }
+    } catch (err) {
+      throw new AssetError('Invalid pagination cursor');
+    }
+  }
+
+  // Build query based on sort order
+  let query_sql: string;
+  if (sortBy === 'VOLUME') {
+    orderClause = 'v.recent_volume DESC, a.asset_code ASC, a.asset_issuer ASC';
+    query_sql = `
+      WITH volume_agg AS (
+        SELECT asset_code, asset_issuer, network,
+               COALESCE(SUM(volume), 0) AS recent_volume
+          FROM asset_volume_buckets
+         WHERE network = $1
+           AND bucket_time >= NOW() - INTERVAL '7 days'
+         GROUP BY asset_code, asset_issuer, network
+      )
+      SELECT a.asset_code, a.asset_issuer, a.holder_count, 
+             a.first_seen_ledger, a.last_activity_ledger,
+             COALESCE(v.recent_volume, 0)::text AS recent_volume
+        FROM assets a
+        LEFT JOIN volume_agg v ON v.asset_code = a.asset_code 
+                               AND v.asset_issuer = a.asset_issuer 
+                               AND v.network = a.network
+       WHERE ${whereClauses.join(' AND ')}
+         ${cursorClause}
+       ORDER BY ${orderClause}
+       LIMIT $2
+    `;
+  } else {
+    orderClause = 'a.holder_count DESC, a.asset_code ASC, a.asset_issuer ASC';
+    query_sql = `
+      SELECT a.asset_code, a.asset_issuer, a.holder_count, 
+             a.first_seen_ledger, a.last_activity_ledger,
+             COALESCE(
+               (SELECT SUM(volume)::text 
+                FROM asset_volume_buckets 
+                WHERE asset_code = a.asset_code 
+                  AND asset_issuer = a.asset_issuer 
+                  AND network = a.network
+                  AND bucket_time >= NOW() - INTERVAL '7 days'),
+               '0'
+             ) AS recent_volume
+        FROM assets a
+       WHERE ${whereClauses.join(' AND ')}
+         ${cursorClause}
+       ORDER BY ${orderClause}
+       LIMIT $2
+    `;
+  }
+
+  const { rows } = await pool.query<AssetRow>(query_sql, params);
+
+  // Check if there are more results
+  const hasNextPage = rows.length > limit;
+  const items = rows.slice(0, limit);
+
+  // Generate cursor from last item
+  let nextCursor: string | null = null;
+  if (hasNextPage && items.length > 0) {
+    const last = items[items.length - 1];
+    const cursorValue = sortBy === 'VOLUME' ? (last.recent_volume ?? '0') : last.holder_count.toString();
+    nextCursor = encodeCursor(cursorValue, last.asset_code, last.asset_issuer);
+  }
+
+  return {
+    items: items.map(row => ({
+      code: row.asset_code,
+      issuer: row.asset_issuer,
+      holderCount: row.holder_count,
+      firstSeenLedger: row.first_seen_ledger,
+      lastActivityLedger: row.last_activity_ledger,
+      recentVolume: row.recent_volume ?? '0',
+    })),
+    pageInfo: {
+      hasNextPage,
+      cursor: nextCursor,
+    },
+  };
+}

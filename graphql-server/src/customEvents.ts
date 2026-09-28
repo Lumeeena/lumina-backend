@@ -27,6 +27,7 @@
  * below — a value not present in them is rejected before any SQL is built.
  */
 import type { Pool } from 'pg';
+import { cursorCondition, KEYSETS } from './pagination';
 
 export const NUMERIC_TYPES = new Set(['i32', 'u32', 'i64', 'u64', 'i128', 'u128']);
 
