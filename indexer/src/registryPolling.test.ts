@@ -38,7 +38,7 @@ test('registry polling is independent of loop iterations', () => {
   // Time-based: polls every N milliseconds, regardless of ledger indexing time
   
   const pollIntervalMs = 60_000;
-  let lastPollTime = 0;
+  const lastPollTime = 0;
   
   // With tick-based (every 12 ticks), would poll after 12 ledgers = 1.2 seconds
   // With time-based, polls after 60 seconds regardless of ledger count

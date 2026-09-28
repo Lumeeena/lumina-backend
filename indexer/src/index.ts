@@ -42,11 +42,18 @@ import {
   insertContractEvents,
   insertCustomEvents,
   loadContractSchemas,
+  markContractStorageEntriesArchived,
+  upsertContractStorageEntries,
   enqueueLedgerRetry,
+  markContractStorageEntriesArchived,
+  recordContractStorageHistory,
+  upsertContractStorageEntries,
 } from './db';
 import { decodeEvents } from './customDecode';
 import { loadConfig } from './config';
 import { routineLogger, subsystem } from './logger';
+import { RetryWorker } from './retryWorker';
+import { refreshAccountQueueBatch } from './accountRefresh';
 import {
   contractEventsIndexed,
   customEventsDecoded,
@@ -66,12 +73,19 @@ import {
   type NetworkState,
 } from './health';
 import { initTracing, shutdownTracing } from './tracing';
+import {
+  isRetentionEnabled,
+  pruneExpiredData,
+  retainedTables,
+  sleep,
+  type RetentionReport,
+} from './retention';
 import { initErrorTracking, captureException, shutdownErrorTracking } from './errorTracking';
-import { getRetentionInfo } from './soroban';
-import { getAccount, getLatestLedgerSequence, getLedger, getLedgerOperations, getLedgerTransactions, HorizonAccount, initializeHorizonClient } from './horizon';
+import { getRetentionInfo, getContractStorageEntries } from './soroban';
+import { getLatestLedgerSequence, getLedger, getLedgerOperations, getLedgerTransactions, initializeHorizonClient } from './horizon';
 import type { RequestPurpose } from './throttle';
 import { getActiveContracts } from './registry';
-import { getEvents, getLatestLedgerSequence as getLatestRpcLedgerSequence, type ContractEvent } from './soroban';
+import { getEvents, getLatestLedgerSequence as getLatestRpcLedgerSequence, getContractStorageEntries, type ContractEvent } from './soroban';
 import { resolveNetworks, type NetworkConfig } from './networks';
 
 // Read version from package.json for logging
@@ -141,6 +155,10 @@ const MAX_EVENTS_PER_CYCLE = config.sorobanMaxEventsPerCycle;
 // RPC ledger retention window — how far back the RPC can serve events.
 const RETENTION_WINDOW_LEDGERS = config.sorobanRetentionWindowLedgers;
 
+const RETENTION_WINDOWS = config.retentionWindows;
+const RETENTION_PRUNE_INTERVAL_MS = config.retentionPruneIntervalMs;
+const RETENTION_PRUNE_BATCH_SIZE = config.retentionPruneBatchSize;
+
 const pool = createPool(DATABASE_URL, {
   max: DB_POOL_MAX,
   idleTimeoutMillis: DB_POOL_IDLE_TIMEOUT,
@@ -173,6 +191,14 @@ interface NetworkLoop {
   accountCache: Map<string, number>;
   accountCacheOrder: string[];
   retryWorker?: RetryWorker;
+  /**
+   * The in-flight account-refresh batch, if one is running.
+   *
+   * Held so the queue is drained by one batch at a time: each poll tick calls
+   * scheduleAccountRefreshes, and without this a backlog would fan out into
+   * concurrent batches racing each other for the same rows.
+   */
+  accountRefreshTask: Promise<void> | null;
 }
 
 function createLoop(network: NetworkConfig, primaryName: string): NetworkLoop {
@@ -270,12 +296,24 @@ async function fetchAndIndexLedger(loop: NetworkLoop, sequence: number): Promise
   );
 }
 
+/** Records a ledger that exhausted its retries for the durable retry worker to pick up. */
+export type EnqueueLedgerRetry = (
+  network: string,
+  sequence: number,
+  error: string
+) => Promise<void>;
+
 export async function fetchAndIndexLedgerWithRetry(
   network: string,
   sequence: number,
   indexOne: (sequence: number) => Promise<void>,
   retryAttempts?: number,
-  retryBaseMs?: number
+  retryBaseMs?: number,
+  // Injected rather than called directly so the retry path is testable without
+  // a database — this function used to reach for the module pool on exhaustion,
+  // which made "did it give up correctly" untestable without Postgres. Same
+  // shape as accountRefresh's injected fetchAccount.
+  enqueueRetry: EnqueueLedgerRetry = (net, seq, err) => enqueueLedgerRetry(pool, net, seq, err)
 ): Promise<boolean> {
   const actualRetryAttempts = retryAttempts ?? config.ledgerRetryAttempts;
   const actualRetryBaseMs = retryBaseMs ?? config.ledgerRetryBaseMs;
@@ -288,8 +326,10 @@ export async function fetchAndIndexLedgerWithRetry(
         indexingErrors.inc({ loop: 'ledger' });
         const errorMsg = message(err);
         log.error({ network, ledger: sequence, attempts: attempt, err: errorMsg }, 'giving up on ledger; enqueueing for durable retry');
-        // Enqueue for durable retry instead of just giving up
-        await enqueueLedgerRetry(pool, network, sequence, errorMsg);
+        // Deliberately allowed to throw: if the retry cannot be recorded the
+        // ledger is unindexed and unrecorded, and letting the error propagate
+        // is what keeps the cursor from advancing past it.
+        await enqueueRetry(network, sequence, errorMsg);
         return false;
       }
       const delay = actualRetryBaseMs * 2 ** (attempt - 1);
@@ -317,6 +357,28 @@ export async function runLedgerCatchUp(
     onAdvanced(cursor);
   }
   return cursor;
+}
+
+/**
+ * Run one task per item, concurrently, and wait for every one of them.
+ *
+ * Each task is isolated: one that rejects is logged and the rest keep running.
+ * `Promise.all` would still let the other loops run, but it rejects the wait as
+ * a whole, so a single misbehaving chain would take the process down with it —
+ * the exact opposite of what per-network isolation is for. The wait therefore
+ * always resolves, and the only thing that ends the process is shutdown.
+ */
+export async function runIndependently<T>(
+  items: T[],
+  run: (item: T) => Promise<void>,
+  describe: (item: T) => string = () => 'task'
+): Promise<void> {
+  await Promise.all(items.map(item =>
+    run(item).catch((err: unknown) => {
+      indexingErrors.inc({ loop: 'network' });
+      log.error({ task: describe(item), err: message(err) }, 'loop exited with an error; the others keep running');
+    })
+  ));
 }
 
 /**
@@ -489,6 +551,7 @@ async function pollContractStorage(loop: NetworkLoop): Promise<void> {
     if (entries.length > 0) {
       routine.success({ network: name, entries: entries.length }, 'indexed contract storage entries');
       await upsertContractStorageEntries(pool, name, entries);
+      await recordContractStorageHistory(pool, name, entries);
     }
 
     // Watched keys the RPC did not return. Only those previously observed as
@@ -581,6 +644,41 @@ async function runNetworkLoop(loop: NetworkLoop, isPrimary: boolean): Promise<vo
   loop.retryWorker?.stop();
 }
 
+/**
+ * One retention pass, wrapped so a failure is logged and the loop continues.
+ *
+ * A prune that throws — a lock it could not take within `lock_timeout` — must
+ * not take the indexer down or stop future passes. Retrying an hour later is
+ * the whole recovery strategy.
+ */
+export async function runRetentionOnce(): Promise<RetentionReport[]> {
+  try {
+    return await pruneExpiredData(pool, RETENTION_WINDOWS, { batchSize: RETENTION_PRUNE_BATCH_SIZE });
+  } catch (err) {
+    indexingErrors.inc({ loop: 'retention' });
+    log.error({ err: message(err) }, 'retention prune failed; will retry on the next interval');
+    return [];
+  }
+}
+
+/**
+ * The pruning loop. Sleeps first so a long indexer backfill is not competing
+ * with a prune for the first hour of the process's life — on a cold database
+ * the backfill is the priority.
+ */
+async function runRetentionLoop(): Promise<void> {
+  const tables = retainedTables(RETENTION_WINDOWS);
+  log.info(
+    { tables, intervalMs: RETENTION_PRUNE_INTERVAL_MS, batchSize: RETENTION_PRUNE_BATCH_SIZE },
+    'retention pruning enabled'
+  );
+  while (!isShuttingDown) {
+    await sleep(RETENTION_PRUNE_INTERVAL_MS);
+    if (isShuttingDown) break;
+    await runRetentionOnce();
+  }
+}
+
 async function run() {
   initErrorTracking();
   initTracing();
@@ -609,6 +707,7 @@ async function run() {
       dbPoolMax: DB_POOL_MAX ?? 10,
       dbPoolIdleTimeout: DB_POOL_IDLE_TIMEOUT ?? 10000,
       dbPoolConnectionTimeout: DB_POOL_CONNECTION_TIMEOUT ?? 0,
+      retention: isRetentionEnabled(RETENTION_WINDOWS) ? RETENTION_WINDOWS : 'unlimited',
     },
     'lumina indexer starting'
   );
@@ -637,7 +736,17 @@ async function run() {
   });
 
   isLoopRunning = true;
-  await runIndependently(loops, loop => runNetworkLoop(loop, loop.network.name === registry.primary.name));
+  // The retention loop is a peer of the network loops, not a step inside one:
+  // it has to keep running (and the network loops have to keep running)
+  // regardless of what the other is doing.
+  await Promise.all([
+    runIndependently(
+      loops,
+      loop => runNetworkLoop(loop, loop.network.name === registry.primary.name),
+      loop => loop.network.name
+    ),
+    isRetentionEnabled(RETENTION_WINDOWS) ? runRetentionLoop() : Promise.resolve(),
+  ]);
   isLoopRunning = false;
 }
 
