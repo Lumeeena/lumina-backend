@@ -66,7 +66,44 @@ export interface LedgerEntryResult {
   latestLedger: number;
 }
 
-function decodeScVal(base64: string): unknown {
+/**
+ * Decode result: either the native value or a structured error.
+ */
+export type DecodeScValResult =
+  | { ok: true; value: unknown }
+  | { ok: false; error: string };
+
+/**
+ * Decode an ScVal from base64 XDR to its native JavaScript representation.
+ *
+ * All ScVal types are supported: scalars, maps, vectors, nested structs, bytes,
+ * addresses, and symbols. i128 and u128 values are decoded to bigint, which
+ * preserves precision above 2^53 — callers must serialize them as strings for
+ * JSON storage (see bigintReplacer in db.ts).
+ *
+ * Returns a structured result rather than throwing or returning null, so
+ * undecodable entries are reported rather than silently dropped.
+ */
+export function decodeScVal(base64: string): DecodeScValResult {
+  try {
+    const scVal = xdr.ScVal.fromXDR(base64, 'base64');
+    const value = scValToNative(scVal);
+    return { ok: true, value };
+  } catch (err) {
+    return {
+      ok: false,
+      error: err instanceof Error ? err.message : String(err),
+    };
+  }
+}
+
+/**
+ * Legacy decoding helper that returns null on failure.
+ *
+ * Used for backward compatibility where callers expect null on decode failure.
+ * New code should use decodeScVal() and handle the structured result.
+ */
+function decodeScValLegacy(base64: string): unknown {
   try {
     return scValToNative(xdr.ScVal.fromXDR(base64, 'base64'));
   } catch {
@@ -332,8 +369,8 @@ export async function getEvents(
     ledger: record.ledger,
     createdAt: record.ledgerClosedAt,
     pagingToken: record.pagingToken,
-    topics: record.topic.map(t => JSON.stringify(decodeScVal(t))),
-    value: decodeScVal(record.value),
+    topics: record.topic.map(t => JSON.stringify(decodeScValLegacy(t))),
+    value: decodeScValLegacy(record.value),
   }));
 
   return { events: mappedEvents, latestLedger, truncated };

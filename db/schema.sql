@@ -290,6 +290,39 @@ CREATE TABLE IF NOT EXISTS contract_storage_entries (
 CREATE INDEX IF NOT EXISTS idx_contract_storage_entries_lookup
     ON contract_storage_entries (contract_id, network, last_modified_ledger DESC, key DESC);
 
+--
+-- Append-only history of contract storage changes.
+--
+-- Supports time-travel queries: "what was the value of this key at ledger N?"
+-- Each change creates a new row; the contract_storage_entries table holds only
+-- the current value. Together they form the complete timeline.
+--
+-- Retention: history is unbounded by default but can be pruned based on
+-- STORAGE_HISTORY_RETENTION_LEDGERS configuration. See the indexer's storage
+-- history pruning routine for the retention policy.
+CREATE TABLE IF NOT EXISTS contract_storage_history (
+    contract_id          TEXT NOT NULL,
+    key                  TEXT NOT NULL,
+    durability           TEXT NOT NULL,
+    value                JSONB,
+    value_xdr            TEXT,
+    live_until_ledger    BIGINT,
+    last_modified_ledger BIGINT NOT NULL,
+    indexed_at           TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    network              TEXT NOT NULL DEFAULT 'mainnet',
+    PRIMARY KEY (contract_id, key, last_modified_ledger, network),
+    CONSTRAINT contract_storage_history_durability_check CHECK (durability IN ('persistent', 'temporary')),
+    CONSTRAINT contract_storage_history_ledger_check     CHECK (last_modified_ledger > 0)
+);
+
+-- Time-range queries: "show me all changes to this contract between ledger A and B"
+CREATE INDEX IF NOT EXISTS idx_contract_storage_history_time_range
+    ON contract_storage_history (contract_id, network, last_modified_ledger DESC);
+
+-- Key-specific history: "show me the history of this specific storage key"
+CREATE INDEX IF NOT EXISTS idx_contract_storage_history_key_lookup
+    ON contract_storage_history (contract_id, key, network, last_modified_ledger DESC);
+
 -- ─── Search and asset-filter indexes ──────────────────────────────────────
 --
 -- Trigram rather than tsvector for memos: Stellar memos are order references
