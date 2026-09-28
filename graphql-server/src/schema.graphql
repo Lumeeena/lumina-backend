@@ -42,6 +42,9 @@ type Query {
     Network to read; defaults to the primary network configured for this deployment.
     """
     network: Network
+    """
+    Maximum page size is 100. Larger limits are rejected.
+    """
     limit: Int = 20
     cursor: String
     order: LedgerOrder = DESC
@@ -72,6 +75,9 @@ type Query {
     Filter to operations involving one asset: "CODE:ISSUER", or "XLM" for native.
     """
     asset: String
+    """
+    Maximum page size is 100. Larger limits are rejected.
+    """
     limit: Int = 20
     cursor: String
     order: LedgerOrder = DESC
@@ -87,6 +93,9 @@ type Query {
   search(
     network: Network
     query: String!
+    """
+    Maximum page size is 100. Larger limits are rejected.
+    """
     limit: Int = 20
     cursor: String
   ): TransactionPage!
@@ -99,6 +108,9 @@ type Query {
     network: Network
     contractId: String!
     topic: String
+    """
+    Maximum page size is 100. Larger limits are rejected.
+    """
     limit: Int = 20
     cursor: String
     order: LedgerOrder = DESC
@@ -123,6 +135,9 @@ type Query {
     contractId: String!
     event: String!
     where: [CustomEventFilter!]
+    """
+    Maximum page size is 100. Larger limits are rejected.
+    """
     limit: Int = 20
     cursor: String
     order: LedgerOrder = DESC
@@ -328,8 +343,14 @@ type Account {
   """
   Related rows are optional so a lookup error does not erase the account.
   """
-  transactions(limit: Int = 10): [Transaction!]
-  operations(limit: Int = 10): [Operation!]
+  transactions(
+    """Maximum page size is 100. Larger limits are rejected."""
+    limit: Int = 10
+  ): [Transaction!]
+  operations(
+    """Maximum page size is 100. Larger limits are rejected."""
+    limit: Int = 10
+  ): [Operation!]
 }
 
 type Balance {

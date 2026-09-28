@@ -90,8 +90,8 @@ the selected direction.
 
 ### Limits
 
-- **Default limit:** 20 items per page
-- **Max limit:** no hard cap, but queries are serial so use 50–200 for practical clients
+- **Default limit:** 20 items per page; nested account lists default to 10
+- **Maximum limit:** 100 items. Larger limits are rejected with `BAD_USER_INPUT`.
 
 ## Common Queries
 

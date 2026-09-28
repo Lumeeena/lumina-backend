@@ -38,6 +38,7 @@ type Query {
   transactions(
     """Network to read; defaults to the primary network configured for this deployment."""
     network: Network
+    """Maximum page size is 100. Larger limits are rejected."""
     limit: Int = 20
     cursor: String
     order: LedgerOrder = DESC
@@ -62,6 +63,7 @@ type Query {
     type: OperationType
     """Filter to operations involving one asset: "CODE:ISSUER", or "XLM" for native."""
     asset: String
+    """Maximum page size is 100. Larger limits are rejected."""
     limit: Int = 20
     cursor: String
     order: LedgerOrder = DESC
@@ -74,7 +76,13 @@ type Query {
   order references and short codes rather than prose, and stemming an
   identifier is wrong. An exact case-insensitive match always ranks first.
   """
-  search(network: Network, query: String!, limit: Int = 20, cursor: String): TransactionPage!
+  search(
+    network: Network
+    query: String!
+    """Maximum page size is 100. Larger limits are rejected."""
+    limit: Int = 20
+    cursor: String
+  ): TransactionPage!
 
   """
   Fetch Soroban contract events by contract ID.
@@ -84,6 +92,7 @@ type Query {
     network: Network
     contractId: String!
     topic: String
+    """Maximum page size is 100. Larger limits are rejected."""
     limit: Int = 20
     cursor: String
     order: LedgerOrder = DESC
@@ -107,6 +116,7 @@ type Query {
     durability: ContractStorageDurability
     """Only entries whose base64 XDR key starts with this prefix."""
     keyPrefix: String
+    """Maximum page size is 100. Larger limits are rejected."""
     limit: Int = 20
     cursor: String
   ): ContractStorageEntryPage!
@@ -126,6 +136,7 @@ type Query {
     contractId: String!
     event: String!
     where: [CustomEventFilter!]
+    """Maximum page size is 100. Larger limits are rejected."""
     limit: Int = 20
     cursor: String
     order: LedgerOrder = DESC
@@ -275,8 +286,14 @@ type Account {
   flags: AccountFlags!
   thresholds: Thresholds!
   """Related rows are optional so a lookup error does not erase the account."""
-  transactions(limit: Int = 10): [Transaction!]
-  operations(limit: Int = 10): [Operation!]
+  transactions(
+    """Maximum page size is 100. Larger limits are rejected."""
+    limit: Int = 10
+  ): [Transaction!]
+  operations(
+    """Maximum page size is 100. Larger limits are rejected."""
+    limit: Int = 10
+  ): [Operation!]
 }
 
 type Balance {

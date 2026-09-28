@@ -24,6 +24,7 @@ import { getNetworks, resolveNetworkArgument, type NetworkConfig, type NetworkRe
 import type { LedgerNotifier } from './pubsub';
 import { ANONYMOUS_CALLER, type ApiCaller } from './auth';
 import { computeBalanceHistory } from './balanceHistory';
+import { getPageSize } from './pagination';
 
 export interface BaseContext {
   pool: Pool;
@@ -150,8 +151,8 @@ export const resolvers = {
       },
       ctx: Context
     ) {
+      const limit = getPageSize(args.limit);
       const network = networkArgument(args, ctx);
-      const limit = args.limit ?? 20;
       const items = await getTransactions(ctx.pool, network.name, limit, args.cursor ?? null, {
         order: args.order ?? 'DESC',
         successful: args.successful,
@@ -191,8 +192,8 @@ export const resolvers = {
       },
       ctx: Context
     ) {
+      const limit = getPageSize(args.limit);
       const network = networkArgument(args, ctx);
-      const limit = args.limit ?? 20;
 
       // The asset filter needs its own query: an asset can appear as the
       // payment asset or either side of an offer, which the generic operations
@@ -230,8 +231,8 @@ export const resolvers = {
       args: { network?: string | null; query: string; limit?: number; cursor?: string | null },
       ctx: Context
     ) {
+      const limit = getPageSize(args.limit);
       const network = networkArgument(args, ctx);
-      const limit = args.limit ?? 20;
       const { items, nextCursor } = await searchTransactions(ctx.pool, {
         network: network.name,
         query: args.query,
@@ -253,8 +254,8 @@ export const resolvers = {
       args: { network?: string | null; contractId: string; topic?: string | null; limit?: number; cursor?: string | null; order?: 'ASC' | 'DESC' | null },
       ctx: Context
     ) {
+      const limit = getPageSize(args.limit);
       const network = networkArgument(args, ctx);
-      const limit = args.limit ?? 20;
       const items = await getEventsByContract(ctx.pool, {
         network: network.name,
         contractId: args.contractId,
@@ -284,8 +285,8 @@ export const resolvers = {
       },
       ctx: Context
     ) {
+      const limit = getPageSize(args.limit);
       const network = networkArgument(args, ctx);
-      const limit = args.limit ?? 20;
       const items = await getContractStorageEntries(ctx.pool, {
         network: network.name,
         contractId: args.contractId,
@@ -345,8 +346,8 @@ export const resolvers = {
       },
       ctx: Context
     ) {
+      const limit = getPageSize(args.limit);
       const network = networkArgument(args, ctx);
-      const limit = args.limit ?? 20;
       const items = await getCustomEvents(ctx.pool, {
         network: network.name,
         contractId: args.contractId,
@@ -433,12 +434,14 @@ export const resolvers = {
 
   Account: {
     async transactions(parent: { address: string; network?: string }, args: { limit?: number }, ctx: Context) {
+      const limit = getPageSize(args.limit, 10);
       const network = networkForParent(ctx, parent.network);
-      return getAccountTransactions(ctx.pool, network.name, parent.address, args.limit ?? 10);
+      return getAccountTransactions(ctx.pool, network.name, parent.address, limit);
     },
     async operations(parent: { address: string; network?: string }, args: { limit?: number }, ctx: Context) {
+      const limit = getPageSize(args.limit, 10);
       const network = networkForParent(ctx, parent.network);
-      return getAccountOperations(ctx.pool, network.name, parent.address, args.limit ?? 10);
+      return getAccountOperations(ctx.pool, network.name, parent.address, limit);
     },
   },
 
