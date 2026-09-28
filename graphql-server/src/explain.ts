@@ -149,13 +149,6 @@ export function planScans(plan: unknown): ScanRef[] {
   return scans;
 }
 
-function scanKey(scan: ScanRef): string {
-  // A Bitmap Index Scan names its index but not its relation (the heap access
-  // below it carries that), so the index is the part worth leading with.
-  if (scan.index) return scan.relation ? `${scan.index} on ${scan.relation}` : scan.index;
-  return `scan(${scan.relation ?? 'unknown'})`;
-}
-
 /** Compare a captured signature against the baseline's. Empty means unchanged. */
 export function diffSignatures(baseline: PlanSignature, current: PlanSignature): Delta[] {
   const deltas: Delta[] = [];

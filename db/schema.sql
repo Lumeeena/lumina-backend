@@ -62,6 +62,11 @@ CREATE INDEX idx_transactions_created_at ON transactions (created_at DESC);
 -- table's primary key must include the partition key, and the multi-network
 -- key (id, network) cannot also carry `ledger` — so the partitioning was
 -- reverted and the primary key is (id, network).
+--
+-- A deployment that ran the *original* 006_partition_operations still has a
+-- partitioned table keyed (id, ledger, network). indexer/src/db.ts inserts
+-- without an ON CONFLICT inference clause precisely so one insert statement
+-- works against both shapes.
 
 CREATE TABLE IF NOT EXISTS operations (
     id                  TEXT NOT NULL,
@@ -90,11 +95,13 @@ CREATE INDEX idx_operations_created_at    ON operations (created_at DESC);
 -- GIN index for JSONB queries (e.g. filter by "to" address in payment details)
 CREATE INDEX idx_operations_details       ON operations USING GIN (details);
 
--- Retained only so this file stays at parity with db/migrations/006_partition_operations.sql,
--- which creates it. `operations` is no longer partitioned (see the note above),
--- so the initial-partition call that used to run here would fail; the function
--- is defined but not invoked. The indexer's ensurePartitions wrapper
--- (indexer/src/db.ts) is currently unused.
+-- Defined for parity with db/migrations/006_partition_operations.sql, which
+-- also creates it — the parity check diffs the two dumps, so the definition has
+-- to appear in both. `operations` is not partitioned (see the note above), so
+-- the function is never invoked: creating a partition of a plain table is an
+-- error, and the initial-partition call that used to run here would fail. The
+-- indexer's ensurePartitions wrapper (indexer/src/db.ts) is unused for the same
+-- reason.
 CREATE OR REPLACE FUNCTION ensure_operations_partitions(partitions_ahead INTEGER DEFAULT 3)
 RETURNS void AS $$
 DECLARE
@@ -125,6 +132,7 @@ BEGIN
         'CREATE TABLE %I PARTITION OF operations FOR VALUES FROM (%L) TO (%L)',
         v_name, v_from, v_to
       );
+      RAISE NOTICE 'created partition % for ledger range [%, %)', v_name, v_from, v_to;
     END IF;
 
     v_from := v_to;
@@ -240,6 +248,10 @@ CREATE INDEX IF NOT EXISTS idx_custom_events_contract_event
     ON custom_events (contract_id, event_name, ledger DESC);
 CREATE INDEX IF NOT EXISTS idx_custom_events_ledger
     ON custom_events (ledger DESC);
+-- Chain-time index, serving the retention prune (db/migrations/010_retention_prune_indexes.sql).
+-- Every other prunable table has one; without it this prune is a sequential scan.
+CREATE INDEX IF NOT EXISTS idx_custom_events_created_at
+    ON custom_events (created_at DESC);
 -- Containment queries on exact-match filters go through the payload directly.
 CREATE INDEX IF NOT EXISTS idx_custom_events_fields
     ON custom_events USING GIN (fields);
