@@ -15,6 +15,11 @@ enum Network {
   FUTURENET
 }
 
+enum LedgerOrder {
+  ASC
+  DESC
+}
+
 """
 Root queries.
 
@@ -35,6 +40,7 @@ type Query {
     network: Network
     limit: Int = 20
     cursor: String
+    order: LedgerOrder = DESC
   ): TransactionPage!
 
   """Get a single transaction by hash."""
@@ -54,6 +60,7 @@ type Query {
     asset: String
     limit: Int = 20
     cursor: String
+    order: LedgerOrder = DESC
   ): OperationPage!
 
   """
@@ -75,6 +82,7 @@ type Query {
     topic: String
     limit: Int = 20
     cursor: String
+    order: LedgerOrder = DESC
   ): ContractEventPage!
 
   """
@@ -116,6 +124,7 @@ type Query {
     where: [CustomEventFilter!]
     limit: Int = 20
     cursor: String
+    order: LedgerOrder = DESC
   ): CustomEventPage!
 
   """The custom schema registered for a contract, if any."""

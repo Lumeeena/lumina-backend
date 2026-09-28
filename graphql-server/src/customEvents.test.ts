@@ -212,6 +212,22 @@ test('a cursor adds keyset pagination rather than an offset', async () => {
   assert.ok(calls[1]!.params.includes('evt9'));
 });
 
+test('ascending custom events reverse cursor comparison and result ordering', async () => {
+  const { pool, calls } = fakePool();
+
+  await getCustomEvents(pool, {
+    network: 'mainnet',
+    contractId: CONTRACT,
+    event: 'transfer',
+    limit: 5,
+    cursor: 'evt9',
+    order: 'ASC',
+  });
+
+  assert.match(calls[1]!.sql, /\(ledger, event_id\) >/);
+  assert.match(calls[1]!.sql, /ORDER BY ledger ASC, event_id ASC/);
+});
+
 test('results are mapped with each value carrying its declared type', () => {
   const mapped = mapCustomEvent(
     {

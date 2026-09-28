@@ -153,6 +153,15 @@ test('getTransactions maps rows and passes limit/cursor params', async () => {
   // The network is bound first and repeated in the cursor subquery: the same
   // hash exists on every network, so the keyset has to know which one.
   assert.deepEqual(queries[0]?.params, ['mainnet', 20, 'cursor-hash']);
+  assert.match(queries[0]?.sql ?? '', /\(ledger, hash\) </);
+  assert.match(queries[0]?.sql ?? '', /ORDER BY ledger DESC, hash DESC/);
+});
+
+test('getTransactions uses an ascending tuple keyset when requested', async () => {
+  const { pool, queries } = fakePool([]);
+  await getTransactions(pool, 'mainnet', 20, 'cursor-hash', 'ASC');
+  assert.match(queries[0]?.sql ?? '', /\(ledger, hash\) >/);
+  assert.match(queries[0]?.sql ?? '', /ORDER BY ledger ASC, hash ASC/);
 });
 
 test('getOperations builds WHERE clause only for provided filters', async () => {
@@ -232,6 +241,13 @@ test('getOperations with no filters selects only the network and the limit', asy
   assert.equal(queries[0]?.sql, 'SELECT * FROM operations WHERE network = $1 ORDER BY ledger DESC, id DESC LIMIT $2');
 });
 
+test('getOperations uses an ascending tuple keyset when requested', async () => {
+  const { pool, queries } = fakePool([]);
+  await getOperations(pool, { network: 'mainnet', cursor: 'op-9', limit: 10, order: 'ASC' });
+  assert.match(queries[0]?.sql ?? '', /\(ledger, id\) >/);
+  assert.match(queries[0]?.sql ?? '', /ORDER BY ledger ASC, id ASC/);
+});
+
 test('getEventsByContract emits exactly the expected statement with every filter set', async () => {
   const { pool, queries } = fakePool([]);
   await getEventsByContract(pool, { network: 'mainnet', contractId: 'CABC', topic: 'swap', cursor: 'evt-9', limit: 20 });
@@ -243,6 +259,13 @@ test('getEventsByContract emits exactly the expected statement with every filter
       'ORDER BY ledger DESC, id DESC LIMIT $5'
   );
   assert.deepEqual(queries[0]?.params, ['CABC', 'mainnet', 'swap', 'evt-9', 20]);
+});
+
+test('getEventsByContract uses an ascending tuple keyset when requested', async () => {
+  const { pool, queries } = fakePool([]);
+  await getEventsByContract(pool, { network: 'mainnet', contractId: 'CABC', cursor: 'evt-9', limit: 20, order: 'ASC' });
+  assert.match(queries[0]?.sql ?? '', /\(ledger, id\) >/);
+  assert.match(queries[0]?.sql ?? '', /ORDER BY ledger ASC, id ASC/);
 });
 
 test('getEventsByContract never writes a filter value into the statement', async () => {

@@ -250,12 +250,21 @@ export function mapContractStorageEntry(row: ContractStorageEntryRow) {
 
 // ─── Queries ────────────────────────────────────────────────────────────────
 
-export async function getTransactions(pool: Pool, network: string, limit: number, cursor?: string | null) {
+type LedgerOrder = 'ASC' | 'DESC';
+
+export async function getTransactions(
+  pool: Pool,
+  network: string,
+  limit: number,
+  cursor?: string | null,
+  order: LedgerOrder = 'DESC'
+) {
+  const cursorOperator = order === 'ASC' ? '>' : '<';
   const { rows } = await pool.query<TransactionRow>(
     `SELECT * FROM transactions
      WHERE network = $1
-       AND ($3::text IS NULL OR (ledger, hash) < (SELECT ledger, hash FROM transactions WHERE hash = $3 AND network = $1))
-     ORDER BY ledger DESC, hash DESC
+       AND ($3::text IS NULL OR (ledger, hash) ${cursorOperator} (SELECT ledger, hash FROM transactions WHERE hash = $3 AND network = $1))
+     ORDER BY ledger ${order}, hash ${order}
      LIMIT $2`,
     [network, limit, cursor ?? null]
   );
@@ -287,8 +296,11 @@ export async function getOperations(
     type?: string | null;
     limit: number;
     cursor?: string | null;
+    order?: LedgerOrder;
   }
 ) {
+  const order = opts.order ?? 'DESC';
+  const cursorOperator = order === 'ASC' ? '>' : '<';
   const conditions: string[] = [];
   const params: unknown[] = [];
 
@@ -308,7 +320,7 @@ export async function getOperations(
     // The cursor's own row is looked up inside the same network: an operation
     // id repeats across networks now that the key is composite.
     conditions.push(
-      `(ledger, id) < (SELECT ledger, id FROM operations WHERE id = $${params.length} AND network = $1)`
+      `(ledger, id) ${cursorOperator} (SELECT ledger, id FROM operations WHERE id = $${params.length} AND network = $1)`
     );
   }
 
@@ -316,7 +328,7 @@ export async function getOperations(
   params.push(opts.limit);
 
   const { rows } = await pool.query<OperationRow>(
-    `SELECT * FROM operations ${where} ORDER BY ledger DESC, id DESC LIMIT $${params.length}`,
+    `SELECT * FROM operations ${where} ORDER BY ledger ${order}, id ${order} LIMIT $${params.length}`,
     params
   );
   return rows.map(mapOperation);
@@ -463,8 +475,11 @@ export async function getEventsByContract(
     topic?: string | null;
     limit: number;
     cursor?: string | null;
+    order?: LedgerOrder;
   }
 ) {
+  const order = opts.order ?? 'DESC';
+  const cursorOperator = order === 'ASC' ? '>' : '<';
   const conditions = ['contract_id = $1'];
   const params: unknown[] = [opts.contractId];
 
@@ -478,14 +493,14 @@ export async function getEventsByContract(
   if (opts.cursor) {
     params.push(opts.cursor);
     conditions.push(
-      `(ledger, id) < (SELECT ledger, id FROM contract_events WHERE id = $${params.length} AND network = $2)`
+      `(ledger, id) ${cursorOperator} (SELECT ledger, id FROM contract_events WHERE id = $${params.length} AND network = $2)`
     );
   }
 
   params.push(opts.limit);
 
   const { rows } = await pool.query<EventRow>(
-    `SELECT * FROM contract_events WHERE ${conditions.join(' AND ')} ORDER BY ledger DESC, id DESC LIMIT $${params.length}`,
+    `SELECT * FROM contract_events WHERE ${conditions.join(' AND ')} ORDER BY ledger ${order}, id ${order} LIMIT $${params.length}`,
     params
   );
   return rows.map(mapEvent);

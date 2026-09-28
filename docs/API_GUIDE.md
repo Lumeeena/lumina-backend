@@ -82,6 +82,12 @@ To fetch the next page, pass the cursor to the same query:
 }
 ```
 
+The `transactions`, `operations`, `events`, and `customEvents` queries accept
+`order: ASC` or `order: DESC` (default `DESC`). Ordering is by ledger sequence,
+with a stable identifier as the tie-breaker, not by wall-clock `createdAt`.
+Keep the same order when requesting subsequent pages; the cursor advances in
+the selected direction.
+
 ### Limits
 
 - **Default limit:** 20 items per page

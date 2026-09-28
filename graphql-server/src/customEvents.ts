@@ -163,9 +163,12 @@ export interface CustomEventQuery {
   where?: CustomEventFilter[] | null;
   limit: number;
   cursor?: string | null;
+  order?: 'ASC' | 'DESC' | null;
 }
 
 export async function getCustomEvents(pool: Pool, query: CustomEventQuery) {
+  const order = query.order ?? 'DESC';
+  const cursorOperator = order === 'ASC' ? '>' : '<';
   const schema = await getContractSchema(pool, query.network, query.contractId);
   if (!schema) {
     throw new CustomQueryError(`No custom schema registered for contract ${query.contractId}`);
@@ -187,7 +190,7 @@ export async function getCustomEvents(pool: Pool, query: CustomEventQuery) {
   if (query.cursor) {
     params.push(query.cursor);
     conditions.push(
-      `(ledger, event_id) < (SELECT ledger, event_id FROM custom_events WHERE event_id = $${params.length} AND network = $3 LIMIT 1)`
+      `(ledger, event_id) ${cursorOperator} (SELECT ledger, event_id FROM custom_events WHERE event_id = $${params.length} AND network = $3 LIMIT 1)`
     );
   }
 
@@ -196,7 +199,7 @@ export async function getCustomEvents(pool: Pool, query: CustomEventQuery) {
   const { rows } = await pool.query<CustomEventRow>(
     `SELECT * FROM custom_events
       WHERE ${conditions.join(' AND ')}
-      ORDER BY ledger DESC, event_id DESC
+      ORDER BY ledger ${order}, event_id ${order}
       LIMIT $${params.length}`,
     params
   );

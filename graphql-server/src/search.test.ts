@@ -278,6 +278,21 @@ test('an asset query paginates by keyset rather than offset', async () => {
   assert.ok(calls[0]?.params.includes('op99'));
 });
 
+test('an ascending asset query reverses both keyset comparison and result order', async () => {
+  const { pool, calls } = fakePool([]);
+
+  await getOperationsByAsset(pool, {
+    network: 'mainnet',
+    asset: 'XLM',
+    limit: 5,
+    cursor: 'op99',
+    order: 'ASC',
+  });
+
+  assert.match(calls[0]?.sql ?? '', /\(ledger, id\) >/);
+  assert.match(calls[0]?.sql ?? '', /ORDER BY ledger ASC, id ASC/);
+});
+
 test('an invalid asset is rejected before any query runs', async () => {
   const { pool, calls } = fakePool([]);
 

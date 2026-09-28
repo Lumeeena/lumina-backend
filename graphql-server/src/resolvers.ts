@@ -138,12 +138,12 @@ export const resolvers = {
   Query: {
     async transactions(
       _: unknown,
-      args: { network?: string | null; limit?: number; cursor?: string | null },
+      args: { network?: string | null; limit?: number; cursor?: string | null; order?: 'ASC' | 'DESC' | null },
       ctx: Context
     ) {
       const network = networkArgument(args, ctx);
       const limit = args.limit ?? 20;
-      const items = await getTransactions(ctx.pool, network.name, limit, args.cursor ?? null);
+      const items = await getTransactions(ctx.pool, network.name, limit, args.cursor ?? null, args.order ?? 'DESC');
       return {
         items,
         pageInfo: {
@@ -172,6 +172,7 @@ export const resolvers = {
         asset?: string | null;
         limit?: number;
         cursor?: string | null;
+        order?: 'ASC' | 'DESC' | null;
       },
       ctx: Context
     ) {
@@ -189,6 +190,7 @@ export const resolvers = {
             type: args.type ?? null,
             limit,
             cursor: args.cursor ?? null,
+            order: args.order ?? 'DESC',
           })
         : await getOperations(ctx.pool, {
             network: network.name,
@@ -196,6 +198,7 @@ export const resolvers = {
             type: args.type ?? null,
             limit,
             cursor: args.cursor ?? null,
+            order: args.order ?? 'DESC',
           });
 
       return {
@@ -232,7 +235,7 @@ export const resolvers = {
 
     async events(
       _: unknown,
-      args: { network?: string | null; contractId: string; topic?: string | null; limit?: number; cursor?: string | null },
+      args: { network?: string | null; contractId: string; topic?: string | null; limit?: number; cursor?: string | null; order?: 'ASC' | 'DESC' | null },
       ctx: Context
     ) {
       const network = networkArgument(args, ctx);
@@ -243,6 +246,7 @@ export const resolvers = {
         topic: args.topic ?? null,
         limit,
         cursor: args.cursor ?? null,
+        order: args.order ?? 'DESC',
       });
       return {
         items,
@@ -322,6 +326,7 @@ export const resolvers = {
         where?: CustomEventFilter[] | null;
         limit?: number;
         cursor?: string | null;
+        order?: 'ASC' | 'DESC' | null;
       },
       ctx: Context
     ) {
@@ -334,6 +339,7 @@ export const resolvers = {
         where: args.where ?? null,
         limit,
         cursor: args.cursor ?? null,
+        order: args.order ?? 'DESC',
       });
       return {
         items,
