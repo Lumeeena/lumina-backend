@@ -154,10 +154,41 @@ test('getTransactions maps rows and passes limit/cursor params', async () => {
   const items = await getTransactions(pool, 'mainnet', 20, encodeCursor('transactions', [500, 'cursor-hash']));
   assert.equal(items.length, 1);
   assert.equal(items[0]?.hash, 'a');
-  // The cursor carries the sort key itself rather than an id to look up, so
-  // paging never depends on the row it points at still existing.
-  assert.deepEqual(queries[0]?.params, ['mainnet', 500, 'cursor-hash', 20]);
-  assert.match(queries[0]?.sql ?? '', /\(ledger, hash\) < \(\$2::bigint, \$3::text\)/);
+  // The network is bound first and repeated in the cursor subquery: the same
+  // hash exists on every network, so the keyset has to know which one.
+  assert.deepEqual(queries[0]?.params, ['mainnet', 'cursor-hash', 20]);
+  assert.match(queries[0]?.sql ?? '', /\(ledger, hash\) </);
+  assert.match(queries[0]?.sql ?? '', /ORDER BY ledger DESC, hash DESC/);
+});
+
+test('getTransactions uses an ascending tuple keyset when requested', async () => {
+  const { pool, queries } = fakePool([]);
+  await getTransactions(pool, 'mainnet', 20, 'cursor-hash', { order: 'ASC' });
+  assert.match(queries[0]?.sql ?? '', /\(ledger, hash\) >/);
+  assert.match(queries[0]?.sql ?? '', /ORDER BY ledger ASC, hash ASC/);
+});
+
+test('getTransactions composes filters with its stable keyset cursor', async () => {
+  const { pool, queries } = fakePool([]);
+  await getTransactions(pool, 'mainnet', 10, 'cursor-hash', {
+    order: 'ASC',
+    successful: false,
+    from: '2026-01-01T00:00:00Z',
+    to: '2026-01-31T23:59:59Z',
+    sourceAccount: 'GACCOUNT',
+  });
+
+  assert.equal(
+    queries[0]?.sql.replace(/\s+/g, ' ').trim(),
+    'SELECT * FROM transactions WHERE network = $1 AND successful = $2 ' +
+      'AND created_at >= $3::timestamptz AND created_at <= $4::timestamptz ' +
+      'AND source_account = $5 AND (ledger, hash) > ' +
+      '(SELECT ledger, hash FROM transactions WHERE hash = $6 AND network = $1) ' +
+      'ORDER BY ledger ASC, hash ASC LIMIT $7'
+  );
+  assert.deepEqual(queries[0]?.params, [
+    'mainnet', false, '2026-01-01T00:00:00Z', '2026-01-31T23:59:59Z', 'GACCOUNT', 'cursor-hash', 10,
+  ]);
 });
 
 test('getOperations builds WHERE clause only for provided filters', async () => {
@@ -288,7 +319,14 @@ test('accounts can be listed in address order instead', async () => {
   assert.deepEqual(queries[0]?.params, ['mainnet', 'GABC', 5]);
 });
 
-test('an activity cursor is rejected by the address ordering', async () => {
+test('getOperations uses an ascending tuple keyset when requested', async () => {
+  const { pool, queries } = fakePool([]);
+  await getOperations(pool, { network: 'mainnet', cursor: 'op-9', limit: 10, order: 'ASC' });
+  assert.match(queries[0]?.sql ?? '', /\(ledger, id\) >/);
+  assert.match(queries[0]?.sql ?? '', /ORDER BY ledger ASC, id ASC/);
+});
+
+test('getEventsByContract emits exactly the expected statement with every filter set', async () => {
   const { pool, queries } = fakePool([]);
 
   // Two-column versus one: comparing them would silently resume in the wrong
@@ -300,7 +338,14 @@ test('an activity cursor is rejected by the address ordering', async () => {
   assert.equal(queries.length, 0);
 });
 
-test('an unknown account order falls back to activity rather than reaching SQL', async () => {
+test('getEventsByContract uses an ascending tuple keyset when requested', async () => {
+  const { pool, queries } = fakePool([]);
+  await getEventsByContract(pool, { network: 'mainnet', contractId: 'CABC', cursor: 'evt-9', limit: 20, order: 'ASC' });
+  assert.match(queries[0]?.sql ?? '', /\(ledger, id\) >/);
+  assert.match(queries[0]?.sql ?? '', /ORDER BY ledger ASC, id ASC/);
+});
+
+test('getEventsByContract never writes a filter value into the statement', async () => {
   const { pool, queries } = fakePool([]);
 
   await getAccounts(pool, { network: 'mainnet', orderBy: 'BY_VIBES' as AccountOrder, limit: 5 });

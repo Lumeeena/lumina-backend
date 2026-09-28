@@ -226,10 +226,13 @@ export interface AssetOperationsOptions {
   type?: string | null;
   limit: number;
   cursor?: string | null;
+  order?: 'ASC' | 'DESC' | null;
 }
 
 /** Operations involving one asset, newest first. */
 export async function getOperationsByAsset(pool: Pool, options: AssetOperationsOptions) {
+  const order = options.order ?? 'DESC';
+  const cursorOperator = order === 'ASC' ? '>' : '<';
   const parsed = parseAsset(options.asset);
   const params: unknown[] = [options.network];
   const conditions = ['network = $1', assetConditions(parsed, params)];
@@ -242,15 +245,19 @@ export async function getOperationsByAsset(pool: Pool, options: AssetOperationsO
     params.push(options.type.toLowerCase());
     conditions.push(`type = $${params.length}`);
   }
-  const cursorClause = cursorCondition(params, KEYSETS.assetOperations, options.cursor);
-  if (cursorClause) conditions.push(cursorClause);
+  if (options.cursor) {
+    params.push(options.cursor);
+    conditions.push(
+      `(ledger, id) ${cursorOperator} (SELECT ledger, id FROM operations WHERE id = $${params.length} LIMIT 1)`
+    );
+  }
 
   params.push(options.limit);
 
   const { rows } = await pool.query<OperationRow>(
     `SELECT * FROM operations
       WHERE ${conditions.join(' AND ')}
-      ORDER BY ledger DESC, id DESC
+      ORDER BY ledger ${order}, id ${order}
       LIMIT $${params.length}`,
     params
   );

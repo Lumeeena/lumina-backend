@@ -21,6 +21,11 @@ enum Network {
   FUTURENET
 }
 
+enum LedgerOrder {
+  ASC
+  DESC
+}
+
 """
 Root queries.
 
@@ -47,10 +52,15 @@ type Query {
     Network to read; defaults to the primary network configured for this deployment.
     """
     network: Network
-    """Rows per page. Defaults to 20."""
+    """Maximum page size is 100. Larger limits are rejected."""
     limit: Int = 20
     """Opaque cursor from a previous page's `pageInfo`; see `PageInfo`."""
     cursor: String
+    order: LedgerOrder = DESC
+    successful: Boolean
+    from: String
+    to: String
+    sourceAccount: String
   ): TransactionPage!
 
   """
@@ -145,10 +155,11 @@ type Query {
     Filter to operations involving one asset: "CODE:ISSUER", or "XLM" for native.
     """
     asset: String
-    """Rows per page. Defaults to 20."""
+    """Maximum page size is 100. Larger limits are rejected."""
     limit: Int = 20
     """Opaque cursor from a previous page's `pageInfo`; see `PageInfo`."""
     cursor: String
+    order: LedgerOrder = DESC
   ): OperationPage!
 
   """
@@ -163,13 +174,10 @@ type Query {
   transactions land — see `PageInfo`.
   """
   search(
-    """Network to read; defaults to the primary network configured for this deployment."""
     network: Network
-    """Memo text to search for, up to 256 characters."""
     query: String!
-    """Rows per page. Defaults to 20."""
+    """Maximum page size is 100. Larger limits are rejected."""
     limit: Int = 20
-    """Opaque cursor from a previous page's `pageInfo`; see `PageInfo`."""
     cursor: String
   ): TransactionPage!
 
@@ -187,10 +195,11 @@ type Query {
     contractId: String!
     """Only events carrying this topic."""
     topic: String
-    """Rows per page. Defaults to 20."""
+    """Maximum page size is 100. Larger limits are rejected."""
     limit: Int = 20
     """Opaque cursor from a previous page's `pageInfo`; see `PageInfo`."""
     cursor: String
+    order: LedgerOrder = DESC
   ): ContractEventPage!
 
   """
@@ -217,7 +226,12 @@ type Query {
   ledgers(
     """Network to read; defaults to the primary network configured for this deployment."""
     network: Network
-    """Rows per page. Defaults to 20."""
+    contractId: String!
+    """Only entries with this durability. Omit for both."""
+    durability: ContractStorageDurability
+    """Only entries whose base64 XDR key starts with this prefix."""
+    keyPrefix: String
+    """Maximum page size is 100. Larger limits are rejected."""
     limit: Int = 20
     """Opaque cursor from a previous page's `pageInfo`; see `PageInfo`."""
     cursor: String
@@ -255,10 +269,11 @@ type Query {
     event: String!
     """Field filters, ANDed together."""
     where: [CustomEventFilter!]
-    """Rows per page. Defaults to 20."""
+    """Maximum page size is 100. Larger limits are rejected."""
     limit: Int = 20
     """Opaque cursor from a previous page's `pageInfo`; see `PageInfo`."""
     cursor: String
+    order: LedgerOrder = DESC
   ): CustomEventPage!
 
   """
@@ -598,19 +613,13 @@ type Account {
   flags: AccountFlags!
   """Signature weight thresholds."""
   thresholds: Thresholds!
-  """
-  Recent transactions submitted by this account, newest first. Not paginated —
-  a fixed `limit`, for a sidebar.
-  """
+  """Related rows are optional so a lookup error does not erase the account."""
   transactions(
-    """How many to return. Defaults to 10."""
+    """Maximum page size is 100. Larger limits are rejected."""
     limit: Int = 10
   ): [Transaction!]
-  """
-  Recent operations submitted by this account, newest first. Not paginated.
-  """
   operations(
-    """How many to return. Defaults to 10."""
+    """Maximum page size is 100. Larger limits are rejected."""
     limit: Int = 10
   ): [Operation!]
 }

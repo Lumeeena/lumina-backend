@@ -21,6 +21,11 @@ enum Network {
   FUTURENET
 }
 
+enum LedgerOrder {
+  ASC
+  DESC
+}
+
 """
 Root queries.
 
@@ -47,10 +52,17 @@ type Query {
     Network to read; defaults to the primary network configured for this deployment.
     """
     network: Network
-    """Rows per page. Defaults to 20."""
+    """
+    Maximum page size is 100. Larger limits are rejected.
+    """
     limit: Int = 20
     """Opaque cursor from a previous page's `pageInfo`; see `PageInfo`."""
     cursor: String
+    order: LedgerOrder = DESC
+    successful: Boolean
+    from: String
+    to: String
+    sourceAccount: String
   ): TransactionPage!
 
   """
@@ -145,10 +157,13 @@ type Query {
     Filter to operations involving one asset: "CODE:ISSUER", or "XLM" for native.
     """
     asset: String
-    """Rows per page. Defaults to 20."""
+    """
+    Maximum page size is 100. Larger limits are rejected.
+    """
     limit: Int = 20
     """Opaque cursor from a previous page's `pageInfo`; see `PageInfo`."""
     cursor: String
+    order: LedgerOrder = DESC
   ): OperationPage!
 
   """
@@ -167,7 +182,9 @@ type Query {
     network: Network
     """Memo text to search for, up to 256 characters."""
     query: String!
-    """Rows per page. Defaults to 20."""
+    """
+    Maximum page size is 100. Larger limits are rejected.
+    """
     limit: Int = 20
     """Opaque cursor from a previous page's `pageInfo`; see `PageInfo`."""
     cursor: String
@@ -187,10 +204,13 @@ type Query {
     contractId: String!
     """Only events carrying this topic."""
     topic: String
-    """Rows per page. Defaults to 20."""
+    """
+    Maximum page size is 100. Larger limits are rejected.
+    """
     limit: Int = 20
     """Opaque cursor from a previous page's `pageInfo`; see `PageInfo`."""
     cursor: String
+    order: LedgerOrder = DESC
   ): ContractEventPage!
 
   """
@@ -255,10 +275,13 @@ type Query {
     event: String!
     """Field filters, ANDed together."""
     where: [CustomEventFilter!]
-    """Rows per page. Defaults to 20."""
+    """
+    Maximum page size is 100. Larger limits are rejected.
+    """
     limit: Int = 20
     """Opaque cursor from a previous page's `pageInfo`; see `PageInfo`."""
     cursor: String
+    order: LedgerOrder = DESC
   ): CustomEventPage!
 
   """
@@ -614,8 +637,12 @@ type Account {
   """
   Recent operations submitted by this account, newest first. Not paginated.
   """
+  transactions(
+    """Maximum page size is 100. Larger limits are rejected."""
+    limit: Int = 10
+  ): [Transaction!]
   operations(
-    """How many to return. Defaults to 10."""
+    """Maximum page size is 100. Larger limits are rejected."""
     limit: Int = 10
   ): [Operation!]
 }

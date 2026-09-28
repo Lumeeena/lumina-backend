@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import type { Pool } from 'pg';
 import { createContext, resolvers } from './resolvers';
+import { MAX_PAGE_SIZE } from './pagination';
 
 interface QueryCall {
   sql: string;
@@ -91,6 +92,32 @@ test('a page of 20 transactions with accounts uses a constant number of queries'
   assert.equal(calls.length, 2);
   assert.match(calls[0]?.sql ?? '', /FROM transactions/);
   assert.match(calls[1]?.sql ?? '', /FROM accounts WHERE address = ANY/);
+});
+
+test('all paginated resolvers reject limits above the maximum before querying', async () => {
+  const { pool, calls } = countingPool();
+  const context = createContext(pool);
+  const limit = MAX_PAGE_SIZE + 1;
+  const fields: Array<[string, () => Promise<unknown>]> = [
+    ['transactions', () => resolvers.Query.transactions({}, { limit }, context)],
+    ['operations', () => resolvers.Query.operations({}, { limit }, context)],
+    ['search', () => resolvers.Query.search({}, { query: 'memo', limit }, context)],
+    ['events', () => resolvers.Query.events({}, { contractId: 'C', limit }, context)],
+    ['contractStorageEntries', () => resolvers.Query.contractStorageEntries({}, { contractId: 'C', limit }, context)],
+    ['customEvents', () => resolvers.Query.customEvents({}, { contractId: 'C', event: 'transfer', limit }, context)],
+    ['Account.transactions', () => resolvers.Account.transactions({ address: 'GACCOUNT' }, { limit }, context)],
+    ['Account.operations', () => resolvers.Account.operations({ address: 'GACCOUNT' }, { limit }, context)],
+  ];
+
+  for (const [field, resolve] of fields) {
+    await assert.rejects(
+      resolve,
+      error => error instanceof Error && error.message.includes(`exceeds the maximum of ${MAX_PAGE_SIZE}`),
+      field
+    );
+  }
+
+  assert.equal(calls.length, 0);
 });
 
 test('representative nested transaction fields stay batched', async () => {

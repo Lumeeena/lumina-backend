@@ -53,12 +53,9 @@ export async function runMigrations(pool: Pool, migrations: Migration[], apply =
 }
 
 async function applyMigration(client: PoolClient, migration: Migration): Promise<void> {
-  // Some migrations (004, 008) use CREATE INDEX CONCURRENTLY, which PostgreSQL
-  // forbids in a transaction — judged by the SQL rather than a hardcoded list, so
-  // a future CONCURRENTLY migration does not silently run inside a transaction
-  // block and fail. Their statements are idempotent and their history insert is
-  // last.
-  if (/CONCURRENTLY/i.test(migration.sql)) {
+  // Concurrent index builds cannot run inside a transaction. These migrations
+  // are idempotent and write their history row last.
+  if (migration.version === '004_search_indexes' || migration.version === '010_transaction_filters') {
     await client.query(migration.sql);
     return;
   }

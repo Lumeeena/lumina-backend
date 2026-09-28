@@ -87,56 +87,35 @@ To fetch the next page, pass the cursor back to the **same** query:
 }
 ```
 
-**Cursors are opaque.** Store one only to resume a walk; never build, parse or
-persist one across a schema change. A cursor carries the sort key of the last row
-on its page *and the query that issued it*, so passing a `transactions` cursor to
-`events` is an error rather than a wrong page.
-
-Page until `hasNextPage` is false, then request one more page to confirm the end:
-`items: []` is how the API says "there is nothing after this".
-
-```javascript
-async function* walkAll(client, firstPage) {
-  let page = firstPage;
-  for (;;) {
-    yield* page.items;
-    if (!page.hasNextPage) return;   // the last full page; one more to confirm
-    page = await nextPage(page.pageInfo.cursor);
-  }
-}
-```
-
-### Invalid cursors are errors
-
-The one rule that is the same on every paginated query: **a cursor the server
-cannot use is an error with code `INVALID_CURSOR`, never an empty page.**
-
-| Situation | Response |
-| --- | --- |
-| Valid cursor, rows after it | The next page |
-| Valid cursor, nothing after it | `items: []`, `hasNextPage: false` — **not** an error |
-| Malformed, truncated or hand-built cursor | Error, `extensions.code: "INVALID_CURSOR"` |
-| Cursor from a different query | Error, `extensions.code: "INVALID_CURSOR"` |
-| Cursor for a different `accounts` order | Error, `extensions.code: "INVALID_CURSOR"` |
-
-The distinction matters: "you have reached the end" and "your cursor was wrong"
-call for different handling, and an empty page for a bad cursor silently truncates
-a result set. Retry an `INVALID_CURSOR` by restarting the walk from the
-beginning; do not retry the same cursor.
+The `transactions`, `operations`, `events`, and `customEvents` queries accept
+`order: ASC` or `order: DESC` (default `DESC`). Ordering is by ledger sequence,
+with a stable identifier as the tie-breaker, not by wall-clock `createdAt`.
+Keep the same order when requesting subsequent pages; the cursor advances in
+the selected direction.
 
 ### Limits
 
-- **Default limit:** 20 items per page
-- **Max limit:** no hard cap, but queries are serial so use 50–200 for practical clients
-- Ledger and account rows are small; charts can use 200–1000.
+- **Default limit:** 20 items per page; nested account lists default to 10
+- **Maximum limit:** 100 items. Larger limits are rejected with `BAD_USER_INPUT`.
 
 ## Common Queries
 
 ### Fetch recent transactions
 
+The transaction list can be filtered before pagination. `successful` matches
+the transaction result, `from` and `to` are inclusive ISO-8601 bounds on
+`createdAt`, and `sourceAccount` matches the submitting account. Keep the same
+filters and order when passing a cursor to the next page.
+
 ```graphql
 query {
-  transactions(limit: 20) {
+  transactions(
+    successful: true
+    from: "2026-01-01T00:00:00Z"
+    to: "2026-01-31T23:59:59Z"
+    sourceAccount: "G..."
+    limit: 20
+  ) {
     items {
       hash
       ledger
