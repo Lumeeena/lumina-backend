@@ -148,6 +148,29 @@ type Query {
   ): AssetDetail!
 
   """
+  Browse assets ordered by holder count or volume.
+  Uses the indexed trustlines and volume tables for efficient pagination.
+  """
+  assets(
+    network: Network
+    """
+    Sort order: HOLDERS (descending holder count) or VOLUME (descending recent volume).
+    """
+    sortBy: AssetSort = HOLDERS
+    """
+    Filter by asset code (case-insensitive substring match).
+    """
+    search: String
+    limit: Int = 20
+    cursor: String
+  ): AssetPage!
+
+  """
+  Get a single asset by code and issuer.
+  """
+  assetByKey(network: Network, code: String!, issuer: String!): Asset
+
+  """
   Account balance history for an asset over time.
 
   Derives balances by replaying balance-affecting operations from the operations table.
@@ -270,6 +293,11 @@ type ContractEventPage {
 
 type ContractStorageEntryPage {
   items: [ContractStorageEntry!]!
+  pageInfo: PageInfo!
+}
+
+type AssetPage {
+  items: [Asset!]!
   pageInfo: PageInfo!
 }
 
@@ -401,10 +429,14 @@ has state that is archived" apart from "this key was never set" (which has no
 entry at all).
 """
 enum ContractStorageEntryState {
-  """Currently live and readable."""
+  """
+  Currently live and readable.
+  """
   ACTIVE
 
-  """TTL expired; retained for the contract, inaccessible until restored."""
+  """
+  TTL expired; retained for the contract, inaccessible until restored.
+  """
   ARCHIVED
 }
 
@@ -421,21 +453,31 @@ round-trips into a Soroban `getLedgerEntries` call.
 type ContractStorageEntry {
   contractId: String!
 
-  """Base64 XDR LedgerKey addressing this entry."""
+  """
+  Base64 XDR LedgerKey addressing this entry.
+  """
   key: String!
   durability: ContractStorageDurability!
   state: ContractStorageEntryState!
 
-  """Decoded native value as a JSON string, or null when archived."""
+  """
+  Decoded native value as a JSON string, or null when archived.
+  """
   value: String
 
-  """Raw base64 LedgerEntryData XDR, or null when archived."""
+  """
+  Raw base64 LedgerEntryData XDR, or null when archived.
+  """
   valueXdr: String
 
-  """Ledger in which this entry was last changed."""
+  """
+  Ledger in which this entry was last changed.
+  """
   lastModifiedLedger: Int!
 
-  """Ledger at which this entry's TTL expires, if the RPC reported one."""
+  """
+  Ledger at which this entry's TTL expires, if the RPC reported one.
+  """
   liveUntilLedger: Int
 }
 
@@ -530,6 +572,32 @@ type ContractSchema {
 }
 
 # ─── Asset analytics ─────────────────────────────────────────────────────────
+
+enum AssetSort {
+  """
+  Sort by holder count, descending.
+  """
+  HOLDERS
+  """
+  Sort by recent volume, descending.
+  """
+  VOLUME
+}
+
+"""
+A Stellar asset with holder count and volume statistics.
+"""
+type Asset {
+  code: String!
+  issuer: String!
+  holderCount: Int!
+  firstSeenLedger: Int!
+  lastActivityLedger: Int!
+  """
+  Recent volume (last 7 days) in the asset's base units.
+  """
+  recentVolume: String
+}
 
 """
 Everything an asset detail page needs: supply and holders from indexed
