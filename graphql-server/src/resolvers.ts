@@ -382,6 +382,42 @@ export const resolvers = {
       });
     },
 
+    async assets(
+      _: unknown,
+      args: {
+        network?: string | null;
+        sortBy?: 'HOLDERS' | 'VOLUME';
+        search?: string | null;
+        limit?: number;
+        cursor?: string | null;
+      },
+      ctx: Context
+    ) {
+      const network = networkArgument(args, ctx);
+      const { getAssets } = await import('./assets');
+      return getAssets(ctx.pool, {
+        network: network.name,
+        sortBy: args.sortBy ?? 'HOLDERS',
+        search: args.search ?? null,
+        limit: args.limit ?? 20,
+        cursor: args.cursor ?? null,
+      });
+    },
+
+    async assetByKey(
+      _: unknown,
+      args: {
+        network?: string | null;
+        code: string;
+        issuer: string;
+      },
+      ctx: Context
+    ) {
+      const network = networkArgument(args, ctx);
+      const { getAssetByKey } = await import('./assets');
+      return getAssetByKey(ctx.pool, network.name, args.code, args.issuer);
+    },
+
     async accountBalanceHistory(
       _: unknown,
       args: {
