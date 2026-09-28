@@ -278,6 +278,94 @@ CREATE TABLE IF NOT EXISTS contract_storage_entries (
 CREATE INDEX IF NOT EXISTS idx_contract_storage_entries_lookup
     ON contract_storage_entries (contract_id, network, last_modified_ledger DESC, key DESC);
 
+-- ─── Trustlines (Asset Analytics) ────────────────────────────────────────────
+
+CREATE TABLE IF NOT EXISTS trustlines (
+    account             TEXT NOT NULL,
+    asset_code          TEXT NOT NULL,
+    asset_issuer        TEXT NOT NULL,
+    trust_limit         TEXT NOT NULL DEFAULT '922337203685.4775807',
+    balance             TEXT NOT NULL DEFAULT '0',
+    authorized          BOOLEAN NOT NULL DEFAULT TRUE,
+    last_modified_ledger BIGINT NOT NULL,
+    created_at          TIMESTAMPTZ NOT NULL,
+    updated_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    network             TEXT NOT NULL DEFAULT 'mainnet',
+    PRIMARY KEY (account, asset_code, asset_issuer, network),
+    CONSTRAINT trustlines_account_check           CHECK (account <> ''),
+    CONSTRAINT trustlines_asset_code_check        CHECK (asset_code <> ''),
+    CONSTRAINT trustlines_asset_issuer_check      CHECK (asset_issuer <> ''),
+    CONSTRAINT trustlines_last_modified_ledger_check CHECK (last_modified_ledger > 0)
+);
+
+CREATE INDEX IF NOT EXISTS idx_trustlines_asset
+    ON trustlines (asset_code, asset_issuer, network);
+
+CREATE INDEX IF NOT EXISTS idx_trustlines_asset_active
+    ON trustlines (asset_code, asset_issuer, network)
+    WHERE balance <> '0';
+
+CREATE INDEX IF NOT EXISTS idx_trustlines_account
+    ON trustlines (account, network);
+
+CREATE INDEX IF NOT EXISTS idx_trustlines_ledger
+    ON trustlines (last_modified_ledger DESC);
+
+-- ─── Assets (Asset Analytics) ────────────────────────────────────────────────
+
+CREATE TABLE IF NOT EXISTS assets (
+    asset_code          TEXT NOT NULL,
+    asset_issuer        TEXT NOT NULL,
+    holder_count        INTEGER NOT NULL DEFAULT 0,
+    first_seen_ledger   BIGINT NOT NULL,
+    last_activity_ledger BIGINT NOT NULL,
+    created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    network             TEXT NOT NULL DEFAULT 'mainnet',
+    PRIMARY KEY (asset_code, asset_issuer, network),
+    CONSTRAINT assets_asset_code_check          CHECK (asset_code <> ''),
+    CONSTRAINT assets_asset_issuer_check        CHECK (asset_issuer <> ''),
+    CONSTRAINT assets_holder_count_check        CHECK (holder_count >= 0),
+    CONSTRAINT assets_first_seen_ledger_check   CHECK (first_seen_ledger > 0),
+    CONSTRAINT assets_last_activity_ledger_check CHECK (last_activity_ledger > 0)
+);
+
+CREATE INDEX IF NOT EXISTS idx_assets_holder_count
+    ON assets (holder_count DESC, asset_code, asset_issuer);
+
+CREATE INDEX IF NOT EXISTS idx_assets_activity
+    ON assets (last_activity_ledger DESC);
+
+CREATE INDEX IF NOT EXISTS idx_assets_network
+    ON assets (network);
+
+-- ─── Asset Volume Buckets (Asset Analytics) ───────────────────────────────────
+
+CREATE TABLE IF NOT EXISTS asset_volume_buckets (
+    asset_code          TEXT NOT NULL,
+    asset_issuer        TEXT NOT NULL,
+    bucket_time         TIMESTAMPTZ NOT NULL,
+    volume              NUMERIC(20, 7) NOT NULL DEFAULT 0,
+    operation_count     INTEGER NOT NULL DEFAULT 0,
+    network             TEXT NOT NULL DEFAULT 'mainnet',
+    PRIMARY KEY (asset_code, asset_issuer, bucket_time, network),
+    CONSTRAINT asset_volume_buckets_asset_code_check    CHECK (asset_code <> ''),
+    CONSTRAINT asset_volume_buckets_asset_issuer_check  CHECK (asset_issuer <> ''),
+    CONSTRAINT asset_volume_buckets_volume_check        CHECK (volume >= 0),
+    CONSTRAINT asset_volume_buckets_operation_count_check CHECK (operation_count >= 0)
+);
+
+CREATE INDEX IF NOT EXISTS idx_asset_volume_buckets_asset_time
+    ON asset_volume_buckets (asset_code, asset_issuer, network, bucket_time DESC);
+
+CREATE INDEX IF NOT EXISTS idx_asset_volume_buckets_time
+    ON asset_volume_buckets (bucket_time DESC);
+
+CREATE OR REPLACE FUNCTION bucket_hour(ts TIMESTAMPTZ)
+RETURNS TIMESTAMPTZ AS $$
+    SELECT date_trunc('hour', ts);
+$$ LANGUAGE SQL IMMUTABLE;
+
 -- ─── Search and asset-filter indexes ──────────────────────────────────────
 --
 -- Trigram rather than tsvector for memos: Stellar memos are order references
