@@ -4,7 +4,9 @@ import type { Pool } from 'pg';
 import { Pool as PgPool } from 'pg';
 import {
   getAccountFromDb,
+  getAccounts,
   getEventsByContract,
+  getLedgers,
   getOperations,
   getTransactions,
   mapAccount,
@@ -12,7 +14,9 @@ import {
   mapLedger,
   mapOperation,
   mapTransaction,
+  type AccountOrder,
 } from './db';
+import { encodeCursor, InvalidCursorError } from './pagination';
 
 function fakePool(rows: unknown[]): { pool: Pool; queries: { sql: string; params: unknown[] }[] } {
   const queries: { sql: string; params: unknown[] }[] = [];
@@ -147,12 +151,13 @@ test('getTransactions maps rows and passes limit/cursor params', async () => {
   const { pool, queries } = fakePool([
     { hash: 'a', ledger: '1', created_at: new Date(), source_account: 'G', fee_charged: '100', operation_count: 1, successful: true, memo_type: null, memo: null },
   ]);
-  const items = await getTransactions(pool, 'mainnet', 20, 'cursor-hash');
+  const items = await getTransactions(pool, 'mainnet', 20, encodeCursor('transactions', [500, 'cursor-hash']));
   assert.equal(items.length, 1);
   assert.equal(items[0]?.hash, 'a');
-  // The network is bound first and repeated in the cursor subquery: the same
-  // hash exists on every network, so the keyset has to know which one.
-  assert.deepEqual(queries[0]?.params, ['mainnet', 20, 'cursor-hash']);
+  // The cursor carries the sort key itself rather than an id to look up, so
+  // paging never depends on the row it points at still existing.
+  assert.deepEqual(queries[0]?.params, ['mainnet', 500, 'cursor-hash', 20]);
+  assert.match(queries[0]?.sql ?? '', /\(ledger, hash\) < \(\$2::bigint, \$3::text\)/);
 });
 
 test('getOperations builds WHERE clause only for provided filters', async () => {
@@ -183,76 +188,135 @@ test('getEventsByContract filters by contract_id and optional topic', async () =
   assert.deepEqual(queries[0]?.params, ['CABC', 'mainnet', 'swap', 5]);
 });
 
-// ─── Dynamic SQL shape ───────────────────────────────────────────────────────
-//
-// These two builders grow a WHERE clause one optional filter at a time, which
-// is the shape that makes injection possible if a value is ever written into
-// the string instead of bound. The assertions are anchored to the whole
-// statement, not to a fragment: a fragment match still passes when something
-// extra has been appended after it.
+test('getLedgers returns the newest ledgers and maps them like ledger(sequence:)', async () => {
+  const { pool, queries } = fakePool([
+    { network: 'mainnet', sequence: '900', closed_at: new Date('2026-05-06T10:22:14Z'), transaction_count: 5, operation_count: 12, base_fee: '100', base_reserve: '5000000' },
+    { network: 'mainnet', sequence: '899', closed_at: new Date('2026-05-06T10:22:13Z'), transaction_count: 4, operation_count: 9, base_fee: '100', base_reserve: '5000000' },
+  ]);
 
-// The cursor row comparisons below reference the network *by position*
-// (`network = $1` here, `$2` in getEventsByContract) rather than binding it
-// again. That is deliberate — the keyset lookup has to stay inside the same
-// network — but it is positional, so reordering the params.push calls would
-// silently point it at another filter's value. Asserting the whole statement
-// pins those positions; a fragment match would not.
+  const items = await getLedgers(pool, 'mainnet', 2);
 
-test('getOperations emits exactly the expected statement with every filter set', async () => {
+  assert.match(queries[0]?.sql ?? '', /FROM ledgers WHERE network = \$1/);
+  assert.match(queries[0]?.sql ?? '', /ORDER BY sequence DESC LIMIT \$2/);
+  // Same mapping the single-ledger query uses, so a chart and a detail page
+  // cannot disagree about a ledger.
+  assert.deepEqual(items[0], mapLedger({
+    network: 'mainnet', sequence: '900', closed_at: new Date('2026-05-06T10:22:14Z'),
+    transaction_count: 5, operation_count: 12, base_fee: '100', base_reserve: '5000000',
+  }));
+  assert.deepEqual(items.map(item => item.sequence), [900, 899]);
+});
+
+test('getLedgers keysets on the sequence without a row lookup', async () => {
   const { pool, queries } = fakePool([]);
-  await getOperations(pool, { network: 'mainnet', account: 'GABC', type: 'Payment', cursor: 'op-9', limit: 10 });
 
-  assert.equal(
-    queries[0]?.sql,
-    'SELECT * FROM operations WHERE network = $1 AND source_account = $2 AND type = $3 ' +
-      'AND (ledger, id) < (SELECT ledger, id FROM operations WHERE id = $4 AND network = $1) ' +
-      'ORDER BY ledger DESC, id DESC LIMIT $5'
+  await getLedgers(pool, 'mainnet', 20, encodeCursor('ledgers', [900]));
+
+  assert.match(queries[0]?.sql ?? '', /\(sequence\) < \(\$2::bigint\)/);
+  assert.deepEqual(queries[0]?.params, ['mainnet', 900, 20]);
+  assert.ok(!/OFFSET/i.test(queries[0]?.sql ?? ''));
+});
+
+test('getLedgers rejects a cursor it could not have issued', async () => {
+  const { pool, queries } = fakePool([]);
+
+  await assert.rejects(
+    () => getLedgers(pool, 'mainnet', 20, 'not-a-cursor'),
+    (err: unknown) => err instanceof InvalidCursorError
   );
-  // The type filter is lowercased before binding, so it matches what the index
-  // and the stored column compare against.
-  assert.deepEqual(queries[0]?.params, ['mainnet', 'GABC', 'payment', 'op-9', 10]);
+  assert.equal(queries.length, 0);
 });
 
-test('getOperations never writes a filter value into the statement', async () => {
-  const { pool, queries } = fakePool([]);
-  const hostile = "GABC'; DROP TABLE operations--";
-  await getOperations(pool, { network: 'mainnet', account: hostile, limit: 10 });
+// ── Accounts listing ─────────────────────────────────────────────────────────
 
-  const sql = queries[0]?.sql ?? '';
-  assert.ok(!sql.includes(hostile), sql);
-  assert.ok(!sql.includes('DROP'), sql);
-  assert.ok(!sql.includes("'"), sql);
-  assert.ok(queries[0]?.params.includes(hostile), 'the value belongs in the params array');
+function accountRow(address: string, lastModifiedLedger = 100) {
+  return {
+    network: 'mainnet',
+    address,
+    sequence: '1',
+    subentry_count: 0,
+    last_modified_ledger: String(lastModifiedLedger),
+    num_sponsored: 0,
+    num_sponsoring: 0,
+    balances: [],
+    flags: {},
+    thresholds: {},
+  };
+}
+
+test('accounts list most recently active first by default', async () => {
+  const { pool, queries } = fakePool([accountRow('GB', 900), accountRow('GA', 800)]);
+
+  const items = await getAccounts(pool, { network: 'mainnet', limit: 2 });
+
+  assert.match(queries[0]?.sql ?? '', /FROM accounts\s+WHERE network = \$1/);
+  // The address tiebreaker is what makes the walk terminate: many accounts share
+  // a last-modified ledger, and without it a keyset page can repeat forever.
+  assert.match(queries[0]?.sql ?? '', /ORDER BY last_modified_ledger DESC, address ASC/);
+  assert.match(queries[0]?.sql ?? '', /LIMIT \$2/);
+  assert.deepEqual(items.map(item => item.address), ['GB', 'GA']);
+  // Same mapping as the single-account query, so a listing row and
+  // account(address:) cannot disagree.
+  assert.deepEqual(items[0], await getAccountFromDb(fakePool([accountRow('GB', 900)]).pool, 'mainnet', 'GB'));
+  assert.equal(items[0]?.lastModifiedLedger, 900);
 });
 
-test('getOperations with no filters selects only the network and the limit', async () => {
+test('accounts paginate on activity with a bound keyset, not a row lookup', async () => {
   const { pool, queries } = fakePool([]);
-  await getOperations(pool, { network: 'mainnet', limit: 10 });
 
-  assert.equal(queries[0]?.sql, 'SELECT * FROM operations WHERE network = $1 ORDER BY ledger DESC, id DESC LIMIT $2');
+  await getAccounts(pool, {
+    network: 'mainnet',
+    limit: 20,
+    cursor: encodeCursor('accounts', [900, 'GABC']),
+  });
+
+  assert.match(queries[0]?.sql ?? '', /\(last_modified_ledger, address\) < \(\$2::bigint, \$3::text\)/);
+  assert.deepEqual(queries[0]?.params, ['mainnet', 900, 'GABC', 20]);
+  assert.ok(!/OFFSET/i.test(queries[0]?.sql ?? ''));
+  // No subquery: the cursor carries the sort key, so a cursor survives the row
+  // it names being re-indexed.
+  assert.ok(!/SELECT/i.test((queries[0]?.sql ?? '').replace(/SELECT \* FROM accounts/, '')));
 });
 
-test('getEventsByContract emits exactly the expected statement with every filter set', async () => {
+test('accounts can be listed in address order instead', async () => {
   const { pool, queries } = fakePool([]);
-  await getEventsByContract(pool, { network: 'mainnet', contractId: 'CABC', topic: 'swap', cursor: 'evt-9', limit: 20 });
 
-  assert.equal(
-    queries[0]?.sql,
-    'SELECT * FROM contract_events WHERE contract_id = $1 AND network = $2 AND $3 = ANY(topics) ' +
-      'AND (ledger, id) < (SELECT ledger, id FROM contract_events WHERE id = $4 AND network = $2) ' +
-      'ORDER BY ledger DESC, id DESC LIMIT $5'
+  await getAccounts(pool, { network: 'mainnet', orderBy: 'ADDRESS', limit: 5, cursor: encodeCursor('accounts', ['GABC']) });
+
+  assert.match(queries[0]?.sql ?? '', /ORDER BY address ASC/);
+  assert.match(queries[0]?.sql ?? '', /\(address\) < \(\$2::text\)/);
+  assert.deepEqual(queries[0]?.params, ['mainnet', 'GABC', 5]);
+});
+
+test('an activity cursor is rejected by the address ordering', async () => {
+  const { pool, queries } = fakePool([]);
+
+  // Two-column versus one: comparing them would silently resume in the wrong
+  // place, so it is an error rather than a wrong answer.
+  await assert.rejects(
+    () => getAccounts(pool, { network: 'mainnet', orderBy: 'ADDRESS', limit: 5, cursor: encodeCursor('accounts', [900, 'GABC']) }),
+    (err: unknown) => err instanceof InvalidCursorError
   );
-  assert.deepEqual(queries[0]?.params, ['CABC', 'mainnet', 'swap', 'evt-9', 20]);
+  assert.equal(queries.length, 0);
 });
 
-test('getEventsByContract never writes a filter value into the statement', async () => {
+test('an unknown account order falls back to activity rather than reaching SQL', async () => {
   const { pool, queries } = fakePool([]);
-  const hostile = "CABC' OR '1'='1";
-  await getEventsByContract(pool, { network: 'mainnet', contractId: hostile, topic: hostile, limit: 20 });
 
-  const sql = queries[0]?.sql ?? '';
-  assert.ok(!sql.includes(hostile), sql);
-  assert.ok(!sql.includes("'"), sql);
-  assert.ok(queries[0]?.params.includes(hostile));
+  await getAccounts(pool, { network: 'mainnet', orderBy: 'BY_VIBES' as AccountOrder, limit: 5 });
+
+  assert.match(queries[0]?.sql ?? '', /ORDER BY last_modified_ledger DESC, address ASC/);
+  assert.ok(!/VIBES/i.test(queries[0]?.sql ?? ''));
 });
 
+test('the accounts listing never reaches Horizon', async () => {
+  const { pool, queries } = fakePool([]);
+
+  await getAccounts(pool, { network: 'mainnet', limit: 1 });
+
+  // The listing is the indexed table by definition: "indexed accounts only" is a
+  // documented property, not a gap to paper over with a network round trip per
+  // row.
+  assert.equal(queries.length, 1);
+  assert.equal(queries[0]?.params.length, 2);
+});

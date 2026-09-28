@@ -19,12 +19,8 @@ Breaking changes are rare and advance the major version. Deprecation notices app
 ## [Unreleased]
 
 ### Added
-- Configurable data retention, per table. `RETENTION_LEDGERS_DAYS`, `RETENTION_TRANSACTIONS_DAYS`, `RETENTION_OPERATIONS_DAYS`, `RETENTION_CONTRACT_EVENTS_DAYS` and `RETENTION_CUSTOM_EVENTS_DAYS` each set a window in days of chain history, defaulting to `0` — unlimited — so an existing deployment deletes nothing until an operator opts in. Windows are independent, and a negative value is rejected at startup rather than treated as unset (#101)
-- A pruning job that runs on its own timer rather than inside the indexing loop, takes a dedicated connection with a `lock_timeout` so the indexer never waits behind a prune, and deletes in bounded batches (20 per table per round) so a large backlog converges over several intervals instead of monopolising the database (#101)
-- `lumina_retention_pruned_rows_total`, labelled by table, plus `retentionWindows` in `/debug/config` — a flat counter is the healthy state, and a counter that never moves while the database grows is what to alert on (#101)
-- `idx_custom_events_created_at`, so pruning `custom_events` is an index lookup rather than a sequential scan (#101)
-- A retention window that would outrun the foreign keys pointing at it — a ledger window with unlimited transactions, say — is now rejected at startup by name. It used to load cleanly and then fail its `DELETE` on every round, so the window looked configured and never deleted a row
-- `contractStorageEntries` restored to the GraphQL schema. The resolver and its integration test were both in place but the query field had been dropped from `src/schema.graphql`, so the field was unreachable at runtime despite the committed snapshot advertising it
+- `accounts(network, orderBy, limit, cursor)` query: the indexed accounts the indexer has seen, paginated and ordered `RECENT_ACTIVITY` (last-modified ledger first) or `ADDRESS`. An address the indexer has never seen is absent by design, and that caveat is stated in the schema rather than left to be discovered (#48)
+- `ledgers(network, limit, cursor)` query: indexed ledgers newest first, paginated on the sequence, for the ledger-throughput-over-time series that `ledger(sequence:)` and `latestLedger` could not answer. Rows are mapped exactly as `ledger(sequence:)` returns them, so a chart and a detail page cannot disagree (#47)
 - Incremental bulk export: `since_ledger` parameter on bulk exports with max exported ledger checkpoint tracking for downstream syncs (#94)
 - `network` argument on every query and subscription (`Network` enum: `MAINNET`, `TESTNET`, `FUTURENET`). Omitted means the configured primary, so existing clients are unaffected; naming a network the deployment does not serve is a `BAD_USER_INPUT` error rather than a silent fallback. Nested fields inherit their parent's network, and subscriptions filter notifications before reading rows (#60)
 - `indexerStatus(network)` query: Horizon's tip, the indexed tip, the lag and a `stale` label for one network. An unreachable database or Horizon answers with `null` fields and `stale: true` instead of failing, because the interesting moment for this query is exactly when something is wrong (#53)
@@ -39,6 +35,8 @@ Breaking changes are rare and advance the major version. Deprecation notices app
 - Strict TypeScript compiler options (#117)
 
 ### Changed
+- Every query, argument, type field and enum value now carries a description, so the playground explains what each one is for rather than repeating its type: why `account(address:)` can answer for an address the index has never seen, which fields are null for which operation type, which queries fall back to Horizon and which read only the index, and where a page resumes. A schema test fails the build if a description goes missing, since a bare name in the docs is a defect a type change would not surface (#50)
+- One cursor contract for every paginated query (`transactions`, `operations`, `search`, `events`, `customEvents`, `ledgers`, `accounts`): a cursor carries the sort key of the last row on its page plus the query that issued it, and an invalid cursor is an `INVALID_CURSOR` error everywhere instead of a silent empty page on some queries. Reaching the end of the data is still an empty page with `hasNextPage: false`, never an error. Cursors are opaque, so existing page tokens are reissued rather than reused (#49)
 - Version is now reported in application startup logs
 
 ## How to Release

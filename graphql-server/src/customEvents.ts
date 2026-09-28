@@ -27,6 +27,7 @@
  * below — a value not present in them is rejected before any SQL is built.
  */
 import type { Pool } from 'pg';
+import { cursorCondition, KEYSETS } from './pagination';
 
 export const NUMERIC_TYPES = new Set(['i32', 'u32', 'i64', 'u64', 'i128', 'u128']);
 
@@ -184,12 +185,8 @@ export async function getCustomEvents(pool: Pool, query: CustomEventQuery) {
 
   conditions.push(...buildFilterClause(event, query.where ?? [], params));
 
-  if (query.cursor) {
-    params.push(query.cursor);
-    conditions.push(
-      `(ledger, event_id) < (SELECT ledger, event_id FROM custom_events WHERE event_id = $${params.length} AND network = $3 LIMIT 1)`
-    );
-  }
+  const cursorClause = cursorCondition(params, KEYSETS.customEvents, query.cursor);
+  if (cursorClause) conditions.push(cursorClause);
 
   params.push(query.limit);
 
