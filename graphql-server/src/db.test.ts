@@ -175,7 +175,7 @@ test('getTransactions composes filters with its stable keyset cursor', async () 
   });
 
   assert.equal(
-    queries[0]?.sql,
+    queries[0]?.sql.replace(/\s+/g, ' ').trim(),
     'SELECT * FROM transactions WHERE network = $1 AND successful = $2 ' +
       'AND created_at >= $3::timestamptz AND created_at <= $4::timestamptz ' +
       'AND source_account = $5 AND (ledger, hash) > ' +

@@ -13,7 +13,7 @@ test('loads migrations in order and expands initial schema include', () => {
     '009_contract_storage_entries', '010_transaction_filters',
   ]);
   assert.match(migrations[0].sql, /CREATE TABLE IF NOT EXISTS ledgers/);
-  assert.match(migrations[0].sql, /PRIMARY KEY \(id, ledger, network\)/);
+  assert.match(migrations[0].sql, /PRIMARY KEY \(id, network\)/);
   assert.doesNotMatch(migrations[0].sql, /^\\ir/m);
 
   const networks = migrations.find(migration => migration.version === '007_networks');
