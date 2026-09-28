@@ -100,24 +100,47 @@ test('a notification only arrives once its transaction commits', { skip, timeout
 });
 
 test('the listener recovers when its backend is terminated', { skip, timeout: TEST_TIMEOUT_MS }, async () => {
+  // Unique per run: the other integration files share this database and
+  // `test:integration` runs them concurrently, so a kill scoped only to
+  // "some backend is LISTENing" would take out a neighbour's connection too.
+  const applicationName = 'lumina-test-listener-recovery';
+
+  /** Backends of *this* notifier that are connected and waiting on a channel. */
+  const listeningBackends = async (sender: Client) => {
+    const { rows } = await sender.query(
+      `SELECT count(*)::int AS n
+         FROM pg_stat_activity
+        WHERE application_name = $1 AND state = 'idle' AND query LIKE 'LISTEN%'`,
+      [applicationName]
+    );
+    return rows[0].n as number;
+  };
+
   await withNotifier(
     async (notifier, sender) => {
       const sub = notifier.subscribe();
+      assert.equal(await listeningBackends(sender), 1, 'the notifier should hold one listening backend to begin with');
 
       // Kill exactly the listener's backend, the way a failover or an idle
       // reaper would. Everything else in the pool is left alone.
-      await sender.query(
+      const killed = await sender.query(
         `SELECT pg_terminate_backend(pid)
            FROM pg_stat_activity
-          WHERE query LIKE 'LISTEN%' AND pid <> pg_backend_pid()`
+          WHERE application_name = $1 AND pid <> pg_backend_pid()`,
+        [applicationName]
       );
+      assert.equal(killed.rowCount, 1, 'the listener backend should have been terminated');
 
-      // Give the supervisor time to notice and rebuild the connection.
+      // Wait for the channel to be re-issued, not merely for a client object to
+      // exist: `connected` is true while a fresh socket is still mid-handshake,
+      // and a NOTIFY sent into that gap is lost for good.
       const deadline = Date.now() + 10_000;
-      while (!notifier.connected && Date.now() < deadline) {
+      while (Date.now() < deadline) {
+        if (notifier.connected && (await listeningBackends(sender)) === 1) break;
         await new Promise(resolve => setTimeout(resolve, 100));
       }
       assert.equal(notifier.connected, true, 'notifier should have reconnected');
+      assert.equal(await listeningBackends(sender), 1, 'LISTEN should have been re-issued on the new connection');
 
       await sender.query('SELECT pg_notify($1, $2)', [
         INDEXED_CHANNEL,
@@ -129,7 +152,7 @@ test('the listener recovers when its backend is terminated', { skip, timeout: TE
       const received = await nextWithin(sub, 5000);
       assert.equal(received.ledger, 7777);
     },
-    { reconnectDelayMs: 100 }
+    { reconnectDelayMs: 100, applicationName }
   );
 });
 

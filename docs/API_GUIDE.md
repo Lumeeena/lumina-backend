@@ -68,13 +68,18 @@ Every list query in Lumina uses **keyset pagination**, not offset pagination. Ke
 
 ### Pagination contract
 
-Every paginated query returns:
+Every paginated query — `transactions`, `operations`, `search`, `events`,
+`customEvents`, `ledgers`, `accounts` — returns the same shape and follows the
+same rules:
+
 - `items: [T!]!` — the requested rows
 - `pageInfo` with:
-  - `hasNextPage: Boolean!` — true if there are more results
-  - `cursor: String` — a token to fetch the next page (only present if `hasNextPage` is true)
+  - `hasNextPage: Boolean!` — true when a full page came back, so there may be
+    more
+  - `cursor: String` — a token for the next page, or `null` when the page is
+    empty
 
-To fetch the next page, pass the cursor to the same query:
+To fetch the next page, pass the cursor back to the **same** query:
 
 ```graphql
 {
@@ -82,18 +87,35 @@ To fetch the next page, pass the cursor to the same query:
 }
 ```
 
+The `transactions`, `operations`, `events`, and `customEvents` queries accept
+`order: ASC` or `order: DESC` (default `DESC`). Ordering is by ledger sequence,
+with a stable identifier as the tie-breaker, not by wall-clock `createdAt`.
+Keep the same order when requesting subsequent pages; the cursor advances in
+the selected direction.
+
 ### Limits
 
-- **Default limit:** 20 items per page
-- **Max limit:** no hard cap, but queries are serial so use 50–200 for practical clients
+- **Default limit:** 20 items per page; nested account lists default to 10
+- **Maximum limit:** 100 items. Larger limits are rejected with `BAD_USER_INPUT`.
 
 ## Common Queries
 
 ### Fetch recent transactions
 
+The transaction list can be filtered before pagination. `successful` matches
+the transaction result, `from` and `to` are inclusive ISO-8601 bounds on
+`createdAt`, and `sourceAccount` matches the submitting account. Keep the same
+filters and order when passing a cursor to the next page.
+
 ```graphql
 query {
-  transactions(limit: 20) {
+  transactions(
+    successful: true
+    from: "2026-01-01T00:00:00Z"
+    to: "2026-01-31T23:59:59Z"
+    sourceAccount: "G..."
+    limit: 20
+  ) {
     items {
       hash
       ledger
@@ -209,6 +231,56 @@ query GetAccount($address: String!) {
   }
 }
 ```
+
+### List indexed accounts
+
+```graphql
+query ListAccounts($orderBy: AccountOrder, $limit: Int!) {
+  accounts(orderBy: $orderBy, limit: $limit) {
+    items {
+      address
+      lastModifiedLedger
+      subentryCount
+      balances {
+        assetCode
+        assetIssuer
+        balance
+      }
+    }
+    pageInfo {
+      hasNextPage
+      cursor
+    }
+  }
+}
+```
+
+**Only accounts the indexer has seen are listed.** This reads the `accounts`
+table, which the indexer fills one row per address it encounters while
+processing ledgers. It does not enumerate the network, so an account that exists
+and holds balances but has never appeared in an indexed transaction or operation
+is **not** in the listing. Fetch those with `account(address:)`, which falls back
+to Horizon when a row is missing.
+
+Treat the listing as a lower bound, not a directory of the network — and not a
+leaderboard either. `RECENT_ACTIVITY` orders by the ledger an account was last
+modified in, which is when the indexer last saw it, not how much it has
+transacted. For an account that holds assets but does not transact, that number
+measures nothing.
+
+**Ordering** (`orderBy`, default `RECENT_ACTIVITY`):
+
+| Order | Sorts by | Use for |
+| --- | --- | --- |
+| `RECENT_ACTIVITY` | `lastModifiedLedger` desc, then `address` asc | "Recently active accounts" |
+| `ADDRESS` | `address` asc | Stable traversal, or a prefix range |
+
+Both are total and stable, so paging terminates. **A cursor is only valid for the
+order that issued it** — an `ADDRESS` cursor passed to `RECENT_ACTIVITY` (or the
+reverse) is an `INVALID_CURSOR` error, not a silently wrong page.
+
+Balances are a last-seen snapshot per address rather than ledger state: an
+account that has not been seen since ledger N reports its balance as of N.
 
 ### List operations with filters
 
@@ -435,6 +507,40 @@ query GetLedger($sequence: Int!) {
 }
 ```
 
+### List ledgers over a range
+
+`ledger(sequence:)` answers for one ledger and `latestLedger` for the newest,
+which is enough to open a detail page but not to draw a series. `ledgers` pages
+back through them, newest first, and each row is identical to what
+`ledger(sequence:)` returns for that sequence — so a chart and a detail page can
+never disagree about a ledger.
+
+```graphql
+query LedgerThroughput($limit: Int!) {
+  ledgers(limit: $limit) {
+    items {
+      sequence
+      closedAt
+      transactionCount
+      operationCount
+    }
+    pageInfo {
+      hasNextPage
+      cursor
+    }
+  }
+}
+```
+
+- Newest first, so the first page is the chain as it is now; page backwards for
+  history.
+- Page size is `limit` (default 20). Ledger rows are small, so 200–1000 is
+  reasonable for a chart that only wants `sequence` and the two counts.
+- Page until `hasNextPage` is false, then confirm with one more page: an empty
+  `items` is the end of the data, not an error.
+- Only indexed ledgers appear. A gap in the sequence means the indexer has not
+  caught up — compare against `indexerStatus` before reading a gap as history.
+
 ### Check how current the data is
 
 A cached index answers faster than the chain can, and is wrong the moment it
@@ -577,6 +683,7 @@ The GraphQL API returns errors in the standard GraphQL error format. Each error 
 | `INTERNAL_SERVER_ERROR` | Server error | Database connection failure |
 | `BAD_REQUEST` | Client request error | Invalid asset format, empty search query |
 | `BAD_USER_INPUT` | The request named something the server does not serve | `network: RANKENET` when only `MAINNET`, `TESTNET` are configured |
+| `INVALID_CURSOR` | A pagination cursor the server could not use | A truncated cursor, a hand-built one, or one issued by a different query — see [Pagination](#invalid-cursors-are-errors) |
 | `UNAUTHENTICATED` | API key is malformed, unknown, or revoked | See [`AUTHENTICATION.md`](AUTHENTICATION.md#authentication-errors) |
 | `RATE_LIMITED` | Rate limit exceeded; wait `extensions.retryAfter` seconds | See [`AUTHENTICATION.md`](AUTHENTICATION.md#when-you-are-throttled) |
 
@@ -599,7 +706,7 @@ The GraphQL API returns errors in the standard GraphQL error format. Each error 
 
 - **Empty query:** Search queries must not be empty or whitespace-only
 - **Query too long:** Search queries have a maximum length to prevent performance issues
-- **Invalid cursor:** A cursor from a previous search page is malformed or has expired
+- **Invalid cursor:** returned as `INVALID_CURSOR` on every paginated query, search included — see [Pagination](#invalid-cursors-are-errors)
 
 ### Custom event filter errors
 
@@ -639,6 +746,13 @@ query {
 Introspection is disabled when `NODE_ENV=production` unless `GRAPHQL_INTROSPECTION=true`; see [`SECURITY_HARDENING.md`](SECURITY_HARDENING.md), which also documents query depth/complexity limits.
 
 Most GraphQL tools (Apollo Client, GraphQL CodeGen, etc.) use introspection to power code generation and IDE autocomplete.
+
+Every query, argument, type field and enum value in the schema is documented, so the same descriptions come through the playground and through `__type { fields { description } }`. A few worth knowing before you read them:
+
+- **Index or Horizon.** Each query's description says which it reads. `transaction(hash:)`, `account(address:)`, `asset(asset:)` and `contractSchema(contractId:)` fall back to Horizon; the listings do not, because there is nothing to fall back to.
+- **Snapshot, not live state.** `Account` is what the indexer last saw, stamped with `lastModifiedLedger`. A Horizon-fallback `account(address:)` is current instead, so the two can disagree for an address the indexer has not caught up on.
+- **Type-specific fields.** `Operation` is one flat type: `amount` is null on a `change_trust`, `funder` is null on a payment. Read the field you want, treat the rest as absent.
+- **Custom event fields.** `CustomEvent.fields` carries one entry per field the registered schema declares, so an optional field the event omitted is `value: null` rather than missing. `contractSchema(contractId:)` returns the whole schema, so a client can discover names before querying data.
 
 ## API Versioning
 

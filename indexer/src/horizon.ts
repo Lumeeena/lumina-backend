@@ -10,6 +10,7 @@ import { createThrottle, type RequestPurpose } from './throttle';
 const log = subsystem('horizon');
 
 export const PAGE_LIMIT = 200;
+const ACCOUNT_REQUEST_TIMEOUT_MS = 10_000; // 10 seconds
 
 export interface HorizonLedger {
   sequence: number;
@@ -78,7 +79,16 @@ interface HorizonClientConfig {
 
 let throttle: ReturnType<typeof createThrottle>['throttle'];
 let fetchJson: ReturnType<typeof createThrottle>['fetchJson'];
-let postJson: ReturnType<typeof createThrottle>['postJson'];
+
+/**
+ * Per-request ceiling on the raw account fetch below.
+ *
+ * Account lookups are the indexer's highest-volume outbound call and the one
+ * most likely to be dropped mid-flight by an overloaded Horizon. An unbounded
+ * request can hang a whole account-refresh batch on a socket that will never
+ * answer, so it gets the same treatment as the rest of the throttle.
+ */
+const ACCOUNT_REQUEST_TIMEOUT_MS = 15_000;
 
 export function initializeHorizonClient(config: HorizonClientConfig): void {
   const client = createThrottle({
@@ -98,7 +108,6 @@ export function initializeHorizonClient(config: HorizonClientConfig): void {
   
   throttle = client.throttle;
   fetchJson = client.fetchJson;
-  postJson = client.postJson;
 }
 
 async function fetchAllPages<T>(url: string, purpose: RequestPurpose = 'default'): Promise<T[]> {
@@ -137,6 +146,11 @@ export function getLedgerOperations(horizonUrl: string, sequence: number, purpos
 
 /** Returns null for accounts that don't exist; transient HTTP failures throw so durable jobs can retry. */
 export async function getAccount(horizonUrl: string, address: string): Promise<HorizonAccount | null> {
+  // Account lookups are the bulk of the indexer's outbound traffic, so they go
+  // through the same gate as everything else rather than racing it. This one
+  // cannot use fetchJson: a 404 is a normal answer here (an account created
+  // after the ledger, or one Horizon has not indexed), not a failed request.
+  await throttle('default');
   const stopTimer = horizonRequestDuration.startTimer();
   let res: Response;
   try {

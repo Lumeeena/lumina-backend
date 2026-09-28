@@ -346,10 +346,21 @@ test('every insert conflicts on the composite key, so two chains can share a led
   assert.deepEqual(conflicts, [
     'sequence, network',
     'hash, network',
-    'id, ledger, network',
+    // operations, on purpose: see the comment in db.ts. The third insert has
+    // no inference clause at all, so its entry is undefined rather than a key.
+    undefined,
     'network, address',
     'id, network',
   ]);
+
+  // Belt and braces on the one insert that is not explicit: it must not name a
+  // conflict target, because the only two shapes that target could name are
+  // (id, network) on the plain table and (id, ledger, network) on a deployment
+  // that still has the reverted partitioning.
+  const operationsInsert = queries.find(q => q.includes('INSERT INTO operations'));
+  assert.ok(operationsInsert);
+  assert.match(operationsInsert, /ON CONFLICT DO NOTHING\s*`?$/);
+  assert.doesNotMatch(operationsInsert, /ON CONFLICT \(/);
 });
 
 test('a ledger notification carries the network it was indexed on', async () => {

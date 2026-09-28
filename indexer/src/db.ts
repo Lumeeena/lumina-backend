@@ -273,17 +273,28 @@ export async function indexLedger(
     }
 
     for (const op of operations) {
-      // ON CONFLICT target includes the network and partition key: operations is
-      // partitioned by ledger (see db/migrations/006_partition_operations.sql),
-      // and Postgres requires a partitioned table's unique constraints to
-      // include the partition key. This isn't a behavior change — a given
-      // operation id is only ever written with one ledger value.
+      // No ON CONFLICT inference clause, deliberately. The two shapes this
+      // insert has to work against do not agree on a key: a database built
+      // from db/schema.sql has a plain `operations` keyed (id, network), while
+      // a deployment that ran the original 006_partition_operations still has
+      // it partitioned by ledger and keyed (id, ledger, network) — 007 could not
+      // add `network` to that key without carrying the partition key too.
+      // Naming either target breaks the other shape; naming none works on both.
+      //
+      // That is safe here because the inference clause is a no-op for a plain
+      // DO NOTHING: it only picks which unique violation is tolerated, and
+      // `operations` has exactly one unique constraint either way. A DO UPDATE
+      // insert would need the target, since it has to know which row to
+      // overwrite.
       await client.query(
         `INSERT INTO operations (id, type, transaction_hash, ledger, created_at, source_account, details, network)
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-         ON CONFLICT (id, ledger, network) DO NOTHING`,
+         ON CONFLICT DO NOTHING`,
         [op.id, op.type, op.transaction_hash, ledger.sequence, op.created_at, op.source_account, JSON.stringify(op), network]
       );
+
+      // Process asset-related operations for trustlines, assets, and volume tracking
+      await processAssetOperation(client, network, ledger.sequence, op);
     }
 
     if (accountAddresses.length > 0) {
@@ -562,6 +573,49 @@ export async function upsertContractStorageEntries(
   }
 }
 
+/**
+ * Mark the given storage keys as `archived`, keeping the rows.
+ *
+ * Soroban archives a persistent entry once its TTL expires: the entry is not
+ * deleted, it is inaccessible until restored. Deleting our row would report
+ * the contract as having lost state it still has, so the row is kept and only
+ * its `state` changes — which is what lets a client distinguish "archived"
+ * (a row with `state = 'archived'`) from "absent" (no row at all).
+ *
+ * Only rows that are currently `active` are touched, so re-archiving an
+ * already-archived entry is a no-op rather than a repeated write.
+ */
+export async function markContractStorageEntriesArchived(
+  pool: Pool,
+  network: string,
+  keys: string[]
+): Promise<void> {
+  if (keys.length === 0) return;
+
+  await pool.query(
+    `UPDATE contract_storage_entries
+     SET state = 'archived', indexed_at = NOW()
+     WHERE network = $1 AND key = ANY($2::text[]) AND state = 'active'`,
+    [network, keys]
+  );
+}
+
+/**
+ * Every storage key this network has indexed, regardless of state.
+ *
+ * The polling loop re-fetches these each cycle: a key the RPC stops returning
+ * is the archival signal (see markContractStorageEntriesArchived). Seeding new
+ * keys into the watch list is the caller's job — see
+ * INDEXED_CONTRACT_STORAGE_KEYS in indexer/src/config.ts.
+ */
+export async function getTrackedContractStorageKeys(pool: Pool, network: string): Promise<string[]> {
+  const { rows } = await pool.query<{ key: string }>(
+    'SELECT DISTINCT key FROM contract_storage_entries WHERE network = $1',
+    [network]
+  );
+  return rows.map(row => row.key);
+}
+
 // ─── Retry queue for failed ledgers ────────────────────────────────────────
 
 const MAX_RETRY_ATTEMPTS = 10;
@@ -641,3 +695,236 @@ export async function removeLedgerFromRetryQueue(
   );
 }
 
+
+/**
+ * Upsert a trustline from a change_trust operation.
+ * Creates or updates the trustline row and maintains the assets table holder count.
+ */
+export async function upsertTrustline(
+  client: PoolClient,
+  network: string,
+  ledger: number,
+  operation: HorizonOperation,
+  createdAt: string
+): Promise<void> {
+  const assetCode = (operation as { asset_code?: string }).asset_code;
+  const assetIssuer = (operation as { asset_issuer?: string }).asset_issuer;
+  const limit = (operation as { limit?: string }).limit;
+  const account = operation.source_account;
+
+  if (!assetCode || !assetIssuer) {
+    return; // Native XLM doesn't create trustlines
+  }
+
+  // Check if this is a trustline removal (limit = "0")
+  const isRemoval = limit === '0' || limit === '0.0000000';
+
+  if (isRemoval) {
+    // Remove trustline
+    const deleteResult = await client.query(
+      `DELETE FROM trustlines
+       WHERE account = $1 AND asset_code = $2 AND asset_issuer = $3 AND network = $4
+       RETURNING balance`,
+      [account, assetCode, assetIssuer, network]
+    );
+
+    // If a trustline with non-zero balance was deleted, decrement holder count
+    if (deleteResult.rows.length > 0) {
+      const oldBalance = deleteResult.rows[0].balance;
+      if (oldBalance !== '0' && oldBalance !== '0.0000000') {
+        await client.query(
+          `UPDATE assets
+           SET holder_count = GREATEST(0, holder_count - 1),
+               last_activity_ledger = $4,
+               updated_at = NOW()
+           WHERE asset_code = $1 AND asset_issuer = $2 AND network = $3`,
+          [assetCode, assetIssuer, network, ledger]
+        );
+      }
+    }
+  } else {
+    // Upsert trustline
+    const result = await client.query(
+      `INSERT INTO trustlines (account, asset_code, asset_issuer, trust_limit, balance, last_modified_ledger, created_at, network)
+       VALUES ($1, $2, $3, $4, '0', $5, $6, $7)
+       ON CONFLICT (account, asset_code, asset_issuer, network) DO UPDATE
+         SET trust_limit = EXCLUDED.trust_limit,
+             last_modified_ledger = EXCLUDED.last_modified_ledger,
+             updated_at = NOW()
+       RETURNING (xmax = 0) AS is_insert`,
+      [account, assetCode, assetIssuer, limit || '922337203685.4775807', ledger, createdAt, network]
+    );
+
+    const isInsert = result.rows[0]?.is_insert;
+
+    // Ensure asset exists and increment holder count if new trustline
+    await client.query(
+      `INSERT INTO assets (asset_code, asset_issuer, holder_count, first_seen_ledger, last_activity_ledger, network)
+       VALUES ($1, $2, $3, $4, $4, $5)
+       ON CONFLICT (asset_code, asset_issuer, network) DO UPDATE
+         SET holder_count = assets.holder_count + $3,
+             last_activity_ledger = EXCLUDED.last_activity_ledger,
+             updated_at = NOW()`,
+      [assetCode, assetIssuer, isInsert ? 1 : 0, ledger, network]
+    );
+  }
+}
+
+/**
+ * Update trustline balance from payment operations.
+ * Also updates the holder count in assets table when balance transitions to/from zero.
+ */
+export async function updateTrustlineBalance(
+  client: PoolClient,
+  network: string,
+  ledger: number,
+  account: string,
+  assetCode: string,
+  assetIssuer: string,
+  balanceChange: string,
+  createdAt: string
+): Promise<void> {
+  // Get current balance or create trustline if it doesn't exist
+  const result = await client.query(
+    `INSERT INTO trustlines (account, asset_code, asset_issuer, balance, last_modified_ledger, created_at, network)
+     VALUES ($1, $2, $3, $4, $5, $6, $7)
+     ON CONFLICT (account, asset_code, asset_issuer, network) DO UPDATE
+       SET balance = (trustlines.balance::numeric + $4::numeric)::text,
+           last_modified_ledger = EXCLUDED.last_modified_ledger,
+           updated_at = NOW()
+     RETURNING (xmax = 0) AS is_insert, balance, 
+               (SELECT balance FROM trustlines WHERE account = $1 AND asset_code = $2 AND asset_issuer = $3 AND network = $7) AS old_balance`,
+    [account, assetCode, assetIssuer, balanceChange, ledger, createdAt, network]
+  );
+
+  const row = result.rows[0];
+  const isInsert = row?.is_insert;
+  const newBalance = row?.balance || '0';
+  const oldBalance = row?.old_balance || '0';
+
+  // Ensure asset exists
+  await client.query(
+    `INSERT INTO assets (asset_code, asset_issuer, holder_count, first_seen_ledger, last_activity_ledger, network)
+     VALUES ($1, $2, 0, $3, $3, $4)
+     ON CONFLICT (asset_code, asset_issuer, network) DO UPDATE
+       SET last_activity_ledger = EXCLUDED.last_activity_ledger,
+           updated_at = NOW()`,
+    [assetCode, assetIssuer, ledger, network]
+  );
+
+  // Update holder count if balance crosses zero threshold
+  const oldBalanceNum = parseFloat(oldBalance);
+  const newBalanceNum = parseFloat(newBalance);
+  const wasHolder = oldBalanceNum > 0;
+  const isHolder = newBalanceNum > 0;
+
+  if (!wasHolder && isHolder) {
+    // Became a holder
+    await client.query(
+      `UPDATE assets
+       SET holder_count = holder_count + 1,
+           updated_at = NOW()
+       WHERE asset_code = $1 AND asset_issuer = $2 AND network = $3`,
+      [assetCode, assetIssuer, network]
+    );
+  } else if (wasHolder && !isHolder) {
+    // No longer a holder
+    await client.query(
+      `UPDATE assets
+       SET holder_count = GREATEST(0, holder_count - 1),
+           updated_at = NOW()
+       WHERE asset_code = $1 AND asset_issuer = $2 AND network = $3`,
+      [assetCode, assetIssuer, network]
+    );
+  }
+
+  // If this was a new trustline insertion, increment holder count
+  if (isInsert && isHolder) {
+    await client.query(
+      `UPDATE assets
+       SET holder_count = holder_count + 1,
+           updated_at = NOW()
+       WHERE asset_code = $1 AND asset_issuer = $2 AND network = $3`,
+      [assetCode, assetIssuer, network]
+    );
+  }
+}
+
+/**
+ * Track payment volume in hourly buckets.
+ * Increments the volume and operation count for the asset's bucket.
+ */
+export async function trackAssetVolume(
+  client: PoolClient,
+  network: string,
+  assetCode: string,
+  assetIssuer: string,
+  amount: string,
+  timestamp: string
+): Promise<void> {
+  await client.query(
+    `INSERT INTO asset_volume_buckets (asset_code, asset_issuer, bucket_time, volume, operation_count, network)
+     VALUES ($1, $2, bucket_hour($3::timestamptz), $4::numeric, 1, $5)
+     ON CONFLICT (asset_code, asset_issuer, bucket_time, network) DO UPDATE
+       SET volume = asset_volume_buckets.volume + EXCLUDED.volume,
+           operation_count = asset_volume_buckets.operation_count + 1`,
+    [assetCode, assetIssuer, timestamp, amount, network]
+  );
+}
+
+/**
+ * Process an operation to update trustlines, balances, and volume tracking.
+ * Called for each operation during ledger indexing.
+ */
+export async function processAssetOperation(
+  client: PoolClient,
+  network: string,
+  ledger: number,
+  operation: HorizonOperation
+): Promise<void> {
+  const opType = operation.type;
+  const createdAt = operation.created_at;
+
+  // Handle change_trust operations
+  if (opType === 'change_trust') {
+    await upsertTrustline(client, network, ledger, operation, createdAt);
+    return;
+  }
+
+  // Handle payment operations for volume tracking
+  if (opType === 'payment' || opType === 'path_payment_strict_send' || opType === 'path_payment_strict_receive') {
+    const amount = (operation as { amount?: string }).amount;
+    const from = (operation as { from?: string }).from || operation.source_account;
+    const to = (operation as { to?: string }).to;
+    
+    // Extract asset info - check multiple possible fields
+    let assetCode: string | undefined;
+    let assetIssuer: string | undefined;
+    
+    if (opType === 'payment') {
+      assetCode = (operation as { asset_code?: string }).asset_code;
+      assetIssuer = (operation as { asset_issuer?: string }).asset_issuer;
+    } else if (opType === 'path_payment_strict_send') {
+      assetCode = (operation as { source_asset_code?: string }).source_asset_code;
+      assetIssuer = (operation as { source_asset_issuer?: string }).source_asset_issuer;
+    } else if (opType === 'path_payment_strict_receive') {
+      assetCode = (operation as { asset_code?: string }).asset_code;
+      assetIssuer = (operation as { asset_issuer?: string }).asset_issuer;
+    }
+
+    if (!assetCode || !assetIssuer || !amount) {
+      return; // Skip native XLM or operations without proper asset info
+    }
+
+    // Track volume
+    await trackAssetVolume(client, network, assetCode, assetIssuer, amount, createdAt);
+
+    // Update balances for both sender and receiver
+    if (from && to) {
+      // Deduct from sender
+      await updateTrustlineBalance(client, network, ledger, from, assetCode, assetIssuer, `-${amount}`, createdAt);
+      // Add to receiver
+      await updateTrustlineBalance(client, network, ledger, to, assetCode, assetIssuer, amount, createdAt);
+    }
+  }
+}

@@ -14,6 +14,7 @@
 import { createServer, type Server } from 'http';
 import type { Pool } from 'pg';
 import type { Config } from './config';
+import type { RetentionWindows } from './retention';
 import { metricsContentType, renderMetrics } from './metrics';
 import { subsystem } from './logger';
 
@@ -139,6 +140,9 @@ export interface DebugConfiguration {
     sorobanMinRequestIntervalMs: number;
     sorobanMaxEventsPerCycle: number;
     sorobanRetentionWindowLedgers: number;
+    retentionWindows: RetentionWindows;
+    retentionPruneIntervalMs: number;
+    retentionPruneBatchSize: number;
   };
   networks: DebugNetworkConfiguration[];
 }
@@ -191,6 +195,12 @@ export function buildDebugConfiguration(
       sorobanMinRequestIntervalMs: config.sorobanMinRequestIntervalMs,
       sorobanMaxEventsPerCycle: config.sorobanMaxEventsPerCycle,
       sorobanRetentionWindowLedgers: config.sorobanRetentionWindowLedgers,
+      // Retention is an operator decision that can silently be unlimited, and
+      // "is this deployment pruning what I think it is" is exactly the question
+      // a debug endpoint is for. Contains no secrets.
+      retentionWindows: config.retentionWindows,
+      retentionPruneIntervalMs: config.retentionPruneIntervalMs,
+      retentionPruneBatchSize: config.retentionPruneBatchSize,
     },
     networks: networks.map(network => ({
       ...network,

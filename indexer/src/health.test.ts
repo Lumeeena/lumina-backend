@@ -34,6 +34,10 @@ const deadPool = {
 
 const debugConfig: Config = {
   horizonUrl: 'https://user:horizon-secret@horizon.example/base/path?api_key=query-secret',
+  horizonAuthToken: 'horizon-auth-token-secret',
+  horizonMinRequestIntervalMs: 100,
+  horizonMaxRequestIntervalMs: 10000,
+  horizonTipWeightFactor: 2,
   databaseUrl: 'postgresql://lumina:database-secret@db.example:5432/lumina?sslmode=require',
   pollIntervalMs: 5000,
   startLedger: 100,
@@ -42,6 +46,7 @@ const debugConfig: Config = {
   dbPoolConnectionTimeoutMs: 0,
   sorobanRpcUrl: 'https://soroban.example/rpc/token-path?token=soroban-secret',
   indexedContractIds: ['Cstatic'],
+  indexedContractStorageKeys: [],
   registryContractId: 'Cregistry',
   registryReadAccount: 'Gpublic',
   registryNetworkPassphrase: undefined,
@@ -55,6 +60,11 @@ const debugConfig: Config = {
   sorobanMinRequestIntervalMs: 100,
   sorobanMaxEventsPerCycle: 5000,
   sorobanRetentionWindowLedgers: 300000,
+  retentionWindows: {
+    ledgers: 0, transactions: 0, operations: 0, contract_events: 0, custom_events: 0,
+  },
+  retentionPruneIntervalMs: 3_600_000,
+  retentionPruneBatchSize: 10_000,
 };
 
 test('a caught-up indexer is healthy', async () => {

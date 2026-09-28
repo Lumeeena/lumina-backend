@@ -9,6 +9,7 @@ import {
   type StoredContractSchema,
   type StoredSchemaEvent,
 } from './customEvents';
+import { encodeCursor, InvalidCursorError } from './pagination';
 
 const CONTRACT = 'CAYUDQPV3RKPM3EXDFGI3457FV677JLUCJ4OLKWGCUBPRIHYKXK3WFAZ';
 
@@ -206,10 +207,48 @@ test('getCustomEvents rejects an event the schema does not declare', async () =>
 test('a cursor adds keyset pagination rather than an offset', async () => {
   const { pool, calls } = fakePool();
 
-  await getCustomEvents(pool, { network: 'mainnet', contractId: CONTRACT, event: 'transfer', limit: 5, cursor: 'evt9' });
+  await getCustomEvents(pool, {
+    network: 'mainnet',
+    contractId: CONTRACT,
+    event: 'transfer',
+    limit: 5,
+    cursor: encodeCursor('customEvents', [900, 'evt9']),
+  });
 
-  assert.match(calls[1]!.sql, /\(ledger, event_id\) </);
+  assert.match(calls[1]!.sql, /\(ledger, event_id\) < \(\$\d+::bigint, \$\d+::text\)/);
   assert.ok(calls[1]!.params.includes('evt9'));
+  assert.ok(calls[1]!.params.includes(900));
+});
+
+test('an invalid cursor is rejected with the shared cursor error', async () => {
+  const { pool } = fakePool();
+
+  // Silently ignoring it would restart from the top, which reads to a client as
+  // duplicate rows rather than as a bad request.
+  await assert.rejects(
+    () => getCustomEvents(pool, { network: 'mainnet', contractId: CONTRACT, event: 'transfer', limit: 5, cursor: 'evt9' }),
+    (err: unknown) => {
+      assert.ok(err instanceof InvalidCursorError);
+      assert.equal((err as InvalidCursorError).extensions['code'], 'INVALID_CURSOR');
+      return true;
+    }
+  );
+});
+
+test('ascending custom events reverse cursor comparison and result ordering', async () => {
+  const { pool, calls } = fakePool();
+
+  await getCustomEvents(pool, {
+    network: 'mainnet',
+    contractId: CONTRACT,
+    event: 'transfer',
+    limit: 5,
+    cursor: 'evt9',
+    order: 'ASC',
+  });
+
+  assert.match(calls[1]!.sql, /\(ledger, event_id\) >/);
+  assert.match(calls[1]!.sql, /ORDER BY ledger ASC, event_id ASC/);
 });
 
 test('results are mapped with each value carrying its declared type', () => {
