@@ -3,13 +3,14 @@
  * graphql-server's Horizon clients so this service has no cross-package imports.
  */
 
-import { horizonRequestDuration, horizonRequests } from './metrics';
+import { horizonRequestDuration, horizonRequests, horizonThrottleInterval, horizonQueuedRequests, horizonWaitTime } from './metrics';
 import { subsystem } from './logger';
-import { createThrottle } from './throttle';
+import { createThrottle, type RequestPurpose } from './throttle';
 
 const log = subsystem('horizon');
 
 export const PAGE_LIMIT = 200;
+const ACCOUNT_REQUEST_TIMEOUT_MS = 10_000; // 10 seconds
 
 export interface HorizonLedger {
   sequence: number;
@@ -69,22 +70,51 @@ interface HorizonPage<T> {
   _links: { next?: { href: string } };
 }
 
-const MIN_REQUEST_INTERVAL_MS = parseInt(process.env.HORIZON_MIN_REQUEST_INTERVAL_MS ?? '100', 10);
+interface HorizonClientConfig {
+  minIntervalMs: number;
+  maxIntervalMs: number;
+  authToken?: string;
+  tipWeightFactor: number;
+}
 
-const { throttle, fetchJson, postJson } = createThrottle({
-  name: 'horizon',
-  minIntervalMs: MIN_REQUEST_INTERVAL_MS,
-  metrics: {
-    requestsTotal: horizonRequests,
-    requestDuration: horizonRequestDuration,
-  },
-});
+let throttle: ReturnType<typeof createThrottle>['throttle'];
+let fetchJson: ReturnType<typeof createThrottle>['fetchJson'];
 
-async function fetchAllPages<T>(url: string): Promise<T[]> {
+/**
+ * Per-request ceiling on the raw account fetch below.
+ *
+ * Account lookups are the indexer's highest-volume outbound call and the one
+ * most likely to be dropped mid-flight by an overloaded Horizon. An unbounded
+ * request can hang a whole account-refresh batch on a socket that will never
+ * answer, so it gets the same treatment as the rest of the throttle.
+ */
+const ACCOUNT_REQUEST_TIMEOUT_MS = 15_000;
+
+export function initializeHorizonClient(config: HorizonClientConfig): void {
+  const client = createThrottle({
+    name: 'horizon',
+    minIntervalMs: config.minIntervalMs,
+    maxIntervalMs: config.maxIntervalMs,
+    authToken: config.authToken,
+    tipWeightFactor: config.tipWeightFactor,
+    metrics: {
+      requestsTotal: horizonRequests,
+      requestDuration: horizonRequestDuration,
+      currentInterval: horizonThrottleInterval,
+      queuedRequests: horizonQueuedRequests,
+      waitTime: horizonWaitTime,
+    },
+  });
+  
+  throttle = client.throttle;
+  fetchJson = client.fetchJson;
+}
+
+async function fetchAllPages<T>(url: string, purpose: RequestPurpose = 'default'): Promise<T[]> {
   const records: T[] = [];
   let next: string | undefined = url;
   while (next) {
-    const page: HorizonPage<T> = await fetchJson<HorizonPage<T>>(next);
+    const page: HorizonPage<T> = await fetchJson<HorizonPage<T>>(next, undefined, purpose);
     records.push(...page._embedded.records);
     next = page._embedded.records.length === PAGE_LIMIT ? page._links.next?.href : undefined;
   }
@@ -92,32 +122,41 @@ async function fetchAllPages<T>(url: string): Promise<T[]> {
 }
 
 export async function getLatestLedgerSequence(horizonUrl: string): Promise<number> {
-  const page = await fetchJson<HorizonPage<HorizonLedger>>(`${horizonUrl}/ledgers?order=desc&limit=1`);
+  const page = await fetchJson<HorizonPage<HorizonLedger>>(`${horizonUrl}/ledgers?order=desc&limit=1`, undefined, 'tip');
   return page._embedded.records[0]?.sequence ?? 0;
 }
 
-export function getLedger(horizonUrl: string, sequence: number): Promise<HorizonLedger> {
-  return fetchJson<HorizonLedger>(`${horizonUrl}/ledgers/${sequence}`);
+export function getLedger(horizonUrl: string, sequence: number, purpose: RequestPurpose = 'tip'): Promise<HorizonLedger> {
+  return fetchJson<HorizonLedger>(`${horizonUrl}/ledgers/${sequence}`, undefined, purpose);
 }
 
-export function getLedgerTransactions(horizonUrl: string, sequence: number): Promise<HorizonTransaction[]> {
+export function getLedgerTransactions(horizonUrl: string, sequence: number, purpose: RequestPurpose = 'tip'): Promise<HorizonTransaction[]> {
   return fetchAllPages<HorizonTransaction>(
-    `${horizonUrl}/ledgers/${sequence}/transactions?order=asc&limit=${PAGE_LIMIT}`
+    `${horizonUrl}/ledgers/${sequence}/transactions?order=asc&limit=${PAGE_LIMIT}`,
+    purpose
   );
 }
 
-export function getLedgerOperations(horizonUrl: string, sequence: number): Promise<HorizonOperation[]> {
+export function getLedgerOperations(horizonUrl: string, sequence: number, purpose: RequestPurpose = 'tip'): Promise<HorizonOperation[]> {
   return fetchAllPages<HorizonOperation>(
-    `${horizonUrl}/ledgers/${sequence}/operations?order=asc&limit=${PAGE_LIMIT}`
+    `${horizonUrl}/ledgers/${sequence}/operations?order=asc&limit=${PAGE_LIMIT}`,
+    purpose
   );
 }
 
-/** Returns null (rather than throwing) for accounts that don't exist or have been merged away. */
+/** Returns null for accounts that don't exist; transient HTTP failures throw so durable jobs can retry. */
 export async function getAccount(horizonUrl: string, address: string): Promise<HorizonAccount | null> {
+  // Account lookups are the bulk of the indexer's outbound traffic, so they go
+  // through the same gate as everything else rather than racing it. This one
+  // cannot use fetchJson: a 404 is a normal answer here (an account created
+  // after the ledger, or one Horizon has not indexed), not a failed request.
+  await throttle('default');
   const stopTimer = horizonRequestDuration.startTimer();
   let res: Response;
   try {
-    res = await fetch(`${horizonUrl}/accounts/${address}`);
+    res = await fetch(`${horizonUrl}/accounts/${address}`, {
+      signal: AbortSignal.timeout(ACCOUNT_REQUEST_TIMEOUT_MS),
+    });
   } catch (err) {
     horizonRequests.inc({ status: 'error' });
     stopTimer();
@@ -127,8 +166,9 @@ export async function getAccount(horizonUrl: string, address: string): Promise<H
   horizonRequests.inc({ status: String(res.status) });
 
   if (!res.ok) {
-    if (res.status !== 404) log.warn({ address, status: res.status }, 'horizon account fetch failed');
-    return null;
+    if (res.status === 404) return null;
+    log.warn({ address, status: res.status }, 'horizon account fetch failed');
+    throw new Error(`Horizon account fetch failed with status ${res.status}`);
   }
   return (await res.json()) as HorizonAccount;
 }

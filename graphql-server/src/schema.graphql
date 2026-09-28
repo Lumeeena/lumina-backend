@@ -43,7 +43,9 @@ type Query {
   `transaction(hash:)`, which falls back to Horizon.
   """
   transactions(
-    """Network to read; defaults to the primary network configured for this deployment."""
+    """
+    Network to read; defaults to the primary network configured for this deployment.
+    """
     network: Network
     """Rows per page. Defaults to 20."""
     limit: Int = 20
@@ -139,7 +141,9 @@ type Query {
     account: String
     """Only operations of this type."""
     type: OperationType
-    """Filter to operations involving one asset: "CODE:ISSUER", or "XLM" for native."""
+    """
+    Filter to operations involving one asset: "CODE:ISSUER", or "XLM" for native.
+    """
     asset: String
     """Rows per page. Defaults to 20."""
     limit: Int = 20
@@ -283,13 +287,21 @@ type Query {
   asset(
     """Network to read; defaults to the primary network configured for this deployment."""
     network: Network
-    """Asset to inspect: "CODE:ISSUER", or "XLM" for native."""
+    """
+    Asset to inspect: "CODE:ISSUER", or "XLM" for native.
+    """
     asset: String!
-    """Range start (ISO-8601). Defaults to 30 days before `to`."""
+    """
+    Range start (ISO-8601). Defaults to 30 days before `to`.
+    """
     from: String
-    """Range end (ISO-8601). Defaults to now."""
+    """
+    Range end (ISO-8601). Defaults to now.
+    """
     to: String
-    """Bucket width in seconds (min 60). Defaults to 86400 (daily)."""
+    """
+    Bucket width in seconds (min 60). Defaults to 86400 (daily).
+    """
     bucketSeconds: Int = 86400
   ): AssetDetail!
 
@@ -358,19 +370,29 @@ and either being unreachable is reported as a field (`null` plus
 `stale: true`) rather than as an error.
 """
 type IndexerStatus {
-  """Network these numbers describe."""
+  """
+  Network these numbers describe.
+  """
   network: Network!
 
-  """Highest ledger sequence indexed for this network, or null if none yet."""
+  """
+  Highest ledger sequence indexed for this network, or null if none yet.
+  """
   latestIndexedLedger: Int
 
-  """When that ledger was indexed (ISO-8601), or null if none yet."""
+  """
+  When that ledger was indexed (ISO-8601), or null if none yet.
+  """
   latestIndexedAt: String
 
-  """Horizon current tip for this network, or null if it could not be read."""
+  """
+  Horizon current tip for this network, or null if it could not be read.
+  """
   horizonLedger: Int
 
-  """`horizonLedger - latestIndexedLedger`, or null if the tip is unknown."""
+  """
+  `horizonLedger - latestIndexedLedger`, or null if the tip is unknown.
+  """
   lagLedgers: Int
 
   """
@@ -379,7 +401,9 @@ type IndexerStatus {
   """
   stale: Boolean!
 
-  """When this status was computed (ISO-8601)."""
+  """
+  When this status was computed (ISO-8601).
+  """
   checkedAt: String!
 }
 
@@ -473,6 +497,16 @@ type ContractEventPage {
   pageInfo: PageInfo!
 }
 
+type ContractStorageEntryPage {
+  items: [ContractStorageEntry!]!
+  pageInfo: PageInfo!
+}
+
+type AssetPage {
+  items: [Asset!]!
+  pageInfo: PageInfo!
+}
+
 # ─── Core Types ───────────────────────────────────────────────────────────────
 
 """
@@ -534,7 +568,9 @@ type Transaction {
   memoType: String
   """Memo text for `text` and `id`; the hash for `hash`; null otherwise."""
   memo: String
-  """Operations may be null when their lookup fails; errors remain local to this field."""
+  """
+  Operations may be null when their lookup fails; errors remain local to this field.
+  """
   operations: [Operation!]
 }
 
@@ -917,6 +953,32 @@ type ContractSchema {
 
 # ─── Asset analytics ─────────────────────────────────────────────────────────
 
+enum AssetSort {
+  """
+  Sort by holder count, descending.
+  """
+  HOLDERS
+  """
+  Sort by recent volume, descending.
+  """
+  VOLUME
+}
+
+"""
+A Stellar asset with holder count and volume statistics.
+"""
+type Asset {
+  code: String!
+  issuer: String!
+  holderCount: Int!
+  firstSeenLedger: Int!
+  lastActivityLedger: Int!
+  """
+  Recent volume (last 7 days) in the asset's base units.
+  """
+  recentVolume: String
+}
+
 """
 Everything an asset detail page needs: supply and holders from indexed
 balances plus a bucketed volume series from operations.
@@ -930,7 +992,9 @@ type AssetDetail {
   issuer: String
   """True for the native asset, XLM."""
   native: Boolean!
-  """Sum of indexed balances, as a decimal string (no float rounding)."""
+  """
+  Sum of indexed balances, as a decimal string (no float rounding).
+  """
   supply: String!
   """
   Indexed accounts holding a non-zero balance of this asset. Counts indexed
@@ -942,14 +1006,58 @@ type AssetDetail {
   series: [VolumeBucket!]!
 }
 
-"""One bucket of the volume series. Empty buckets report zero volume."""
+"""
+One bucket of the volume series. Empty buckets report zero volume.
+"""
 type VolumeBucket {
   """Inclusive start of the bucket (ISO-8601)."""
   bucketStart: String!
   """Exclusive end of the bucket (ISO-8601)."""
   bucketEnd: String!
-  """Summed transfer amounts in the bucket, as a decimal string."""
+  """
+  Summed transfer amounts in the bucket, as a decimal string.
+  """
   volume: String!
   """Operations counted in this bucket. Zero for an empty bucket."""
   operationCount: Int!
+}
+
+# ─── Balance history ─────────────────────────────────────────────────────────
+
+"""
+Balance history for an account and asset, derived from operations.
+"""
+type BalanceHistory {
+  address: String!
+  asset: String!
+  """
+  Time range start (ISO-8601).
+  """
+  from: String!
+  """
+  Time range end (ISO-8601).
+  """
+  to: String!
+  """
+  Balance snapshots at operation timestamps.
+  """
+  snapshots: [BalanceSnapshot!]!
+}
+
+"""
+One point in the balance history timeline.
+"""
+type BalanceSnapshot {
+  """
+  Timestamp of the operation that changed the balance (ISO-8601).
+  """
+  timestamp: String!
+  """
+  Balance after the operation, as a decimal string.
+  """
+  balance: String!
+  """
+  Operation ID that caused this balance change.
+  """
+  operationId: String!
 }

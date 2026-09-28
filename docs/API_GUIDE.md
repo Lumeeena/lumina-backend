@@ -395,6 +395,69 @@ query GetContractEvents($contractId: String!) {
 }
 ```
 
+### Query Soroban contract storage entries
+
+```graphql
+query GetContractStorage(
+  $contractId: String!
+  $durability: ContractStorageDurability
+  $keyPrefix: String
+) {
+  contractStorageEntries(
+    contractId: $contractId
+    durability: $durability
+    keyPrefix: $keyPrefix
+    limit: 20
+  ) {
+    items {
+      key
+      durability
+      state
+      value
+      valueXdr
+      lastModifiedLedger
+      liveUntilLedger
+    }
+    pageInfo {
+      hasNextPage
+      cursor
+    }
+  }
+}
+```
+
+- `key` is the **base64 XDR `LedgerKey`** that addresses the entry, so it can be
+  passed straight back to Soroban `getLedgerEntries`. `keyPrefix` matches that
+  string as a literal prefix (`%` and `_` in the prefix are escaped, so they
+  cannot act as wildcards).
+- `durability` is `PERSISTENT` or `TEMPORARY`; omit it for both.
+- `value` is the decoded native value, JSON-encoded, and `valueXdr` is the raw
+  base64 `LedgerEntryData` XDR. Both forms are returned for the same entry.
+  Token amounts are exact: an `i128` that does not fit a JSON number is carried
+  as a string, never rounded to a float.
+
+#### Archived vs. absent
+
+`state` is the distinction that matters, and it is the reason this query cannot
+just omit old rows. Soroban **archives** a persistent entry when its TTL
+expires: the contract still owns the state, but it is inaccessible until
+restored. It is not deleted.
+
+| Case | Result |
+|---|---|
+| Entry is live | `state: ACTIVE`, `value` and `valueXdr` present |
+| Entry's TTL expired | `state: ARCHIVED`, row retained, `value`/`valueXdr` `null` |
+| Key was never set | No entry at all — an empty `items` list |
+
+So a client can tell "this contract has state that is archived" apart from "this
+key holds nothing": the first returns an entry with `state: ARCHIVED`, the
+second returns nothing. An archived entry reports no `value` rather than a stale
+one, so a last-known read is never mistaken for current state — the `state` field
+is what says which you are looking at.
+
+Entries are ordered by last change, newest first, and paginated with a keyset
+cursor on `key` exactly like the other list queries.
+
 ### Query custom-decoded contract events (if a schema is registered)
 
 If a contract has a registered custom schema (see `docs/CUSTOM_SCHEMAS.md`), you can query decoded, typed fields:

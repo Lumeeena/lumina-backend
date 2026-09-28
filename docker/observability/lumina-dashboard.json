@@ -354,7 +354,7 @@
       "id": 21,
       "type": "timeseries",
       "title": "Horizon 429 rate",
-      "description": "Sustained 429s silently break account lookups. Raise HORIZON_MIN_REQUEST_INTERVAL_MS.",
+      "description": "Adaptive rate limiting backs off automatically. Check lumina_horizon_throttle_interval_ms for current state.",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"

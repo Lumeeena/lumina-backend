@@ -13,6 +13,8 @@
  */
 import { createServer, type Server } from 'http';
 import type { Pool } from 'pg';
+import type { Config } from './config';
+import type { RetentionWindows } from './retention';
 import { metricsContentType, renderMetrics } from './metrics';
 import { subsystem } from './logger';
 
@@ -88,6 +90,114 @@ export interface HealthReport {
   checks: { name: string; ok: boolean; detail?: string | undefined }[];
   /** Present when more than one network is indexed. */
   networks?: NetworkHealth[] | undefined;
+}
+
+export interface DebugNetworkConfiguration {
+  network: string;
+  horizonUrl: string | null;
+  sorobanRpcUrl: string | null;
+  networkPassphrase: string;
+  cursor: number;
+  eventsCursor: number;
+  latestIndexedLedger: number;
+  latestHorizonLedger: number;
+  watchedContracts: string[];
+}
+
+export interface DebugConfiguration {
+  primaryNetwork: string;
+  config: {
+    databaseUrl: string | null;
+    horizonUrl: string | null;
+    pollIntervalMs: number;
+    startLedger: number | null;
+    dbPoolMax: number | null;
+    dbPoolIdleTimeoutMs: number | null;
+    dbPoolConnectionTimeoutMs: number | null;
+    sorobanRpcUrl: string | null;
+    indexedContractIds: string[];
+    registryContractId: string | null;
+    registryReadAccount: string | null;
+    registryNetworkPassphrase: string;
+    registryPollIntervalMs: number;
+    healthPort: number;
+    ledgerRetryAttempts: number;
+    ledgerRetryBaseMs: number;
+    accountCacheTtlMs: number;
+    accountCacheMaxSize: number;
+    eventsSafetyLagLedgers: number;
+    sorobanMinRequestIntervalMs: number;
+    sorobanMaxEventsPerCycle: number;
+    sorobanRetentionWindowLedgers: number;
+    retentionWindows: RetentionWindows;
+    retentionPruneIntervalMs: number;
+    retentionPruneBatchSize: number;
+  };
+  networks: DebugNetworkConfiguration[];
+}
+
+export type DebugNetworkInput = Omit<DebugNetworkConfiguration, 'horizonUrl' | 'sorobanRpcUrl'> & {
+  horizonUrl: string;
+  sorobanRpcUrl: string | undefined;
+};
+
+/** Expose operational configuration without returning URL credentials or opaque tokens. */
+export function redactEndpoint(value: string | undefined): string | null {
+  if (!value) return null;
+  try {
+    const parsed = new URL(value);
+    const path = parsed.pathname !== '/' ? '/[redacted]' : '';
+    const query = parsed.search ? '?[redacted]' : '';
+    return `${parsed.protocol}//${parsed.host}${path}${query}`;
+  } catch {
+    return null;
+  }
+}
+
+export function buildDebugConfiguration(
+  config: Config,
+  primaryNetwork: string,
+  networks: DebugNetworkInput[]
+): DebugConfiguration {
+  return {
+    primaryNetwork,
+    config: {
+      databaseUrl: redactEndpoint(config.databaseUrl),
+      horizonUrl: redactEndpoint(config.horizonUrl),
+      pollIntervalMs: config.pollIntervalMs,
+      startLedger: config.startLedger ?? null,
+      dbPoolMax: config.dbPoolMax ?? null,
+      dbPoolIdleTimeoutMs: config.dbPoolIdleTimeoutMs ?? null,
+      dbPoolConnectionTimeoutMs: config.dbPoolConnectionTimeoutMs ?? null,
+      sorobanRpcUrl: redactEndpoint(config.sorobanRpcUrl),
+      indexedContractIds: config.indexedContractIds,
+      registryContractId: config.registryContractId ?? null,
+      registryReadAccount: config.registryReadAccount ?? null,
+      registryNetworkPassphrase: config.registryNetworkPassphrase,
+      registryPollIntervalMs: config.registryPollIntervalMs,
+      healthPort: config.healthPort,
+      ledgerRetryAttempts: config.ledgerRetryAttempts,
+      ledgerRetryBaseMs: config.ledgerRetryBaseMs,
+      accountCacheTtlMs: config.accountCacheTtlMs,
+      accountCacheMaxSize: config.accountCacheMaxSize,
+      eventsSafetyLagLedgers: config.eventsSafetyLagLedgers,
+      sorobanMinRequestIntervalMs: config.sorobanMinRequestIntervalMs,
+      sorobanMaxEventsPerCycle: config.sorobanMaxEventsPerCycle,
+      sorobanRetentionWindowLedgers: config.sorobanRetentionWindowLedgers,
+      // Retention is an operator decision that can silently be unlimited, and
+      // "is this deployment pruning what I think it is" is exactly the question
+      // a debug endpoint is for. Contains no secrets.
+      retentionWindows: config.retentionWindows,
+      retentionPruneIntervalMs: config.retentionPruneIntervalMs,
+      retentionPruneBatchSize: config.retentionPruneBatchSize,
+    },
+    networks: networks.map(network => ({
+      ...network,
+      horizonUrl: redactEndpoint(network.horizonUrl),
+      sorobanRpcUrl: redactEndpoint(network.sorobanRpcUrl),
+      watchedContracts: [...new Set(network.watchedContracts)].sort(),
+    })),
+  };
 }
 
 /**
@@ -239,6 +349,7 @@ export function healthStatusCode(report: HealthReport): number {
 export interface HealthServerOptions {
   port: number;
   getState: () => IndexerState;
+  getDebugConfiguration: () => DebugConfiguration;
   pool: Pool | null;
   thresholds?: HealthThresholds;
 }
@@ -257,6 +368,25 @@ export function startHealthServer(options: HealthServerOptions): Server {
           log.error({ err: err instanceof Error ? err.message : err }, 'failed to render metrics');
           res.writeHead(500).end('metrics unavailable');
         });
+      return;
+    }
+
+    if (url === '/debug/config') {
+      if (req.method !== 'GET') {
+        res.writeHead(405, { Allow: 'GET' }).end('method not allowed');
+        return;
+      }
+      try {
+        res.writeHead(200, {
+          'Content-Type': 'application/json',
+          'Cache-Control': 'no-store',
+        });
+        res.end(JSON.stringify(options.getDebugConfiguration(), null, 2));
+      } catch {
+        log.error('failed to render debug configuration');
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'debug configuration unavailable' }));
+      }
       return;
     }
 
