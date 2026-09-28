@@ -27,9 +27,10 @@
  *   LEDGER_RETRY_ATTEMPTS — Attempts per failing ledger before the cursor stops at it (default: 3)
  *   LEDGER_RETRY_BASE_MS  — Base retry delay in ms, doubled each attempt (default: 500)
  *   INDEXED_CONTRACT_IDS  — Comma-separated contract IDs to index events for (requires a Soroban RPC URL)
- *   REGISTRY_CONTRACT_ID  — Lumina Registry contract to poll for additional contract IDs (primary network only; requires a Soroban RPC URL + REGISTRY_READ_ACCOUNT)
+ *   REGISTRY_CONTRACT_ID  — Lumina Registry contract every network polls by default (requires a Soroban RPC URL + REGISTRY_READ_ACCOUNT)
  *   REGISTRY_READ_ACCOUNT — Any funded account address used to simulate the registry's read calls (no secret key needed)
- *   REGISTRY_NETWORK_PASSPHRASE — Network passphrase for registry simulation (default: the primary network's passphrase)
+ *   <NAME>_REGISTRY_CONTRACT_ID / <NAME>_REGISTRY_READ_ACCOUNT — that network's own registry, overriding the two above
+ *   <NAME>_REGISTRY_NETWORK_PASSPHRASE — Overrides the passphrase used for this network's registry simulation (default: that network's own)
  */
 
 import {
@@ -70,7 +71,7 @@ import { initErrorTracking, captureException, shutdownErrorTracking } from './er
 import { getRetentionInfo } from './soroban';
 import { getAccount, getLatestLedgerSequence, getLedger, getLedgerOperations, getLedgerTransactions, HorizonAccount, initializeHorizonClient } from './horizon';
 import type { RequestPurpose } from './throttle';
-import { getActiveContracts } from './registry';
+import { getActiveContracts, resolveRegistryConfigs, type RegistryConfig } from './registry';
 import { getEvents, getLatestLedgerSequence as getLatestRpcLedgerSequence, type ContractEvent } from './soroban';
 import { resolveNetworks, type NetworkConfig } from './networks';
 
@@ -108,12 +109,11 @@ const INDEXED_CONTRACT_IDS = config.indexedContractIds;
 
 // Registry-based discovery is opt-in on top of the opt-in event indexing above —
 // unset, the indexer relies solely on the static INDEXED_CONTRACT_IDS list.
-// One Registry contract lives on one chain, so discovery runs on the primary
-// network only; the contracts it finds are indexed alongside that network's
-// static list.
-const REGISTRY_CONTRACT_ID = config.registryContractId;
-const REGISTRY_READ_ACCOUNT = config.registryReadAccount;
-const REGISTRY_NETWORK_PASSPHRASE = config.registryNetworkPassphrase;
+//
+// It is resolved per network, because each chain has its own registry
+// deployment. Discovery is per-loop from here on: one network's registry being
+// unreachable leaves that network's contract list stale, and says nothing about
+// any other network's.
 const REGISTRY_POLL_EVERY_N_TICKS = Math.max(1, Math.round(config.registryPollIntervalMs / POLL_INTERVAL_MS));
 
 // How long an account's Horizon data is considered fresh enough to skip
@@ -163,8 +163,14 @@ interface NetworkLoop {
   sorobanRpcUrl: string | undefined;
   /** Contract ids to index events for: the global list, or this network's override. */
   staticContractIds: string[];
-  /** Registry discovery runs on the primary network only — one Registry, one chain. */
-  registryEnabled: boolean;
+  /**
+   * This network's registry, or `undefined` when it does not discover.
+   *
+   * Per loop rather than per deployment: each chain has its own registry
+   * contract and its own read account, and a network without one simply keeps
+   * its static list.
+   */
+  registry: RegistryConfig | undefined;
   state: NetworkState;
   cursor: number;
   eventsCursor: number;
@@ -175,7 +181,7 @@ interface NetworkLoop {
   retryWorker?: RetryWorker;
 }
 
-function createLoop(network: NetworkConfig, primaryName: string): NetworkLoop {
+function createLoop(network: NetworkConfig, registries: Map<string, RegistryConfig>): NetworkLoop {
   const override = process.env[`${network.name.toUpperCase()}_INDEXED_CONTRACT_IDS`];
   return {
     network,
@@ -187,7 +193,7 @@ function createLoop(network: NetworkConfig, primaryName: string): NetworkLoop {
             .split(',')
             .map(id => id.trim())
             .filter(Boolean),
-    registryEnabled: network.name === primaryName,
+    registry: registries.get(network.name),
     state: {
       network: network.name,
       latestIndexedLedger: 0,
@@ -330,25 +336,35 @@ function isContractAddress(address: string): boolean {
   return /^C[A-Z0-9]{55}$/.test(address);
 }
 
-/** Refreshes the set of contract IDs discovered from the Lumina Registry, if configured. */
+/** Refreshes the set of contract IDs discovered from this network's Lumina Registry, if it has one. */
 async function pollRegistry(loop: NetworkLoop): Promise<void> {
-  if (!loop.registryEnabled || !loop.sorobanRpcUrl || !REGISTRY_CONTRACT_ID || !REGISTRY_READ_ACCOUNT) return;
+  const registry = loop.registry;
+  if (!registry || !loop.sorobanRpcUrl) return;
   try {
     const entries = await getActiveContracts(
       loop.sorobanRpcUrl,
-      REGISTRY_CONTRACT_ID,
-      REGISTRY_READ_ACCOUNT,
-      REGISTRY_NETWORK_PASSPHRASE ?? loop.network.networkPassphrase
+      registry.contractId,
+      registry.readAccount,
+      registry.networkPassphrase
     );
     const invalid = entries.filter(id => !isContractAddress(id));
     if (invalid.length > 0) {
-      log.warn({ count: invalid.length, addresses: invalid }, 'registry discovery skipped non-contract addresses');
+      log.warn({ network: loop.network.name, count: invalid.length, addresses: invalid }, 'registry discovery skipped non-contract addresses');
     }
     loop.discoveredContractIds = entries.filter(isContractAddress);
     routine.success({ network: loop.network.name, contracts: loop.discoveredContractIds.length }, 'registry discovery complete');
   } catch (err) {
+    // Contained to this loop on purpose. A registry that is unreachable, or a
+    // simulation that fails, must not stop this network from indexing ledgers
+    // — and it must not become another loop's problem either, which is why the
+    // previously discovered list is kept rather than cleared: the network keeps
+    // indexing the contracts it already knows about, stale, instead of
+    // silently dropping back to the static list mid-flight.
+    // The metric keeps its existing `loop: 'registry'` label rather than
+    // gaining a network dimension: it counts discovery failures, and the
+    // network that failed is in the log line beside it.
     indexingErrors.inc({ loop: 'registry' });
-    log.error({ err: message(err) }, 'registry polling failed');
+    log.error({ network: loop.network.name, err: message(err) }, 'registry polling failed');
   }
 }
 
@@ -504,7 +520,7 @@ async function pollContractStorage(loop: NetworkLoop): Promise<void> {
 }
 
 /** Run one network's polling loop until the process shuts down. */
-async function runNetworkLoop(loop: NetworkLoop, isPrimary: boolean): Promise<void> {
+async function runNetworkLoop(loop: NetworkLoop): Promise<void> {
   const name = loop.network.name;
 
   // Cursor initialisation talks to the database and Horizon, so it can fail
@@ -548,7 +564,7 @@ async function runNetworkLoop(loop: NetworkLoop, isPrimary: boolean): Promise<vo
       if (!initialised) {
         await initCursor();
       }
-      if (isPrimary && loop.loopTick % REGISTRY_POLL_EVERY_N_TICKS === 0) {
+      if (loop.registry && loop.loopTick % REGISTRY_POLL_EVERY_N_TICKS === 0) {
         await pollRegistry(loop);
       }
       loop.loopTick++;
@@ -596,8 +612,11 @@ async function run() {
   // Fails loudly here rather than inside a loop: a misconfigured network
   // otherwise means one chain silently stops while the others keep indexing.
   const registry = resolveNetworks(process.env);
+  // Same reasoning for the registries: a network naming a contract but no read
+  // account would otherwise never discover, and look like an empty registry.
+  const registries = resolveRegistryConfigs(registry.networks);
   const startedAt = Date.now();
-  const loops = registry.networks.map(network => createLoop(network, registry.primary.name));
+  const loops = registry.networks.map(network => createLoop(network, registries));
 
   log.info(
     {
@@ -631,13 +650,15 @@ async function run() {
         latestIndexedLedger: loop.state.latestIndexedLedger,
         latestHorizonLedger: loop.state.latestHorizonLedger,
         watchedContracts: [...loop.staticContractIds, ...loop.discoveredContractIds],
+        registryContractId: loop.registry?.contractId ?? null,
+        discoveredContracts: loop.discoveredContractIds,
       }))
     ),
     pool,
   });
 
   isLoopRunning = true;
-  await runIndependently(loops, loop => runNetworkLoop(loop, loop.network.name === registry.primary.name));
+  await runIndependently(loops, loop => runNetworkLoop(loop));
   isLoopRunning = false;
 }
 

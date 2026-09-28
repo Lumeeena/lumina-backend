@@ -13,7 +13,7 @@
     "codegen": "graphql-codegen --config codegen.yml",
     "schema:check": "node scripts/check-schema-snapshot.js",
     "load:subscriptions": "node --require ts-node/register scripts/load-subscriptions.ts",
-    "test:integration": "node --require ts-node/register --test src/pubsub.integration.test.ts src/search.integration.test.ts src/resolvers.integration.test.ts src/contractStorage.integration.test.ts"
+    "test:integration": "node --require ts-node/register --test src/pubsub.integration.test.ts src/search.integration.test.ts src/resolvers.integration.test.ts src/contractStorage.integration.test.ts src/networkIsolation.integration.test.ts"
   },
   "dependencies": {
     "@apollo/server": "^4.0.0",
@@ -34,6 +34,7 @@
     "compression": "~1.8.2",
     "cors": "^2.8.6",
     "dataloader": "^2.0.0",
+    "decimal.js": "^10.6.0",
     "express": "^4.21.2",
     "graphql": "^16.0.0",
     "graphql-tag": "^2.0.0",
