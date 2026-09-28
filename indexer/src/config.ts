@@ -39,6 +39,7 @@ export interface Config {
   sorobanMinRequestIntervalMs: number;
   sorobanMaxEventsPerCycle: number;
   sorobanRetentionWindowLedgers: number;
+  storageHistoryRetentionLedgers: number;
 }
 
 /**
@@ -170,6 +171,7 @@ export function loadConfig(): Config {
     sorobanMinRequestIntervalMs: intWithDefault('SOROBAN_MIN_REQUEST_INTERVAL_MS', 100, 1),
     sorobanMaxEventsPerCycle: intWithDefault('SOROBAN_MAX_EVENTS_PER_CYCLE', 5000, 100),
     sorobanRetentionWindowLedgers: intWithDefault('SOROBAN_RETENTION_WINDOW_LEDGERS', 300_000, 1),
+    storageHistoryRetentionLedgers: intWithDefault('STORAGE_HISTORY_RETENTION_LEDGERS', 500_000, 1),
   };
 
   // Validate that if registry is configured, all required fields are present
@@ -227,6 +229,7 @@ export function loadConfig(): Config {
       sorobanMinRequestIntervalMs: config.sorobanMinRequestIntervalMs,
       sorobanMaxEventsPerCycle: config.sorobanMaxEventsPerCycle,
       sorobanRetentionWindowLedgers: config.sorobanRetentionWindowLedgers,
+      storageHistoryRetentionLedgers: config.storageHistoryRetentionLedgers,
     },
     'configuration loaded'
   );

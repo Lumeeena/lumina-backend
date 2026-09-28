@@ -562,6 +562,107 @@ export async function upsertContractStorageEntries(
   }
 }
 
+/**
+ * Mark contract storage entries as archived when the RPC stops returning them.
+ *
+ * Soroban archives a persistent entry once its TTL expires — it becomes
+ * inaccessible rather than deleted — so an entry is marked `archived` rather
+ * than removed. This is what lets a client distinguish "archived" (a row with
+ * state = 'archived') from "absent" (no row at all).
+ *
+ * Only entries currently in `active` state are updated; re-archiving an already
+ * archived entry is a no-op, and a seed key that has never been returned stays
+ * absent rather than being mislabelled as archived.
+ */
+export async function markContractStorageEntriesArchived(
+  pool: Pool,
+  network: string,
+  keys: string[]
+): Promise<void> {
+  if (keys.length === 0) return;
+
+  await pool.query(
+    `UPDATE contract_storage_entries
+     SET state = 'archived', indexed_at = NOW()
+     WHERE network = $1 AND key = ANY($2) AND state = 'active'`,
+    [network, keys]
+  );
+}
+
+/**
+ * Read every tracked contract storage key for one network.
+ *
+ * Returns keys in both 'active' and 'archived' states — the watch list is the
+ * union of everything the indexer has ever seen, so a key is never silently
+ * dropped from polling.
+ */
+export async function getTrackedContractStorageKeys(
+  pool: Pool,
+  network: string
+): Promise<string[]> {
+  const { rows } = await pool.query<{ key: string }>(
+    'SELECT key FROM contract_storage_entries WHERE network = $1',
+    [network]
+  );
+  return rows.map(row => row.key);
+}
+
+/**
+ * Record a contract storage entry change to the history table.
+ *
+ * Called when a storage entry's value changes. The history table provides an
+ * append-only log of all changes, enabling time-travel queries.
+ */
+export async function recordContractStorageHistory(
+  pool: Pool,
+  network: string,
+  entries: ContractStorageEntry[]
+): Promise<void> {
+  if (entries.length === 0) return;
+
+  for (const entry of entries) {
+    await pool.query(
+      `INSERT INTO contract_storage_history
+         (contract_id, key, durability, value, value_xdr, live_until_ledger, last_modified_ledger, indexed_at, network)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, NOW(), $8)
+       ON CONFLICT (contract_id, key, last_modified_ledger, network) DO NOTHING`,
+      [
+        entry.contractId,
+        entry.key,
+        entry.durability,
+        entry.value === null ? null : JSON.stringify(entry.value, bigintReplacer),
+        entry.valueXdr,
+        entry.liveUntilLedgerSeq,
+        entry.lastModifiedLedgerSeq,
+        network,
+      ]
+    );
+  }
+}
+
+/**
+ * Prune contract storage history older than the retention window.
+ *
+ * The retention window is measured in ledgers from the current tip. Entries
+ * older than (current_ledger - retention_ledgers) are deleted.
+ */
+export async function pruneContractStorageHistory(
+  pool: Pool,
+  network: string,
+  retentionLedgers: number
+): Promise<number> {
+  const currentLedger = await getLatestIndexedLedger(pool, network);
+  const cutoffLedger = Math.max(0, currentLedger - retentionLedgers);
+
+  const result = await pool.query(
+    `DELETE FROM contract_storage_history
+     WHERE network = $1 AND last_modified_ledger < $2`,
+    [network, cutoffLedger]
+  );
+
+  return result.rowCount ?? 0;
+}
+
 // ─── Retry queue for failed ledgers ────────────────────────────────────────
 
 const MAX_RETRY_ATTEMPTS = 10;
