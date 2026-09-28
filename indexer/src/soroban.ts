@@ -76,7 +76,7 @@ function decodeScVal(base64: string): unknown {
 
 const SOROBAN_MIN_REQUEST_INTERVAL_MS = parseInt(process.env.SOROBAN_MIN_REQUEST_INTERVAL_MS ?? '100', 10);
 
-const { throttle, postJson } = createThrottle({
+const { postJson } = createThrottle({
   name: 'soroban',
   minIntervalMs: SOROBAN_MIN_REQUEST_INTERVAL_MS,
   metrics: {
@@ -221,12 +221,15 @@ export async function getContractStorageEntries(
 }
 
 /**
- * Fetches contract events for the given contract IDs starting at startLedger,
- * following pagination until the range is exhausted or the per-cycle limit is hit.
- * events is [] if none of the contract IDs emitted anything in range —
- * latestLedger is still returned so the caller can advance its cursor.
+ * One `getEvents` call for a single contract-id chunk, following pagination
+ * until the range is exhausted or the call's event budget is hit.
+ *
+ * Split out of getEvents because the RPC caps a filter at
+ * GET_EVENTS_MAX_CONTRACT_IDS contract ids: a longer list fails the whole call,
+ * so each chunk gets its own request. `records` are still raw — decoding is
+ * getEvents' job, done once over every chunk's output.
  */
-export async function getEvents(
+async function getEventsChunk(
   rpcUrl: string,
   contractIds: string[],
   startLedger: number,

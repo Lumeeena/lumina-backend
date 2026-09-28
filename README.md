@@ -276,6 +276,20 @@ network, exactly as before.
 | `REGISTRY_CONTRACT_ID`            | unset                                | Lumina Registry contract to poll for additional contract IDs (primary network only); requires a Soroban RPC URL + `REGISTRY_READ_ACCOUNT`                                                                                                           |
 | `REGISTRY_READ_ACCOUNT`           | unset                                | Any funded G... account used to simulate the registry's read calls — no secret key needed, simulation doesn't sign or submit                                                                                                                        |
 | `REGISTRY_NETWORK_PASSPHRASE`     | the primary network's passphrase     | Overrides the passphrase used for registry simulation                                                                                                                                                                                               |
+| `RETENTION_LEDGERS_DAYS`          | `0` (keep forever)                   | Days of chain history to keep in `ledgers`. `0` disables pruning. See [docs/RETENTION.md](docs/RETENTION.md)                                                                                                                                        |
+| `RETENTION_TRANSACTIONS_DAYS`     | `0` (keep forever)                   | Days of chain history to keep in `transactions`                                                                                                                                                                                                    |
+| `RETENTION_OPERATIONS_DAYS`       | `0` (keep forever)                   | Days of chain history to keep in `operations` — the fastest-growing table                                                                                                                                                                           |
+| `RETENTION_CONTRACT_EVENTS_DAYS`  | `0` (keep forever)                   | Days of chain history to keep in `contract_events`                                                                                                                                                                                                 |
+| `RETENTION_CUSTOM_EVENTS_DAYS`    | `0` (keep forever)                   | Days of chain history to keep in `custom_events`                                                                                                                                                                                                   |
+| `RETENTION_PRUNE_INTERVAL_MS`     | `3600000`                            | How often the pruning job runs                                                                                                                                                                                                                       |
+| `RETENTION_PRUNE_BATCH_SIZE`      | `10000`                              | Rows deleted per batch, bounding how much work a single prune statement does                                                                                                                                                                         |
+
+#### Retention
+
+Indexed data is kept forever by default. Nothing is deleted until you set a
+window, and each table's window is decided on its own — see
+[`docs/RETENTION.md`](docs/RETENTION.md) for which tables are prunable, why
+current-state tables are not, and what pruning does to backfill.
 
 #### Adaptive rate limiting
 

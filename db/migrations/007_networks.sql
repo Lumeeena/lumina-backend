@@ -71,7 +71,12 @@ ALTER TABLE transactions
     FOREIGN KEY (ledger, network) REFERENCES ledgers (sequence, network);
 
 ALTER TABLE operations DROP CONSTRAINT IF EXISTS operations_pkey;
-ALTER TABLE operations ADD PRIMARY KEY (id, ledger, network);
+-- (id, network), not (id, ledger, network). `ledger` is in the key only because
+-- 006 used to partition `operations` by it, and a partitioned table's unique
+-- constraints must include the partition key. 006 no longer partitions — see
+-- 006_partition_operations.sql — so the canonical key in db/schema.sql is
+-- (id, network), and this file has to land there or the two dumps diverge.
+ALTER TABLE operations ADD PRIMARY KEY (id, network);
 ALTER TABLE operations
     ADD CONSTRAINT operations_transaction_hash_network_fkey
     FOREIGN KEY (transaction_hash, network) REFERENCES transactions (hash, network);

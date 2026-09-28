@@ -172,10 +172,44 @@ export const sorobanEventsTruncated = new Counter({
   registers: [registry],
 });
 
+/**
+ * Contract ids this network is watching for events, by network.
+ *
+ * Zero for a network with no Soroban RPC configured, which is the value that
+ * distinguishes "not watching anything" from "watching nothing yet" — the gauge
+ * is set every cycle, before the early return, so it reads 0 rather than being
+ * absent from the scrape for a network that has events switched off.
+ */
+export const contractsWatched = new Gauge({
+  name: 'lumina_soroban_contracts_watched',
+  help: 'Contract ids watched for Soroban events, by network.',
+  labelNames: ['network'] as const,
+  registers: [registry],
+});
+
 export const sorobanRetentionWindowExceeded = new Counter({
   name: 'lumina_soroban_retention_window_exceeded_total',
   help: 'Times the Soroban event cursor fell behind the RPC retention window.',
   labelNames: ['network'] as const,
+  registers: [registry],
+});
+
+/**
+ * Rows removed by the retention prune, by table.
+ *
+ * Labelled by table because the windows are configured per table, so a
+ * deployment that only sets `RETENTION_OPERATIONS_DAYS` sees all movement on
+ * one series and every other table correctly reads zero rather than being
+ * absent from the scrape.
+ *
+ * A prune is *supposed* to be silent when it has nothing to do, so a flat
+ * counter is the healthy state; a counter that never moves while the database
+ * grows is what to alert on.
+ */
+export const retentionPrunedRows = new Counter({
+  name: 'lumina_retention_pruned_rows_total',
+  help: 'Rows deleted by the retention prune, by table.',
+  labelNames: ['table'] as const,
   registers: [registry],
 });
 

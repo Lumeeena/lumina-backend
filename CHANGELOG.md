@@ -19,6 +19,11 @@ Breaking changes are rare and advance the major version. Deprecation notices app
 ## [Unreleased]
 
 ### Added
+- Configurable data retention, per table. `RETENTION_LEDGERS_DAYS`, `RETENTION_TRANSACTIONS_DAYS`, `RETENTION_OPERATIONS_DAYS`, `RETENTION_CONTRACT_EVENTS_DAYS` and `RETENTION_CUSTOM_EVENTS_DAYS` each set a window in days of chain history, defaulting to `0` — unlimited — so an existing deployment deletes nothing until an operator opts in. Windows are independent, and a negative value is rejected at startup rather than treated as unset (#101)
+- A pruning job that runs on its own timer rather than inside the indexing loop, takes a dedicated connection with a `lock_timeout` so the indexer never waits behind a prune, and deletes in bounded batches (20 per table per round) so a large backlog converges over several intervals instead of monopolising the database (#101)
+- `lumina_retention_pruned_rows_total`, labelled by table, plus `retentionWindows` in `/debug/config` — a flat counter is the healthy state, and a counter that never moves while the database grows is what to alert on (#101)
+- `idx_custom_events_created_at`, so pruning `custom_events` is an index lookup rather than a sequential scan (#101)
+- `contractStorageEntries` restored to the GraphQL schema. The resolver and its integration test were both in place but the query field had been dropped from `src/schema.graphql`, so the field was unreachable at runtime despite the committed snapshot advertising it
 - Incremental bulk export: `since_ledger` parameter on bulk exports with max exported ledger checkpoint tracking for downstream syncs (#94)
 - `network` argument on every query and subscription (`Network` enum: `MAINNET`, `TESTNET`, `FUTURENET`). Omitted means the configured primary, so existing clients are unaffected; naming a network the deployment does not serve is a `BAD_USER_INPUT` error rather than a silent fallback. Nested fields inherit their parent's network, and subscriptions filter notifications before reading rows (#60)
 - `indexerStatus(network)` query: Horizon's tip, the indexed tip, the lag and a `stale` label for one network. An unreachable database or Horizon answers with `null` fields and `stale: true` instead of failing, because the interesting moment for this query is exactly when something is wrong (#53)

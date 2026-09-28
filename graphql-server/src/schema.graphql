@@ -93,6 +93,28 @@ type Query {
   ): ContractEventPage!
 
   """
+  Fetch indexed Soroban contract storage entries for a contract, newest change
+  first. Optionally filtered by durability and by a key prefix.
+
+  `key` is the base64 XDR LedgerKey that addresses the entry, so it round-trips
+  back into a Soroban `getLedgerEntries` call; `keyPrefix` matches that string.
+
+  An entry whose TTL has expired is reported with `state: ARCHIVED` rather than
+  dropped, so a contract that has archived state is distinguishable from one
+  where the key was never set. Requires Soroban RPC indexing to be enabled.
+  """
+  contractStorageEntries(
+    network: Network
+    contractId: String!
+    """Only entries with this durability. Omit for both."""
+    durability: ContractStorageDurability
+    """Only entries whose base64 XDR key starts with this prefix."""
+    keyPrefix: String
+    limit: Int = 20
+    cursor: String
+  ): ContractStorageEntryPage!
+
+  """
   Get a specific ledger by sequence number.
   """
   ledger(network: Network, sequence: Int!): Ledger

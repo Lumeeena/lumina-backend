@@ -6,7 +6,7 @@
  */
 
 import type { Pool } from 'pg';
-import Decimal from 'decimal.js';
+import { StellarAmount } from './amount';
 
 const MAX_DAYS = 90;
 const DEFAULT_DAYS = 30;
@@ -87,7 +87,7 @@ export async function computeBalanceHistory(
   );
 
   // Get starting balance (from most recent operation before range)
-  let balance = new Decimal(0);
+  let balance = StellarAmount.ZERO;
   const { rows: beforeRows } = await pool.query<OperationRow>(
     `SELECT id, type, created_at, source_account, details
      FROM operations
@@ -121,7 +121,7 @@ export async function computeBalanceHistory(
   const snapshots: BalanceSnapshot[] = [];
 
   // Add initial snapshot at range start
-  if (rows.length > 0 || balance.gt(0)) {
+  if (rows.length > 0 || balance.isPositive()) {
     snapshots.push({
       timestamp: fromDate.toISOString(),
       balance: balance.toFixed(),
@@ -135,7 +135,7 @@ export async function computeBalanceHistory(
     balance = applyOperation(op, address, code, issuer, balance);
 
     // Only add snapshot if balance changed for this asset
-    if (!balance.eq(oldBalance)) {
+    if (!balance.equals(oldBalance)) {
       snapshots.push({
         timestamp: op.created_at,
         balance: balance.toFixed(),
@@ -196,26 +196,26 @@ function applyOperation(
   address: string,
   code: string | null,
   issuer: string | null,
-  currentBalance: Decimal
-): Decimal {
+  currentBalance: StellarAmount
+): StellarAmount {
   const { type, details } = op;
 
   switch (type) {
     case 'create_account': {
       if (details.account === address && code === null && issuer === null) {
         const startingBalance = details.starting_balance as string;
-        return currentBalance.plus(new Decimal(startingBalance));
+        return currentBalance.plus(StellarAmount.from(startingBalance));
       }
       if (details.funder === address && code === null && issuer === null) {
         const startingBalance = details.starting_balance as string;
-        return currentBalance.minus(new Decimal(startingBalance));
+        return currentBalance.minus(StellarAmount.from(startingBalance));
       }
       return currentBalance;
     }
 
     case 'payment': {
       if (!matchesAsset(details, code, issuer)) return currentBalance;
-      const amount = new Decimal(details.amount as string);
+      const amount = StellarAmount.from(details.amount as string);
       if (details.to === address) {
         return currentBalance.plus(amount);
       }
@@ -241,7 +241,7 @@ function applyOperation(
         ) &&
         details.from === address
       ) {
-        return currentBalance.minus(new Decimal(details.source_amount as string));
+        return currentBalance.minus(StellarAmount.from(details.source_amount as string));
       }
 
       // Destination asset
@@ -249,7 +249,7 @@ function applyOperation(
         matchesAsset(details, code, issuer) &&
         details.to === address
       ) {
-        return currentBalance.plus(new Decimal(details.amount as string));
+        return currentBalance.plus(StellarAmount.from(details.amount as string));
       }
 
       return currentBalance;
@@ -268,7 +268,7 @@ function applyOperation(
       
       // Source account balance goes to zero
       if (op.source_account === address) {
-        return new Decimal(0);
+        return StellarAmount.ZERO;
       }
       
       return currentBalance;

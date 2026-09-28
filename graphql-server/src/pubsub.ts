@@ -24,6 +24,12 @@ export interface NotifierOptions {
   connectionString: string;
   /** Injected so tests can drive a fake connection without a database. */
   createClient?: (connectionString: string) => ListenClient;
+  /**
+   * Reported as the connection's `application_name`, so the LISTEN backend is
+   * identifiable in `pg_stat_activity` — by an operator deciding whether to
+   * reap it, and by the integration test deciding what to terminate.
+   */
+  applicationName?: string;
   /** Maximum simultaneous subscriptions. Beyond this, `subscribe` throws. */
   maxSubscribers?: number;
   /** Per-subscriber buffer depth before the oldest notification is dropped. */
@@ -77,7 +83,9 @@ export class LedgerNotifier {
 
   constructor(private readonly options: NotifierOptions) {
     this.createClient =
-      options.createClient ?? (connectionString => new Client({ connectionString }) as unknown as ListenClient);
+      options.createClient ??
+      (connectionString =>
+        new Client({ connectionString, application_name: options.applicationName ?? 'lumina-graphql-listener' }) as unknown as ListenClient);
     this.maxSubscribers = options.maxSubscribers ?? 500;
     this.queueLimit = options.queueLimit ?? 64;
     this.reconnectDelayMs = options.reconnectDelayMs ?? 1000;

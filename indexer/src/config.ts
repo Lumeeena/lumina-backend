@@ -7,6 +7,7 @@
 
 import { Networks } from '@stellar/stellar-sdk';
 import { subsystem } from './logger';
+import { RETENTION_TABLES, unlimitedRetentionWindows, type RetentionWindows } from './retention';
 
 const log = subsystem('config');
 
@@ -39,6 +40,18 @@ export interface Config {
   sorobanMinRequestIntervalMs: number;
   sorobanMaxEventsPerCycle: number;
   sorobanRetentionWindowLedgers: number;
+  /**
+   * Per-table retention windows in days of chain time; `0` keeps everything.
+   * Defaults to unlimited for every table so nothing is deleted until an
+   * operator opts in. Distinct from `sorobanRetentionWindowLedgers`, which is
+   * how far back the Soroban RPC can still serve events, not how long we keep
+   * what we already indexed.
+   */
+  retentionWindows: RetentionWindows;
+  /** How often the pruning job runs. */
+  retentionPruneIntervalMs: number;
+  /** Rows deleted per batch, bounding how much work one prune statement does. */
+  retentionPruneBatchSize: number;
 }
 
 /**
@@ -127,6 +140,31 @@ function redactDatabaseUrl(url: string): string {
 }
 
 /**
+ * Env var holding a table's retention window, e.g. `RETENTION_OPERATIONS_DAYS`.
+ * Derived from the table name rather than repeated, so adding a prunable table
+ * to retention.ts cannot leave it without a way to configure.
+ */
+export function retentionEnvVar(table: string): string {
+  return `RETENTION_${table.toUpperCase()}_DAYS`;
+}
+
+/**
+ * Parses every `RETENTION_<TABLE>_DAYS` variable into a per-table window map.
+ *
+ * Every table defaults to 0 days (unlimited). A window is a number of days of
+ * *chain* time, and 0 is the only value that means "keep everything" — there
+ * is no separate "enabled" flag, because a flag that can disagree with a
+ * window is one more thing to get wrong.
+ */
+export function parseRetentionWindows(): RetentionWindows {
+  const windows = unlimitedRetentionWindows();
+  for (const table of RETENTION_TABLES) {
+    windows[table] = intWithDefault(retentionEnvVar(table), 0, 0);
+  }
+  return windows;
+}
+
+/**
  * Parses and validates all configuration.
  * Throws an error and exits if any configuration is invalid.
  */
@@ -170,7 +208,26 @@ export function loadConfig(): Config {
     sorobanMinRequestIntervalMs: intWithDefault('SOROBAN_MIN_REQUEST_INTERVAL_MS', 100, 1),
     sorobanMaxEventsPerCycle: intWithDefault('SOROBAN_MAX_EVENTS_PER_CYCLE', 5000, 100),
     sorobanRetentionWindowLedgers: intWithDefault('SOROBAN_RETENTION_WINDOW_LEDGERS', 300_000, 1),
+    retentionWindows: parseRetentionWindows(),
+    // Once an hour by default: long enough that the pass is not itself a load
+    // source, short enough that a window is honoured well within its own
+    // resolution. Retention is a coarse control, not a latency-sensitive one.
+    retentionPruneIntervalMs: intWithDefault('RETENTION_PRUNE_INTERVAL_MS', 60 * 60 * 1000, 1000),
+    retentionPruneBatchSize: intWithDefault('RETENTION_PRUNE_BATCH_SIZE', 10_000, 1),
   };
+
+  // A transaction retained but not its ledger is a row the API can no longer
+  // reach (a transaction query walks to its ledger), and the reverse — a
+  // ledger retained with no transactions — is harmless. So `transactions`
+  // cannot outlive `ledgers`: a longer window on the child is silently
+  // narrowed to the parent's, and saying so at startup beats discovering it
+  // from an unexplained row count.
+  if (config.retentionWindows.transactions > 0 && config.retentionWindows.ledgers === 0) {
+    log.warn(
+      { transactions: config.retentionWindows.transactions, ledgers: 0 },
+      'RETENTION_TRANSACTIONS_DAYS is set but RETENTION_LEDGERS_DAYS is not; ledgers are kept forever, so the transaction window only takes effect once a ledger window is also set'
+    );
+  }
 
   // Validate that if registry is configured, all required fields are present
   if (config.registryContractId && !config.sorobanRpcUrl) {
@@ -227,6 +284,9 @@ export function loadConfig(): Config {
       sorobanMinRequestIntervalMs: config.sorobanMinRequestIntervalMs,
       sorobanMaxEventsPerCycle: config.sorobanMaxEventsPerCycle,
       sorobanRetentionWindowLedgers: config.sorobanRetentionWindowLedgers,
+      retentionWindows: config.retentionWindows,
+      retentionPruneIntervalMs: config.retentionPruneIntervalMs,
+      retentionPruneBatchSize: config.retentionPruneBatchSize,
     },
     'configuration loaded'
   );

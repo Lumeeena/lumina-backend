@@ -273,15 +273,23 @@ export async function indexLedger(
     }
 
     for (const op of operations) {
-      // ON CONFLICT target includes the network and partition key: operations is
-      // partitioned by ledger (see db/migrations/006_partition_operations.sql),
-      // and Postgres requires a partitioned table's unique constraints to
-      // include the partition key. This isn't a behavior change — a given
-      // operation id is only ever written with one ledger value.
+      // No ON CONFLICT inference clause, deliberately. The two shapes this
+      // insert has to work against do not agree on a key: a database built
+      // from db/schema.sql has a plain `operations` keyed (id, network), while
+      // a deployment that ran the original 006_partition_operations still has
+      // it partitioned by ledger and keyed (id, ledger, network) — 007 could not
+      // add `network` to that key without carrying the partition key too.
+      // Naming either target breaks the other shape; naming none works on both.
+      //
+      // That is safe here because the inference clause is a no-op for a plain
+      // DO NOTHING: it only picks which unique violation is tolerated, and
+      // `operations` has exactly one unique constraint either way. A DO UPDATE
+      // insert would need the target, since it has to know which row to
+      // overwrite.
       await client.query(
         `INSERT INTO operations (id, type, transaction_hash, ledger, created_at, source_account, details, network)
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-         ON CONFLICT (id, ledger, network) DO NOTHING`,
+         ON CONFLICT DO NOTHING`,
         [op.id, op.type, op.transaction_hash, ledger.sequence, op.created_at, op.source_account, JSON.stringify(op), network]
       );
     }
@@ -560,6 +568,49 @@ export async function upsertContractStorageEntries(
       ]
     );
   }
+}
+
+/**
+ * Mark the given storage keys as `archived`, keeping the rows.
+ *
+ * Soroban archives a persistent entry once its TTL expires: the entry is not
+ * deleted, it is inaccessible until restored. Deleting our row would report
+ * the contract as having lost state it still has, so the row is kept and only
+ * its `state` changes — which is what lets a client distinguish "archived"
+ * (a row with `state = 'archived'`) from "absent" (no row at all).
+ *
+ * Only rows that are currently `active` are touched, so re-archiving an
+ * already-archived entry is a no-op rather than a repeated write.
+ */
+export async function markContractStorageEntriesArchived(
+  pool: Pool,
+  network: string,
+  keys: string[]
+): Promise<void> {
+  if (keys.length === 0) return;
+
+  await pool.query(
+    `UPDATE contract_storage_entries
+     SET state = 'archived', indexed_at = NOW()
+     WHERE network = $1 AND key = ANY($2::text[]) AND state = 'active'`,
+    [network, keys]
+  );
+}
+
+/**
+ * Every storage key this network has indexed, regardless of state.
+ *
+ * The polling loop re-fetches these each cycle: a key the RPC stops returning
+ * is the archival signal (see markContractStorageEntriesArchived). Seeding new
+ * keys into the watch list is the caller's job — see
+ * INDEXED_CONTRACT_STORAGE_KEYS in indexer/src/config.ts.
+ */
+export async function getTrackedContractStorageKeys(pool: Pool, network: string): Promise<string[]> {
+  const { rows } = await pool.query<{ key: string }>(
+    'SELECT DISTINCT key FROM contract_storage_entries WHERE network = $1',
+    [network]
+  );
+  return rows.map(row => row.key);
 }
 
 // ─── Retry queue for failed ledgers ────────────────────────────────────────

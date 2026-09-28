@@ -30,20 +30,44 @@ test('ledger catch-up stops at the first failed ledger without skipping the gap'
 
 test('retry exhaustion reports failure so the cursor is not advanced', async () => {
   let attempts = 0;
+  const enqueued: { network: string; sequence: number; error: string }[] = [];
 
-  const indexed = await fetchAndIndexLedgerWithRetry(200, async () => {
+  const indexed = await fetchAndIndexLedgerWithRetry('mainnet', 200, async () => {
     attempts++;
     throw new Error('scripted Horizon 429');
-  }, 3, 0);
+  }, 3, 0, async (network, sequence, error) => {
+    enqueued.push({ network, sequence, error });
+  });
 
   assert.equal(indexed, false);
   assert.equal(attempts, 3);
+  // Giving up without recording it would drop the ledger entirely: the cursor
+  // does not advance and nothing is left to retry it.
+  assert.deepEqual(enqueued, [
+    { network: 'mainnet', sequence: 200, error: 'scripted Horizon 429' },
+  ]);
+});
+
+test('a ledger that indexes is not enqueued for durable retry', async () => {
+  const enqueued: number[] = [];
+
+  const indexed = await fetchAndIndexLedgerWithRetry(
+    'testnet',
+    5,
+    async () => {},
+    3,
+    0,
+    async (_network, sequence) => { enqueued.push(sequence); }
+  );
+
+  assert.equal(indexed, true);
+  assert.deepEqual(enqueued, []);
 });
 
 test('a transient Horizon failure retries and then indexes the ledger', async () => {
   let attempts = 0;
 
-  const indexed = await fetchAndIndexLedgerWithRetry(201, async () => {
+  const indexed = await fetchAndIndexLedgerWithRetry('mainnet', 201, async () => {
     attempts++;
     if (attempts === 1) throw new Error('scripted Horizon 503');
   }, 3, 0);
