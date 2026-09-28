@@ -643,9 +643,9 @@ async function runNetworkLoop(loop: NetworkLoop, isPrimary: boolean): Promise<vo
 /**
  * One retention pass, wrapped so a failure is logged and the loop continues.
  *
- * A prune that throws — a lock it could not take within `lock_timeout`, a
- * partition another process is detaching — must not take the indexer down or
- * stop future passes. Retrying an hour later is the whole recovery strategy.
+ * A prune that throws — a lock it could not take within `lock_timeout` — must
+ * not take the indexer down or stop future passes. Retrying an hour later is
+ * the whole recovery strategy.
  */
 export async function runRetentionOnce(): Promise<RetentionReport[]> {
   try {

@@ -7,7 +7,7 @@
 
 import { Networks } from '@stellar/stellar-sdk';
 import { subsystem } from './logger';
-import { RETENTION_TABLES, unlimitedRetentionWindows, type RetentionWindows } from './retention';
+import { retentionWindowConflicts, RETENTION_TABLES, unlimitedRetentionWindows, type RetentionWindows } from './retention';
 
 const log = subsystem('config');
 
@@ -216,17 +216,18 @@ export function loadConfig(): Config {
     retentionPruneBatchSize: intWithDefault('RETENTION_PRUNE_BATCH_SIZE', 10_000, 1),
   };
 
-  // A transaction retained but not its ledger is a row the API can no longer
-  // reach (a transaction query walks to its ledger), and the reverse — a
-  // ledger retained with no transactions — is harmless. So `transactions`
-  // cannot outlive `ledgers`: a longer window on the child is silently
-  // narrowed to the parent's, and saying so at startup beats discovering it
-  // from an unexplained row count.
-  if (config.retentionWindows.transactions > 0 && config.retentionWindows.ledgers === 0) {
-    log.warn(
-      { transactions: config.retentionWindows.transactions, ledgers: 0 },
-      'RETENTION_TRANSACTIONS_DAYS is set but RETENTION_LEDGERS_DAYS is not; ledgers are kept forever, so the transaction window only takes effect once a ledger window is also set'
-    );
+  // A window that outruns the foreign keys pointing at it cannot be honoured:
+  // the delete would fail on the constraint on every round, so the window would
+  // look configured, log nothing, and never delete a row. Rejected at startup so
+  // that is a visible misconfiguration rather than a mystery. (The other
+  // direction is fine — deleting a child never depends on its parent, so a
+  // transaction window with ledgers kept forever is a valid, useful choice.)
+  const retentionConflicts = retentionWindowConflicts(config.retentionWindows);
+  if (retentionConflicts.length > 0) {
+    for (const problem of retentionConflicts) {
+      log.fatal({ retentionWindows: config.retentionWindows }, `Configuration error: ${problem}`);
+    }
+    process.exit(1);
   }
 
   // Validate that if registry is configured, all required fields are present

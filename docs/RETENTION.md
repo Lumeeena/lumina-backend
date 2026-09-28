@@ -6,6 +6,7 @@ without bound, and the first real conversation about it tends to happen when the
 disk fills. This document is that conversation, in advance.
 
 - [Turning it on](#turning-it-on)
+- [The chain has to be ordered](#the-chain-has-to-be-ordered)
 - [Which tables are prunable](#which-tables-are-prunable)
 - [Chain time, not index time](#chain-time-not-index-time)
 - [How pruning runs](#how-pruning-runs)
@@ -37,20 +38,56 @@ flag that can disagree with its own window is one more thing to get wrong, and
 `RETENTION_OPERATIONS_DAYS=-1` is rejected at startup rather than being treated
 as "unset".
 
-A worked example — keep a year of ledgers, three months of transactions and
-operations, drop contract events after a week:
+A worked example — keep a year of the ledger chain, drop contract events after a
+week:
 
 ```sh
 RETENTION_LEDGERS_DAYS=365
-RETENTION_TRANSACTIONS_DAYS=90
-RETENTION_OPERATIONS_DAYS=90
+RETENTION_TRANSACTIONS_DAYS=365
+RETENTION_OPERATIONS_DAYS=365
 RETENTION_CONTRACT_EVENTS_DAYS=7
 ```
 
-Windows do not have to be ordered. Setting a window on `operations` without
-one on `ledgers` is allowed and works — it just keeps more than you may have
-intended, since the ledger a transaction belongs to is what makes that
-transaction reachable.
+## The chain has to be ordered
+
+`operations` → `transactions` → `ledgers` is a foreign key chain, and none of
+those constraints cascade. That makes prune order necessary but **not
+sufficient**: order only decides which statement runs *first*, and if a table
+was never given a window there is no statement of its to run first.
+
+So if a table with a window is referenced by a table without one, the delete
+fails on the constraint:
+
+```sh
+RETENTION_LEDGERS_DAYS=365   # every transaction in those ledgers still points at them
+```
+
+That delete would fail on **every round, forever** — no error at startup, and a
+window that looks configured while never deleting a row. Retention therefore
+rejects it at startup, and the message names the two variables and the two
+numbers:
+
+```
+Configuration error: RETENTION_TRANSACTIONS_DAYS must be at least
+RETENTION_LEDGERS_DAYS (365), got 0 — 0 keeps every row, so the delete would
+fail on the foreign key and the window would never take effect
+```
+
+The rule: **a child must be pruned at least as far back as its parent.**
+
+- `ledgers` needs `transactions` ≥ its window, and `transactions` needs
+  `operations` ≥ its own.
+- Equal windows are fine — keeping a year of the whole chain is the natural
+  configuration.
+- A **longer** child window is fine too, and just deletes more.
+- Pruning a **leaf** on its own is always fine. `operations` is the bottom of
+  the chain, so `RETENTION_OPERATIONS_DAYS=90` alone is valid and is the common
+  case of dropping the largest table.
+- Pruning a child while keeping its parents forever is valid: deleting a
+  transaction never depends on the ledger it belongs to. The retained ledger
+  simply becomes a row with no transactions under it.
+- `contract_events` and `custom_events` have no foreign key into any prunable
+  table, so they can be pruned at any window on their own.
 
 ## Which tables are prunable
 
@@ -107,8 +144,11 @@ keep it off the indexing path:
 
 Tables are pruned children-first, because the foreign keys make the order
 mandatory rather than cosmetic: `operations` references `transactions`, which
-references `ledgers`, so deleting a parent first fails. A failure is logged and
-the round is abandoned; the next interval retries.
+references `ledgers`, so deleting a parent first fails. Order alone is not
+enough, though — a table with no window contributes no delete at all, which is
+why [the chain has to be ordered](#the-chain-has-to-be-ordered) is a startup
+check and not just a note. A failure is logged and the round is abandoned; the
+next interval retries.
 
 ## A note on `operations` and partitioning
 
@@ -127,29 +167,51 @@ puts it in the right place.
 
 ## Interaction with backfill
 
-**Pruned ledgers cannot be backfilled.** This is the main consequence, and it
-is not a bug to work around so much as a fact to plan around.
+**Pruned ledgers cannot be re-read.** That is the main consequence, and it is
+not a bug to work around so much as a fact to plan around.
 
-The indexer's backfill works by walking the cursor forward from the last
-indexed ledger. If retention has deleted the rows for ledgers 1–1000, the
-cursor is not rewound to re-read them — the rows are simply absent, and the API
-returns nothing for that range. Setting `RETENTION_OPERATIONS_DAYS=90` means
-"this deployment serves 90 days of operation history", not "the other 90 days
-are still there and lazily reloaded".
+The indexer resumes from the highest ledger it has indexed, so if retention has
+deleted the rows for ledgers 1–1000 the cursor is not rewound to re-read them:
+the rows are simply absent, and the API returns nothing for that range. Setting
+`RETENTION_OPERATIONS_DAYS=90` means "this deployment serves 90 days of
+operation history", not "the other 90 days are still there and lazily
+reloaded".
+
+**There is no supported way to backfill a pruned range**, and it is worth being
+precise about why. `START_LEDGER` is the only rewind lever, and
+`initCursor` in `indexer/src/index.ts` applies it *only* when
+`getLatestIndexedLedger()` returns `0` — that is, only when a network has no
+indexed ledgers at all:
+
+```ts
+loop.cursor = await getLatestIndexedLedger(pool, name);
+if (loop.cursor === 0 && START_LEDGER !== undefined) { ... }
+```
+
+So once any ledger survives, the cursor is at the newest one and `START_LEDGER`
+is ignored. A gap in the middle of the index cannot be filled by configuration.
+Recovering a pruned range means emptying the `ledgers` table for that network —
+every row, not just the old ones, because the cursor is read as
+`MAX(sequence)` and any surviving row keeps it at the newest ledger — then
+re-indexing from `START_LEDGER`. That re-reads from Horizon across everything
+still retained, so retention has to be disabled first or the re-index is pruned
+again as it goes. Treat it as a full re-index of that network, not a repair.
 
 Practically:
 
 - **Retention is a statement about the past.** It narrows what the API can
   answer. Set it once you know how far back you intend to serve.
-- **There is no un-prune.** Restoring a pruned range means replaying it from
-  Horizon, which the indexer will not do on its own because its cursor has
-  moved on. Plan for a window you can live with rather than a short one you
-  expect to widen.
+- **Widening a window does not bring data back.** It only stops the deletion
+  from continuing. Plan for a window you can live with rather than a short one
+  you expect to widen.
 - **A window longer than your current index does nothing.** If you have 40 days
   of data and set a 90-day window, the cutoff is before your oldest ledger and
   nothing is deleted. The window only starts biting once the index outlives it.
-- **Widening a window does not bring data back**, it only stops the deletion
-  from continuing. Backfill is the only way back, and it is a manual operation.
+- **Enabling retention on a database that is already long indexed does not trim
+  the past in one go.** It deletes at most `RETENTION_PRUNE_BATCH_SIZE` × 20 rows
+  per table per round, so a multi-year backlog takes several rounds — an hour
+  each by default — and the tables keep growing in the meantime. Expect the disk
+  to keep climbing for a while after you turn it on.
 - **Query results change over time.** A paginated query walking backwards
   through `operations` will eventually run out of rows. Clients that assume an
   index is complete will see gaps, and those gaps grow every day.
@@ -175,5 +237,5 @@ built to hold it.
   A flat counter is the healthy state — a prune with nothing to do is silent. A
   counter that never moves while the database grows is the thing to alert on.
 - **Log lines.** `retention prune removed expired data` reports the table, the
-  cutoff, and the row and partition counts. A prune that cannot take its locks
-  logs `retention prune failed` and retries on the next interval.
+  cutoff and how many rows went. A prune that cannot take its locks, or that
+  fails, logs `retention prune failed` and retries on the next interval.

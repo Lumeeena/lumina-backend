@@ -30,6 +30,16 @@
  * a single `indexed_at` window, and a policy expressed in "days indexed" would
  * delete it immediately. "Keep 30 days" has to mean 30 days of the chain.
  *
+ * ## Prune order is necessary but not sufficient
+ *
+ * `operations` -> `transactions` -> `ledgers` is a foreign key chain with no
+ * cascading, so the deletes have to run children-first. That alone does not make
+ * a configuration work: order only decides which statement runs *first*, and a
+ * table with no window contributes no statement to run first. A ledger window
+ * with unlimited transactions would fail its delete on every round, so
+ * `retentionWindowConflicts` refuses that combination at startup rather than
+ * letting it look configured while never deleting a row.
+ *
  * ## Not blocking indexing
  *
  * Three things keep the prune off the indexing path:
@@ -107,6 +117,21 @@ export const RETENTION_SPECS: readonly RetentionSpec[] = [
 
 export const RETENTION_TABLES: readonly RetentionTable[] = RETENTION_SPECS.map(spec => spec.table);
 
+/**
+ * The foreign-key chain among the prunable tables, as `[parent, child]` pairs.
+ *
+ * None of these constraints cascade, so a parent row cannot be deleted while a
+ * child row still references it — `DELETE FROM ledgers` fails outright while any
+ * transaction for the same network and ledger survives. Prune order alone does
+ * not prevent that: order only decides which statement runs *first*, and when
+ * the child was never given a window there is nothing to run first, so the
+ * parent's delete fails on every round and that window silently never applies.
+ */
+const FK_CHAIN: readonly (readonly [RetentionTable, RetentionTable])[] = [
+  ['ledgers', 'transactions'],
+  ['transactions', 'operations'],
+];
+
 /** Window lengths in days. `0` means "keep everything" — the default for all. */
 export type RetentionWindows = Record<RetentionTable, number>;
 
@@ -138,6 +163,37 @@ export function isRetentionEnabled(windows: RetentionWindows): boolean {
 /** Tables with a window, in prune order. */
 export function retainedTables(windows: RetentionWindows): RetentionTable[] {
   return RETENTION_TABLES.filter(table => windows[table] > 0);
+}
+
+/**
+ * Windows that would make a prune fail on a foreign key, described as messages.
+ *
+ * A child has to be pruned at least as far back as its parent: deleting a ledger
+ * needs every transaction in that ledger to be gone already, and deleting a
+ * transaction needs every operation referencing it to be gone. So a child window
+ * shorter than its parent's leaves rows in between that the parent's `DELETE`
+ * cannot pass, and an absent child window — `0`, which means unlimited — leaves
+ * all of them.
+ *
+ * Reported at startup rather than at prune time because the alternative is a
+ * window that looks configured, logs no error, and never deletes anything.
+ */
+export function retentionWindowConflicts(windows: RetentionWindows): string[] {
+  const problems: string[] = [];
+  for (const [parent, child] of FK_CHAIN) {
+    const parentDays = windows[parent] ?? 0;
+    if (parentDays <= 0) continue;
+    const childDays = windows[child] ?? 0;
+    if (childDays >= parentDays) continue;
+    problems.push(
+      `RETENTION_${child.toUpperCase()}_DAYS must be at least RETENTION_${parent.toUpperCase()}_DAYS ` +
+        `(${parentDays}), got ${childDays}` +
+        (childDays === 0
+          ? ' — 0 keeps every row, so the delete would fail on the foreign key and the window would never take effect'
+          : ' — otherwise the rows in between still reference the parent rows being deleted')
+    );
+  }
+  return problems;
 }
 
 /** The instant before which data is outside the window. */
