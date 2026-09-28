@@ -102,6 +102,16 @@ export interface DebugNetworkConfiguration {
   latestIndexedLedger: number;
   latestHorizonLedger: number;
   watchedContracts: string[];
+  /**
+   * The registry this network discovers from, or null when it has none.
+   *
+   * Reported per network because the registries differ: the contract id, the
+   * read account and the passphrase are each per network, and a single
+   * process-level field cannot say which chain any of them belongs to.
+   */
+  registryContractId: string | null;
+  /** Contracts this network's last successful discovery returned. */
+  discoveredContracts: string[];
 }
 
 export interface DebugConfiguration {
@@ -118,7 +128,8 @@ export interface DebugConfiguration {
     indexedContractIds: string[];
     registryContractId: string | null;
     registryReadAccount: string | null;
-    registryNetworkPassphrase: string;
+    /** Overrides the passphrase for every registry read; null means each network uses its own. */
+    registryNetworkPassphrase: string | null;
     registryPollIntervalMs: number;
     healthPort: number;
     ledgerRetryAttempts: number;
@@ -173,7 +184,7 @@ export function buildDebugConfiguration(
       indexedContractIds: config.indexedContractIds,
       registryContractId: config.registryContractId ?? null,
       registryReadAccount: config.registryReadAccount ?? null,
-      registryNetworkPassphrase: config.registryNetworkPassphrase,
+      registryNetworkPassphrase: config.registryNetworkPassphrase ?? null,
       registryPollIntervalMs: config.registryPollIntervalMs,
       healthPort: config.healthPort,
       ledgerRetryAttempts: config.ledgerRetryAttempts,
@@ -196,6 +207,7 @@ export function buildDebugConfiguration(
       horizonUrl: redactEndpoint(network.horizonUrl),
       sorobanRpcUrl: redactEndpoint(network.sorobanRpcUrl),
       watchedContracts: [...new Set(network.watchedContracts)].sort(),
+      discoveredContracts: [...new Set(network.discoveredContracts)].sort(),
     })),
   };
 }

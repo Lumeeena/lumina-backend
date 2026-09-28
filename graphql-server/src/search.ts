@@ -247,8 +247,12 @@ export async function getOperationsByAsset(pool: Pool, options: AssetOperationsO
   }
   if (options.cursor) {
     params.push(options.cursor);
+    // An operation id exists on every network, so the cursor's own row is
+    // looked up within this network ($1). Resolving it without that predicate
+    // compares the page against another chain's boundary, which silently
+    // repeats a row or ends the results early.
     conditions.push(
-      `(ledger, id) ${cursorOperator} (SELECT ledger, id FROM operations WHERE id = $${params.length} LIMIT 1)`
+      `(ledger, id) < (SELECT ledger, id FROM operations WHERE id = $${params.length} AND network = $1)`
     );
   }
 

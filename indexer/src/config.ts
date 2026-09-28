@@ -5,7 +5,6 @@
  * Invalid values cause the process to exit immediately with a clear error message.
  */
 
-import { Networks } from '@stellar/stellar-sdk';
 import { subsystem } from './logger';
 import { retentionWindowConflicts, RETENTION_TABLES, unlimitedRetentionWindows, type RetentionWindows } from './retention';
 
@@ -27,9 +26,22 @@ export interface Config {
   indexedContractIds: string[];
   /** Seed LedgerKey XDRs (base64) to poll contract storage for, before any are discovered. */
   indexedContractStorageKeys: string[];
+  /**
+   * Flat default registry, inherited by every network that does not set its
+   * own. The per-network resolution that consumes these lives in
+   * `registry.ts` (`resolveRegistryConfigs`).
+   */
   registryContractId: string | undefined;
   registryReadAccount: string | undefined;
-  registryNetworkPassphrase: string;
+  /**
+   * Overrides the passphrase used for every registry read.
+   *
+   * Unset by default: the passphrase a simulated registry read needs is the one
+   * of the network the registry is deployed on, so it comes from that network's
+   * configuration. A value here is the exception — a deployment whose registry
+   * does not live on the network it is registered under.
+   */
+  registryNetworkPassphrase: string | undefined;
   registryPollIntervalMs: number;
   healthPort: number;
   ledgerRetryAttempts: number;
@@ -192,7 +204,7 @@ export function loadConfig(): Config {
       .filter(Boolean),
     registryContractId: optionalString('REGISTRY_CONTRACT_ID'),
     registryReadAccount: optionalString('REGISTRY_READ_ACCOUNT'),
-    registryNetworkPassphrase: stringWithDefault('REGISTRY_NETWORK_PASSPHRASE', Networks.TESTNET),
+    registryNetworkPassphrase: optionalString('REGISTRY_NETWORK_PASSPHRASE'),
     registryPollIntervalMs: intWithDefault('REGISTRY_POLL_INTERVAL_MS', 60_000, 1000),
     healthPort: intWithDefault('HEALTH_PORT', 9090, 1, 65535),
     // Retry policy for a ledger whose fetch/index fails. More attempts ride

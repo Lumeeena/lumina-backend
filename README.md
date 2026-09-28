@@ -33,13 +33,39 @@ docker/           Dockerfiles + docker-compose.yml for postgres + indexer + grap
 
 ## How It Works
 
+One indexer process polls every declared network and one GraphQL server serves
+them all, separated by a `network` column rather than by running the stack once
+per chain:
+
 ```
-Stellar Horizon ──▶ indexer/ ──▶ PostgreSQL ──▶ graphql-server/ ──▶ lumina-frontend
-                                                       ▲
-                        Soroban RPC (contract events) ─┘  (opt-in, see below)
-                                       ▲
-              Lumina Registry (lumina-contracts) ─┘  (opt-in discovery, see below)
+              ┌── Horizon (mainnet) ──┐
+              │                       │
+   indexer/ ──┼──▶ PostgreSQL ────────┼──▶ graphql-server/ ──▶ lumina-frontend
+              │      every row has    │       one resolver set,
+              │      a `network`      │       `network` in the schema
+              │       column          │              ▲
+              └── Soroban RPC ────────┴──────────────┘
+                     (contract events, opt-in)
+                        ▲            ▲
+        Lumina Registry ┘            └─ one registry per network
+           (discovery, opt-in)             (opt-in discovery)
 ```
+
+- Every table's primary key is composite over `network`. Mainnet ledger 42 and
+  testnet ledger 42 are different rows, and the same `G…` account exists on both,
+  so a single-column key would have one network's rows silently overwrite the
+  other's.
+- The indexer runs one independent loop per network, each with its own resume
+  cursor, contract-event cursor, account cache and discovered contract ids. One
+  network's Horizon being slow or unreachable does not stop the others.
+- Each network polls its own Registry deployment if configured, and its reads are
+  signed against that network's passphrase.
+- A single-network deployment sets none of this: unset `NETWORKS` and the flat
+  `HORIZON_URL` / `SOROBAN_RPC_URL` / `NETWORK_PASSPHRASE` describe exactly one
+  network, which is what this project did until multi-network support landed.
+
+See [`docs/MULTI_NETWORK.md`](docs/MULTI_NETWORK.md) for the whole scheme, and
+its migration section for adding a second network to a running deployment.
 
 ### Real-time path
 
@@ -253,7 +279,7 @@ network, exactly as before.
 | Variable                          | Default                              | Notes                                                                                                                                                                                                                                               |
 | --------------------------------- | ------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `NETWORKS`                        | unset                                | Comma-separated networks to index, in declaration order (`mainnet`, `testnet`, `futurenet`). One polling loop runs per network                                                                                                                      |
-| `PRIMARY_NETWORK`                 | first of `NETWORKS`                  | Which network registry discovery and the default `network` argument use                                                                                                                                                                             |
+| `PRIMARY_NETWORK`                 | first of `NETWORKS`                  | The network named by the flat variables when `NETWORKS` is unset, and the default for the `network` GraphQL argument. Registry discovery does **not** use it — that is per network                                                     |
 | `<NAME>_HORIZON_URL`              | —                                    | Required for every name in `NETWORKS`, e.g. `MAINNET_HORIZON_URL`                                                                                                                                                                                   |
 | `<NAME>_SOROBAN_RPC_URL`          | unset                                | Per-network Soroban RPC; unset disables contract events for that network                                                                                                                                                                            |
 | `<NAME>_NETWORK_PASSPHRASE`       | per network name                     | Passphrase the network's transactions are signed against                                                                                                                                                                                            |
@@ -273,23 +299,12 @@ network, exactly as before.
 | `HORIZON_TIP_WEIGHT_FACTOR`       | `2`                                  | Relative priority factor for tip vs backfill requests; tip requests get weighted higher to prevent backfill from delaying real-time indexing                                                                                                        |
 | `SOROBAN_RPC_URL`                 | unset                                | Single-network deployments: enables Soroban contract event indexing                                                                                                                                                                                 |
 | `INDEXED_CONTRACT_IDS`            | unset                                | Comma-separated contract IDs to index events for; requires a Soroban RPC URL                                                                                                                                                                        |
-| `REGISTRY_CONTRACT_ID`            | unset                                | Lumina Registry contract to poll for additional contract IDs (primary network only); requires a Soroban RPC URL + `REGISTRY_READ_ACCOUNT`                                                                                                           |
-| `REGISTRY_READ_ACCOUNT`           | unset                                | Any funded G... account used to simulate the registry's read calls — no secret key needed, simulation doesn't sign or submit                                                                                                                        |
-| `REGISTRY_NETWORK_PASSPHRASE`     | the primary network's passphrase     | Overrides the passphrase used for registry simulation                                                                                                                                                                                               |
-| `RETENTION_LEDGERS_DAYS`          | `0` (keep forever)                   | Days of chain history to keep in `ledgers`. `0` disables pruning. See [docs/RETENTION.md](docs/RETENTION.md)                                                                                                                                        |
-| `RETENTION_TRANSACTIONS_DAYS`     | `0` (keep forever)                   | Days of chain history to keep in `transactions`. Must be ≥ `RETENTION_LEDGERS_DAYS`                                                                                                                                                             |
-| `RETENTION_OPERATIONS_DAYS`       | `0` (keep forever)                   | Days of chain history to keep in `operations` — the fastest-growing table. Must be ≥ `RETENTION_TRANSACTIONS_DAYS`                                                                                                                                |
-| `RETENTION_CONTRACT_EVENTS_DAYS`  | `0` (keep forever)                   | Days of chain history to keep in `contract_events`                                                                                                                                                                                                 |
-| `RETENTION_CUSTOM_EVENTS_DAYS`    | `0` (keep forever)                   | Days of chain history to keep in `custom_events`                                                                                                                                                                                                   |
-| `RETENTION_PRUNE_INTERVAL_MS`     | `3600000`                            | How often the pruning job runs                                                                                                                                                                                                                       |
-| `RETENTION_PRUNE_BATCH_SIZE`      | `10000`                              | Rows deleted per batch, bounding how much work a single prune statement does                                                                                                                                                                         |
-
-#### Retention
-
-Indexed data is kept forever by default. Nothing is deleted until you set a
-window, and each table's window is decided on its own — see
-[`docs/RETENTION.md`](docs/RETENTION.md) for which tables are prunable, why
-current-state tables are not, and what pruning does to backfill.
+| `REGISTRY_CONTRACT_ID`            | unset                                | Lumina Registry contract to poll for additional contract IDs; inherited by every network, requires a Soroban RPC URL + `REGISTRY_READ_ACCOUNT`                                                                                        |
+| `REGISTRY_READ_ACCOUNT`           | unset                                | Any funded G... account used to simulate the registry's read calls — no secret key needed, simulation doesn't sign or submit. Inherited by every network                                                                              |
+| `<NAME>_REGISTRY_CONTRACT_ID`     | unset                                | Registry contract for one network (e.g. `TESTNET_REGISTRY_CONTRACT_ID`), overriding the flat default. Each network deploys its own registry, and its reads use that network's own passphrase                                     |
+| `<NAME>_REGISTRY_READ_ACCOUNT`    | unset                                | Read account for one network's registry, overriding the flat default                                                                                                                                                                                 |
+| `<NAME>_REGISTRY_NETWORK_PASSPHRASE` | the network's own passphrase      | Passphrase to simulate one network's registry reads with. Only needed when a network's registry does not live on the network it is registered under                                                                                        |
+| `REGISTRY_NETWORK_PASSPHRASE`     | unset                                | Overrides the passphrase used for every registry read. Unset by default, so each network's registry read uses that network's own passphrase                                                                                                          |
 
 #### Adaptive rate limiting
 
@@ -316,7 +331,25 @@ there to disable it. When `REGISTRY_CONTRACT_ID` is set, discovered contract
 IDs are merged with `INDEXED_CONTRACT_IDS` (the registry is polled roughly
 once a minute, independent of the 5s ledger poll loop).
 
-Example against the deployed testnet registry:
+Every network indexes its own registry, so a multi-network deployment names one
+per chain rather than sharing the flat default:
+
+```bash
+NETWORKS=mainnet,testnet \
+MAINNET_SOROBAN_RPC_URL=https://mainnet.sorobanrpc.example \
+MAINNET_REGISTRY_CONTRACT_ID=<registry deployed on mainnet> \
+TESTNET_SOROBAN_RPC_URL=https://soroban-testnet.stellar.org \
+TESTNET_REGISTRY_CONTRACT_ID=CAYUDQPV3RKPM3EXDFGI3457FV677JLUCJ4OLKWGCUBPRIHYKXK3WFAZ \
+TESTNET_REGISTRY_READ_ACCOUNT=<any funded testnet G... address> \
+npm run dev
+```
+
+Each network's registry read is signed against that network's own passphrase,
+taken from its configuration. A network that polls no registry simply doesn't
+set the variables; a network that sets only one of the contract id and read
+account fails at startup rather than silently discovering nothing.
+
+Example against the deployed testnet registry on a single-network deployment:
 
 ```bash
 SOROBAN_RPC_URL=https://soroban-testnet.stellar.org \
@@ -369,8 +402,9 @@ indexer from starting.
 | `SUBSCRIPTION_QUEUE_LIMIT`      | `64` — notifications buffered per subscriber before the oldest are dropped                                                                                                                                                                 |
 | `ALLOW_ANONYMOUS_ACCESS`        | `true` — set `false` to require an API key on every query                                                                                                                                                                                  |
 | `API_KEY_HEADER`                | `x-api-key` — header the key is read from                                                                                                                                                                                                  |
-| `NETWORKS`                      | unset — same scheme as the indexer; every query takes an optional `network` argument naming one of them                                                                                                                                    |
+| `NETWORKS`                      | unset — same scheme as the indexer; every query takes an optional `network` argument naming one of them. `NETWORKS` must name the same set of networks the indexer declared                                                                 |
 | `PRIMARY_NETWORK`               | first of `NETWORKS` — which network serves a request that does not name one                                                                                                                                                                |
+| `<NAME>_HORIZON_URL`            | the flat `HORIZON_URL` — per-network Horizon fallback base URL. Optional, but a network without one cannot fall back to Horizon for unindexed accounts                                                                                  |
 | `PERSISTED_QUERIES`             | `true` — automatic persisted queries; set `false` to refuse hash-only requests                                                                                                                                                             |
 | `PERSISTED_QUERIES_TTL_SECONDS` | `604800`                                                                                                                                                                                                                                   | How long a registered hash stays cached (in-memory; a restart empties it)                                    |
 | `LATEST_LEDGER_CACHE_TTL_MS`    | `4000`                                                                                                                                                                                                                                     | Milliseconds to cache an indexed `latestLedger` result; Horizon fallback results are never cached            |

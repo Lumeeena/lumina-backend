@@ -301,19 +301,19 @@ test('an asset query paginates by keyset rather than offset', async () => {
   assert.ok(calls[0]?.params.includes('op99'));
 });
 
-test('an ascending asset query reverses both keyset comparison and result order', async () => {
+test('an asset query resolves its cursor inside the same network', async () => {
   const { pool, calls } = fakePool([]);
 
-  await getOperationsByAsset(pool, {
-    network: 'mainnet',
-    asset: 'XLM',
-    limit: 5,
-    cursor: 'op99',
-    order: 'ASC',
-  });
+  await getOperationsByAsset(pool, { network: 'testnet', asset: 'XLM', limit: 5, cursor: 'op99' });
 
-  assert.match(calls[0]?.sql ?? '', /\(ledger, id\) >/);
-  assert.match(calls[0]?.sql ?? '', /ORDER BY ledger ASC, id ASC/);
+  // The cursor subquery is a filter like any other, and the one it can forget
+  // is this one: an operation id exists on every network, so resolving it
+  // without the network predicate compares the page against another chain's
+  // row and pages from the wrong boundary.
+  assert.match(
+    calls[0]?.sql ?? '',
+    /SELECT ledger, id FROM operations WHERE id = \$\d+ AND network = \$1/
+  );
 });
 
 test('an invalid asset is rejected before any query runs', async () => {
