@@ -147,6 +147,123 @@ Do it while the indexer is stopped: the resume cursor is read per network, so
 rows left under the wrong label would make a network look already-indexed past
 where it actually is.
 
+## Migrating an existing single-network deployment
+
+Nothing here is required to keep a single-network deployment running. This
+section is for operators adding a second network to a deployment that is already
+in production, because that is the one case that touches the database.
+
+### The two cases, and they are not the same size
+
+Whether you need the expensive step depends entirely on which chain your rows
+already describe:
+
+- **You were indexing mainnet.** The migration's `DEFAULT 'mainnet'` already
+  labels every existing row correctly. There is no rewrite to do, and the only
+  cost is rebuilding the keys. **This is the case to expect.**
+- **You were indexing testnet, or a network you named something else.** Every
+  existing row is mislabelled and has to be rewritten. This is an order of
+  magnitude more expensive than the mainnet case, and needs the disk headroom in
+  the next section.
+
+`PRIMARY_NETWORK` names the network your flat variables described before the
+migration; if it is not `mainnet`, you are in the second case.
+
+### Measured cost, and what it scales with
+
+Measured on PostgreSQL 16.14, 4 vCPU / 15 GB RAM, against `operations` holding
+6,000,000 rows (825 MB including indexes):
+
+| Step | Time | Note |
+|---|---|---|
+| `ADD COLUMN network … DEFAULT 'mainnet'` | **19 ms** | Metadata-only. Not a rewrite, on any table size |
+| Relabel `UPDATE … SET network = 'testnet'` | **5 m 52 s** | Full table rewrite. Mainnet case: skip entirely |
+| `DROP CONSTRAINT` + `ADD PRIMARY KEY (id, ledger, network)` | **34 s** | Per table, builds a new index |
+| `VACUUM FULL` to reclaim the relabel's dead tuples | **1 m 25 s** | Exclusive lock; relabel case only |
+| `VACUUM ANALYZE` | **7 s** | Cheap, and the planner wants it |
+
+So, scaling the per-table key rebuild at roughly **6 seconds per million rows**,
+and the relabel at roughly **1 minute per million rows**:
+
+| Deployment size | Mainnet (rebuild keys only) | Relabel (non-mainnet) |
+|---|---|---|
+| ~1M operations | ~1 min | ~2 min |
+| ~6M operations | ~2–3 min | ~8 min |
+| ~50M operations | ~10 min | ~1 h |
+
+Add the other tables' key rebuilds on top — `ledgers`, `transactions`,
+`accounts`, `contract_events`, `contract_schemas`, `custom_events` — but they
+are each far smaller than `operations`, which gets one row per operation per
+ledger and grows forever. Treat these as an hour's notice, not a minute's.
+
+### Disk headroom
+
+The relabel rewrites the table and leaves the old copy behind as dead tuples.
+`operations` went from **825 MB to 1911 MB** before the vacuum, and back to
+879 MB after `VACUUM FULL`. So a non-mainnet relabel needs **roughly 2.5× the
+size of the largest table** free for the duration. The mainnet case needs no
+meaningful headroom, since nothing is rewritten.
+
+### The procedure
+
+1. **Take a backup.** This migration drops and rebuilds primary keys. It is not
+   reversible by re-running it, and there is no down-migration.
+2. **Stop the indexer.** Every step below takes locks the indexer will block on
+   — and a partially-migrated database is one the indexer would write rows into
+   under the wrong label. Stop it; don't pause it.
+3. **Run the migration:**
+   ```bash
+   psql "$DATABASE_URL" -f db/migrations/007_networks.sql
+   ```
+4. **Relabel, if and only if `PRIMARY_NETWORK` is not `mainnet`:**
+   ```sql
+   UPDATE ledgers              SET network = 'testnet';
+   UPDATE transactions         SET network = 'testnet';
+   UPDATE operations           SET network = 'testnet';
+   UPDATE accounts             SET network = 'testnet';
+   UPDATE contract_events      SET network = 'testnet';
+   UPDATE contract_schemas     SET network = 'testnet';
+   UPDATE custom_events        SET network = 'testnet';
+   ```
+   Change the label to whatever your network is actually called. `UPDATE` without
+   a `WHERE` rewrites every row, which is the point — but it also means running
+   it twice costs the same twice.
+5. **Reclaim the space** (relabel case only):
+   ```bash
+   psql "$DATABASE_URL" -c "VACUUM FULL ledgers, transactions, operations, accounts;"
+   ```
+   Without this the database keeps roughly double the size on disk forever.
+6. **Verify before restarting.** A mislabelled row set is the failure that costs
+   the most to notice, because the indexer starts fine and simply resumes from
+   the wrong place:
+   ```sql
+   SELECT network, count(*), min(ledger), max(ledger) FROM ledgers GROUP BY network;
+   ```
+   One row, the network you expect, and a `max(ledger)` at your real tip.
+7. **Start the indexer**, with the second network's variables added. Existing
+   rows are now read as one network, and the new one starts from its own tip.
+
+### Rolling back
+
+There is no down-migration, and that is deliberate: dropping the `network` column
+would have to decide which network to keep for every row that shares a ledger
+number, an operation id or an address across chains. On a single-network
+deployment that is recoverable; on a multi-network one it is not a question the
+database can answer.
+
+So rollback is:
+
+- **Before starting the indexer again:** restore the backup from step 1. The
+  indexer has not written anything new, so nothing is lost but the downtime.
+- **After adding a second network:** the migration is not the thing to undo.
+  Remove the network from `NETWORKS` and stop the indexer. The rows stay, keyed
+  by network, and are simply not served. Re-adding the network later resumes
+  from its own cursor. This is the case the composite key exists for, and it is
+  why adding a second network is reversible even though the migration is not.
+- **Never** hand-roll a rollback that merges networks into one label. That is
+  the data mixing the whole feature prevents, and `ON CONFLICT DO UPDATE` on a
+  merged key makes it silent.
+
 ## The indexer
 
 One polling loop runs per declared network, in the same process. Each loop owns
@@ -161,9 +278,28 @@ chains sharing a cursor means resuming one network's numbering from the other's.
   another chain's.
 - `INDEXED_CONTRACT_IDS` is shared unless `<NAME>_INDEXED_CONTRACT_IDS` is set,
   since one project usually deploys different contract ids per chain.
-- Registry discovery runs on the **primary** network only: one Registry
-  contract lives on one chain. `REGISTRY_NETWORK_PASSPHRASE` overrides the
-  passphrase used to simulate its reads, and defaults to the primary network's.
+- Registry discovery is configured **per network**, because each network has its
+  own Registry deployment. The flat `REGISTRY_CONTRACT_ID` and
+  `REGISTRY_READ_ACCOUNT` are the default that every network inherits;
+  `<NAME>_REGISTRY_CONTRACT_ID` and `<NAME>_REGISTRY_READ_ACCOUNT` override the
+  half a network sets. A network with neither keeps the default, and a network
+  with no configuration at all simply does not poll.
+- The passphrase used to simulate a registry read is the **network's own**,
+  taken from that network's configuration, because a simulated read is only
+  valid against the chain the registry is deployed on. This is the variable
+  most worth getting right: a process-level passphrase is correct for at most
+  one network. `<NAME>_REGISTRY_NETWORK_PASSPHRASE` overrides it for one
+  network, and the flat `REGISTRY_NETWORK_PASSPHRASE` overrides it for all of
+  them — which is what a deployment whose registry does not live on the network
+  it is registered under needs.
+- Setting only one half of a registry's contract id and read account is a
+  startup error. Discovery that quietly does not happen is indistinguishable
+  from a registry with no contracts in it, so the deployment would go on
+  indexing a stale static list without anyone noticing.
+- A network whose registry is unreachable, or whose simulation fails, logs and
+  increments `lumina_indexing_errors_total{loop="registry"}` and keeps
+  indexing the contracts it had already discovered. It does not fall back to
+  the static list mid-flight, and it does not affect any other network's loop.
 - `START_LEDGER` applies to any network whose tables are empty.
 
 Metrics and health are per network where they have to be:
@@ -204,8 +340,5 @@ deployment has".
 
 - **A separate database per network.** One schema, separated by a column;
   deployments that want isolation can still run two stacks.
-- **Per-network registry discovery.** One Registry, one chain: discovery runs on
-  the primary network. Contracts on other chains are listed explicitly with
-  `INDEXED_CONTRACT_IDS` or `<NAME>_INDEXED_CONTRACT_IDS`.
 - **Names outside the `Network` enum.** A private or future network is a schema
   change first — see `graphql-server/src/schema.graphql`.

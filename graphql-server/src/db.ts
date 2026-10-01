@@ -2,8 +2,15 @@
  * PostgreSQL-backed query layer for the GraphQL resolvers. All functions
  * take a `Pool` (or anything with a compatible `.query()`) so tests can
  * inject a fake client the same way indexer/src/db.test.ts does.
+ *
+ * Two functions here build their WHERE clause at runtime from optional
+ * filters. They follow the rule in docs/SQL_CONSTRUCTION.md — values are
+ * bound, identifiers come from fixed tables — and the tests beside them assert
+ * the exact statement that results, so a value that started being interpolated
+ * would fail a test rather than pass review.
  */
 import { Pool } from 'pg';
+import { cursorCondition, KEYSETS } from './pagination';
 
 // ─── Row shapes (snake_case, matching db/schema.sql) ──────────────────────────
 
@@ -76,6 +83,18 @@ interface EventRow {
   value: unknown;
 }
 
+interface ContractStorageEntryRow {
+  contract_id: string;
+  network: string;
+  key: string;
+  durability: string;
+  state: string;
+  value: unknown;
+  value_xdr: string | null;
+  live_until_ledger: string | null;
+  last_modified_ledger: string;
+}
+
 // ─── GraphQL-shaped mappers (camelCase, matching schema.graphql) ──────────────
 
 export function mapLedger(row: LedgerRow) {
@@ -117,6 +136,9 @@ export function mapOperation(row: OperationRow) {
   return {
     network: row.network,
     id: row.id,
+    // Not in the schema: the list ordering is (ledger, id), so the cursor for the
+    // next page needs the ledger the id was drawn from.
+    ledger: Number(row.ledger),
     type: row.type.toUpperCase(),
     createdAt: row.created_at.toISOString(),
     transactionHash: row.transaction_hash,
@@ -193,16 +215,97 @@ export function mapEvent(row: EventRow) {
   };
 }
 
+/**
+ * Durability and state are stored lowercase; the schema enums are uppercase.
+ *
+ * A row the indexer wrote is always one of the two, but the mapping is
+ * deliberate about an unknown value rather than passing it through: a typo in a
+ * future indexer would otherwise surface as an unresolvable GraphQL enum error
+ * on read, and failing here names the bad row instead.
+ */
+function durabilityEnum(durability: string): 'PERSISTENT' | 'TEMPORARY' {
+  if (durability === 'persistent') return 'PERSISTENT';
+  if (durability === 'temporary') return 'TEMPORARY';
+  throw new Error(`unknown contract storage durability in database: ${durability}`);
+}
+
+function storageStateEnum(state: string): 'ACTIVE' | 'ARCHIVED' {
+  if (state === 'active') return 'ACTIVE';
+  if (state === 'archived') return 'ARCHIVED';
+  throw new Error(`unknown contract storage state in database: ${state}`);
+}
+
+export function mapContractStorageEntry(row: ContractStorageEntryRow) {
+  return {
+    network: row.network,
+    contractId: row.contract_id,
+    key: row.key,
+    durability: durabilityEnum(row.durability),
+    state: storageStateEnum(row.state),
+    // An archived entry has no readable value, so this is null rather than the
+    // last value the indexer happened to see — a stale value presented as
+    // current is exactly the confusion the archived state exists to prevent.
+    value: row.state === 'archived' ? null : row.value === null ? null : JSON.stringify(row.value),
+    valueXdr: row.state === 'archived' ? null : row.value_xdr,
+    lastModifiedLedger: Number(row.last_modified_ledger),
+    liveUntilLedger: row.live_until_ledger === null ? null : Number(row.live_until_ledger),
+  };
+}
+
 // ─── Queries ────────────────────────────────────────────────────────────────
 
-export async function getTransactions(pool: Pool, network: string, limit: number, cursor?: string | null) {
+type LedgerOrder = 'ASC' | 'DESC';
+
+export interface TransactionQueryOptions {
+  order?: LedgerOrder;
+  successful?: boolean | null;
+  from?: string | null;
+  to?: string | null;
+  sourceAccount?: string | null;
+}
+
+export async function getTransactions(
+  pool: Pool,
+  network: string,
+  limit: number,
+  cursor?: string | null,
+  options: TransactionQueryOptions = {}
+) {
+  const order = options.order ?? 'DESC';
+  const cursorOperator = order === 'ASC' ? '>' : '<';
+  const conditions = ['network = $1'];
+  const params: unknown[] = [network];
+
+  if (options.successful !== undefined && options.successful !== null) {
+    params.push(options.successful);
+    conditions.push(`successful = $${params.length}`);
+  }
+  if (options.from) {
+    params.push(options.from);
+    conditions.push(`created_at >= $${params.length}::timestamptz`);
+  }
+  if (options.to) {
+    params.push(options.to);
+    conditions.push(`created_at <= $${params.length}::timestamptz`);
+  }
+  if (options.sourceAccount) {
+    params.push(options.sourceAccount);
+    conditions.push(`source_account = $${params.length}`);
+  }
+  if (cursor) {
+    params.push(cursor);
+    conditions.push(
+      `(ledger, hash) ${cursorOperator} (SELECT ledger, hash FROM transactions WHERE hash = $${params.length} AND network = $1)`
+    );
+  }
+  params.push(limit);
+
   const { rows } = await pool.query<TransactionRow>(
     `SELECT * FROM transactions
-     WHERE network = $1
-       AND ($3::text IS NULL OR (ledger, hash) < (SELECT ledger, hash FROM transactions WHERE hash = $3 AND network = $1))
-     ORDER BY ledger DESC, hash DESC
-     LIMIT $2`,
-    [network, limit, cursor ?? null]
+     WHERE ${conditions.join(' AND ')}
+     ORDER BY ledger ${order}, hash ${order}
+     LIMIT $${params.length}`,
+    params
   );
   return rows.map(mapTransaction);
 }
@@ -232,8 +335,11 @@ export async function getOperations(
     type?: string | null;
     limit: number;
     cursor?: string | null;
+    order?: LedgerOrder;
   }
 ) {
+  const order = opts.order ?? 'DESC';
+  const cursorOperator = order === 'ASC' ? '>' : '<';
   const conditions: string[] = [];
   const params: unknown[] = [];
 
@@ -253,15 +359,14 @@ export async function getOperations(
     // The cursor's own row is looked up inside the same network: an operation
     // id repeats across networks now that the key is composite.
     conditions.push(
-      `(ledger, id) < (SELECT ledger, id FROM operations WHERE id = $${params.length} AND network = $1)`
+      `(ledger, id) ${cursorOperator} (SELECT ledger, id FROM operations WHERE id = $${params.length} AND network = $1)`
     );
   }
-
   const where = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
   params.push(opts.limit);
 
   const { rows } = await pool.query<OperationRow>(
-    `SELECT * FROM operations ${where} ORDER BY ledger DESC, id DESC LIMIT $${params.length}`,
+    `SELECT * FROM operations ${where} ORDER BY ledger ${order}, id ${order} LIMIT $${params.length}`,
     params
   );
   return rows.map(mapOperation);
@@ -293,6 +398,30 @@ export async function getOperationsByTransactionHashes(
     else byHash.set(row.transaction_hash, [mapped]);
   }
   return byHash;
+}
+
+/**
+ * Ledgers newest first, paginated by keyset on the sequence.
+ *
+ * The sequence is already the sort key and already unique within a network, so
+ * the cursor is a single bound value — no row lookup to find where the previous
+ * page stopped.
+ */
+export async function getLedgers(
+  pool: Pool,
+  network: string,
+  limit: number,
+  cursor?: string | null
+) {
+  const params: unknown[] = [network];
+  const condition = cursorCondition(params, KEYSETS.ledgers, cursor);
+  params.push(limit);
+
+  const { rows } = await pool.query<LedgerRow>(
+    `SELECT * FROM ledgers WHERE network = $1${condition ? ` AND ${condition}` : ''} ORDER BY sequence DESC LIMIT $${params.length}`,
+    params
+  );
+  return rows.map(mapLedger);
 }
 
 export async function getLedgerBySequence(pool: Pool, network: string, sequence: number) {
@@ -346,7 +475,48 @@ export async function getAccountFromDb(pool: Pool, network: string, address: str
     [address, network]
   );
   if (!rows[0]) return null;
-  const row = rows[0];
+  return accountFromRow(rows[0]);
+}
+
+export async function getAccountsFromDb(pool: Pool, network: string, addresses: readonly string[]) {
+  if (addresses.length === 0) return new Map<string, ReturnType<typeof mapAccount>>();
+  const { rows } = await pool.query<AccountRow>(
+    'SELECT * FROM accounts WHERE address = ANY($1::text[]) AND network = $2',
+    [addresses, network]
+  );
+  return new Map(rows.map(row => [row.address, accountFromRow(row)]));
+}
+
+/**
+ * How `accounts` is ordered, and the keyset each order keysets on.
+ *
+ * The cursor holds whatever the ordering keysets on, so an order change makes
+ * every previously issued cursor unusable — which is why the two orders keyset
+ * on different arities and a cursor from one is rejected by the other.
+ */
+export const ACCOUNT_ORDERS = {
+  /** Most recently active first: the order an explorer's leaderboard wants. */
+  RECENT_ACTIVITY: {
+    orderBy: 'last_modified_ledger DESC, address ASC',
+    keyset: KEYSETS.accountsActivity,
+    // Accounts can share a ledger, so the address breaks the tie and keeps the
+    // walk from looping on the same ledger forever.
+    keyOf: (account: { lastModifiedLedger: number; address: string }) =>
+      [account.lastModifiedLedger, account.address] as const,
+  },
+  /** Address order: stable, and the only one that matches a prefix range. */
+  ADDRESS: {
+    orderBy: 'address ASC',
+    keyset: KEYSETS.accountsAddress,
+    keyOf: (account: { address: string }) => [account.address] as const,
+  },
+} as const;
+
+export type AccountOrder = keyof typeof ACCOUNT_ORDERS;
+
+export const ACCOUNT_ORDER_NAMES = Object.keys(ACCOUNT_ORDERS) as AccountOrder[];
+
+function accountFromRow(row: AccountRow) {
   return mapAccount({
     network: row.network,
     address: row.address,
@@ -361,27 +531,41 @@ export async function getAccountFromDb(pool: Pool, network: string, address: str
   });
 }
 
-export async function getAccountsFromDb(pool: Pool, network: string, addresses: readonly string[]) {
-  if (addresses.length === 0) return new Map<string, ReturnType<typeof mapAccount>>();
+/**
+ * Accounts the indexer has seen, one page at a time.
+ *
+ * The rows are a last-seen snapshot per address — see `Account` — so this is a
+ * listing of *indexed* accounts, not of every account on the network. The two
+ * differ enormously: mainnet has billions of accounts and an indexer writes one
+ * row per address it sees in the ledgers it has processed, which is also every
+ * account with activity worth listing.
+ *
+ * A cursor from the other order is rejected rather than half-applied, because
+ * the two orders have nothing in common to compare against.
+ */
+export async function getAccounts(
+  pool: Pool,
+  opts: {
+    network: string;
+    orderBy?: AccountOrder | null;
+    limit: number;
+    cursor?: string | null;
+  }
+) {
+  const order = ACCOUNT_ORDERS[opts.orderBy ?? 'RECENT_ACTIVITY'] ?? ACCOUNT_ORDERS.RECENT_ACTIVITY;
+
+  const params: unknown[] = [opts.network];
+  const condition = cursorCondition(params, order.keyset, opts.cursor);
+  params.push(opts.limit);
+
   const { rows } = await pool.query<AccountRow>(
-    'SELECT * FROM accounts WHERE address = ANY($1::text[]) AND network = $2',
-    [addresses, network]
+    `SELECT * FROM accounts
+      WHERE network = $1${condition ? ` AND ${condition}` : ''}
+      ORDER BY ${order.orderBy}
+      LIMIT $${params.length}`,
+    params
   );
-  return new Map(rows.map(row => [
-    row.address,
-    mapAccount({
-      network: row.network,
-      address: row.address,
-      sequence: row.sequence,
-      subentry_count: row.subentry_count,
-      last_modified_ledger: Number(row.last_modified_ledger),
-      num_sponsored: row.num_sponsored,
-      num_sponsoring: row.num_sponsoring,
-      balances: row.balances,
-      flags: row.flags,
-      thresholds: row.thresholds,
-    }),
-  ]));
+  return rows.map(accountFromRow);
 }
 
 export async function getAccountTransactions(pool: Pool, network: string, address: string, limit: number) {
@@ -408,8 +592,11 @@ export async function getEventsByContract(
     topic?: string | null;
     limit: number;
     cursor?: string | null;
+    order?: LedgerOrder;
   }
 ) {
+  const order = opts.order ?? 'DESC';
+  const cursorOperator = order === 'ASC' ? '>' : '<';
   const conditions = ['contract_id = $1'];
   const params: unknown[] = [opts.contractId];
 
@@ -423,17 +610,80 @@ export async function getEventsByContract(
   if (opts.cursor) {
     params.push(opts.cursor);
     conditions.push(
-      `(ledger, id) < (SELECT ledger, id FROM contract_events WHERE id = $${params.length} AND network = $2)`
+      `(ledger, id) ${cursorOperator} (SELECT ledger, id FROM contract_events WHERE id = $${params.length} AND network = $2)`
     );
   }
 
   params.push(opts.limit);
 
   const { rows } = await pool.query<EventRow>(
-    `SELECT * FROM contract_events WHERE ${conditions.join(' AND ')} ORDER BY ledger DESC, id DESC LIMIT $${params.length}`,
+    `SELECT * FROM contract_events WHERE ${conditions.join(' AND ')} ORDER BY ledger ${order}, id ${order} LIMIT $${params.length}`,
     params
   );
   return rows.map(mapEvent);
+}
+
+/**
+ * Contract storage entries for one contract, newest change first.
+ *
+ * Keyset pagination on (last_modified_ledger, key) rather than OFFSET, matching
+ * getEventsByContract: the cursor is resolved to its own row's ledger inside the
+ * same network, so the next page starts strictly after it. The `key` tiebreaker
+ * is required — a contract can have many entries changed in the same ledger,
+ * and without it paging would repeat or skip them.
+ *
+ * Archived entries are included, not filtered out: the whole point of #90 is
+ * that a client can see an entry is archived rather than inferring deletion
+ * from its absence. A client that only wants live state filters on
+ * `state = 'active'` downstream.
+ */
+export async function getContractStorageEntries(
+  pool: Pool,
+  opts: {
+    network: string;
+    contractId: string;
+    durability?: string | null;
+    keyPrefix?: string | null;
+    limit: number;
+    cursor?: string | null;
+  }
+) {
+  const conditions = ['contract_id = $1'];
+  const params: unknown[] = [opts.contractId];
+
+  params.push(opts.network);
+  conditions.push(`network = $${params.length}`);
+
+  if (opts.durability) {
+    params.push(opts.durability.toLowerCase());
+    conditions.push(`durability = $${params.length}`);
+  }
+  if (opts.keyPrefix) {
+    // LIKE with an explicit escape character: a prefix containing %, _ or \ is
+    // data, not a wildcard, and the escape is what makes the filter mean what it
+    // says. `key` is a base64 XDR string, so _ and % are both ordinary
+    // characters that must not silently act as wildcards.
+    const escaped = opts.keyPrefix.replace(/[\\%_]/g, ch => `\\${ch}`);
+    params.push(`${escaped}%`);
+    conditions.push(`key LIKE $${params.length} ESCAPE '\\'`);
+  }
+  if (opts.cursor) {
+    params.push(opts.cursor);
+    // The cursor's own row is looked up within the same contract and network
+    // (network is always $2, pushed second), so the next page starts strictly
+    // after it rather than restarting the whole ordering.
+    conditions.push(
+      `(last_modified_ledger, key) < (SELECT last_modified_ledger, key FROM contract_storage_entries WHERE key = $${params.length} AND contract_id = $1 AND network = $2)`
+    );
+  }
+
+  params.push(opts.limit);
+
+  const { rows } = await pool.query<ContractStorageEntryRow>(
+    `SELECT * FROM contract_storage_entries WHERE ${conditions.join(' AND ')} ORDER BY last_modified_ledger DESC, key DESC LIMIT $${params.length}`,
+    params
+  );
+  return rows.map(mapContractStorageEntry);
 }
 
 /**

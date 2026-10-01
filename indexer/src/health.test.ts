@@ -1,10 +1,14 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import type { Pool } from 'pg';
+import type { Config } from './config';
 import {
   aggregateNetworkStates,
+  buildDebugConfiguration,
   buildHealthReport,
   healthStatusCode,
+  startHealthServer,
+  type DebugConfiguration,
   type IndexerState,
 } from './health';
 
@@ -27,6 +31,41 @@ const deadPool = {
     throw new Error('connection refused');
   },
 } as unknown as Pool;
+
+const debugConfig: Config = {
+  horizonUrl: 'https://user:horizon-secret@horizon.example/base/path?api_key=query-secret',
+  horizonAuthToken: 'horizon-auth-token-secret',
+  horizonMinRequestIntervalMs: 100,
+  horizonMaxRequestIntervalMs: 10000,
+  horizonTipWeightFactor: 2,
+  databaseUrl: 'postgresql://lumina:database-secret@db.example:5432/lumina?sslmode=require',
+  pollIntervalMs: 5000,
+  startLedger: 100,
+  dbPoolMax: 10,
+  dbPoolIdleTimeoutMs: 10000,
+  dbPoolConnectionTimeoutMs: 0,
+  sorobanRpcUrl: 'https://soroban.example/rpc/token-path?token=soroban-secret',
+  indexedContractIds: ['Cstatic'],
+  indexedContractStorageKeys: [],
+  registryContractId: 'Cregistry',
+  registryReadAccount: 'Gpublic',
+  registryNetworkPassphrase: undefined,
+  registryPollIntervalMs: 60000,
+  healthPort: 9090,
+  ledgerRetryAttempts: 3,
+  ledgerRetryBaseMs: 500,
+  accountCacheTtlMs: 300000,
+  accountCacheMaxSize: 50000,
+  eventsSafetyLagLedgers: 3,
+  sorobanMinRequestIntervalMs: 100,
+  sorobanMaxEventsPerCycle: 5000,
+  sorobanRetentionWindowLedgers: 300000,
+  retentionWindows: {
+    ledgers: 0, transactions: 0, operations: 0, contract_events: 0, custom_events: 0,
+  },
+  retentionPruneIntervalMs: 3_600_000,
+  retentionPruneBatchSize: 10_000,
+};
 
 test('a caught-up indexer is healthy', async () => {
   const report = await buildHealthReport(state(), okPool, THRESHOLDS, NOW);
@@ -204,4 +243,55 @@ test('aggregating no networks at all is an idle report, not a crash', () => {
   assert.equal(aggregated.lastIndexedAt, null);
   assert.equal(aggregated.latestIndexedLedger, 0);
   assert.equal(aggregated.startedAt, NOW);
+});
+
+test('debug configuration masks URL credentials and reports live network state', async () => {
+  const debug = buildDebugConfiguration(debugConfig, 'testnet', [{
+    network: 'testnet',
+    horizonUrl: debugConfig.horizonUrl,
+    sorobanRpcUrl: debugConfig.sorobanRpcUrl,
+    networkPassphrase: 'Test SDF Network ; September 2015',
+    cursor: 123,
+    eventsCursor: 120,
+    latestIndexedLedger: 123,
+    latestHorizonLedger: 130,
+    watchedContracts: ['Cstatic', 'Cdiscovered', 'Cstatic'],
+    registryContractId: 'Cregistry',
+    discoveredContracts: ['Cdiscovered', 'Cdiscovered'],
+  }]);
+
+  const serialized = JSON.stringify(debug);
+  assert.doesNotMatch(serialized, /horizon-secret|database-secret|query-secret|token-path|soroban-secret/);
+  assert.equal(debug.config.databaseUrl, 'postgresql://db.example:5432/[redacted]?[redacted]');
+  assert.equal(debug.networks[0]?.cursor, 123);
+  assert.equal(debug.networks[0]?.eventsCursor, 120);
+  assert.deepEqual(debug.networks[0]?.watchedContracts, ['Cdiscovered', 'Cstatic']);
+});
+
+test('GET /debug/config returns no-store JSON and rejects writes', async () => {
+  const debug: DebugConfiguration = buildDebugConfiguration(debugConfig, 'testnet', []);
+  const server = startHealthServer({
+    port: 0,
+    getState: () => state(),
+    getDebugConfiguration: () => debug,
+    pool: null,
+  });
+  await new Promise<void>(resolve => server.once('listening', resolve));
+  const address = server.address();
+  assert.ok(address && typeof address !== 'string');
+  const endpoint = `http://127.0.0.1:${address.port}/debug/config`;
+
+  try {
+    const response = await fetch(endpoint);
+    assert.equal(response.status, 200);
+    assert.equal(response.headers.get('cache-control'), 'no-store');
+    assert.deepEqual(await response.json(), debug);
+
+    const writeResponse = await fetch(endpoint, { method: 'POST' });
+    assert.equal(writeResponse.status, 405);
+  } finally {
+    await new Promise<void>((resolve, reject) => {
+      server.close(err => err ? reject(err) : resolve());
+    });
+  }
 });

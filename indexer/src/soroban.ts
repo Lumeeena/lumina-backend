@@ -9,7 +9,7 @@
  * Soroban configuration. Set SOROBAN_RPC_URL + INDEXED_CONTRACT_IDS to
  * enable it (see indexer/src/index.ts).
  */
-import { scValToNative, xdr } from '@stellar/stellar-sdk';
+import { scValToNative, StrKey, xdr } from '@stellar/stellar-sdk';
 import { sorobanRequestDuration, sorobanRequests } from './metrics';
 import { createThrottle } from '@lumina/shared';
 import { subsystem } from './logger';
@@ -17,6 +17,13 @@ import { subsystem } from './logger';
 const log = subsystem('soroban');
 
 export const GET_LEDGER_ENTRIES_MAX_KEYS = 200;
+
+/**
+ * Soroban RPC accepts at most 5 contract ids in a single getEvents filter
+ * (see the getEvents docs); a longer list fails the whole call. Longer lists
+ * are split across several calls of this size.
+ */
+export const GET_EVENTS_MAX_CONTRACT_IDS = 5;
 
 export interface ContractEvent {
   id: string;
@@ -55,11 +62,48 @@ export interface GetEventsResult {
 }
 
 export interface LedgerEntryResult {
-  entries: Array<{ key: string; xdr: string; lastModifiedLedgerSeq: number }>;
+  entries: Array<{ key: string; xdr: string; lastModifiedLedgerSeq: number; liveUntilLedgerSeq?: number }>;
   latestLedger: number;
 }
 
-function decodeScVal(base64: string): unknown {
+/**
+ * Decode result: either the native value or a structured error.
+ */
+export type DecodeScValResult =
+  | { ok: true; value: unknown }
+  | { ok: false; error: string };
+
+/**
+ * Decode an ScVal from base64 XDR to its native JavaScript representation.
+ *
+ * All ScVal types are supported: scalars, maps, vectors, nested structs, bytes,
+ * addresses, and symbols. i128 and u128 values are decoded to bigint, which
+ * preserves precision above 2^53 — callers must serialize them as strings for
+ * JSON storage (see bigintReplacer in db.ts).
+ *
+ * Returns a structured result rather than throwing or returning null, so
+ * undecodable entries are reported rather than silently dropped.
+ */
+export function decodeScVal(base64: string): DecodeScValResult {
+  try {
+    const scVal = xdr.ScVal.fromXDR(base64, 'base64');
+    const value = scValToNative(scVal);
+    return { ok: true, value };
+  } catch (err) {
+    return {
+      ok: false,
+      error: err instanceof Error ? err.message : String(err),
+    };
+  }
+}
+
+/**
+ * Legacy decoding helper that returns null on failure.
+ *
+ * Used for backward compatibility where callers expect null on decode failure.
+ * New code should use decodeScVal() and handle the structured result.
+ */
+function decodeScValLegacy(base64: string): unknown {
   try {
     return scValToNative(xdr.ScVal.fromXDR(base64, 'base64'));
   } catch {
@@ -69,7 +113,7 @@ function decodeScVal(base64: string): unknown {
 
 const SOROBAN_MIN_REQUEST_INTERVAL_MS = parseInt(process.env.SOROBAN_MIN_REQUEST_INTERVAL_MS ?? '100', 10);
 
-const { throttle, postJson } = createThrottle({
+const { postJson } = createThrottle({
   name: 'soroban',
   minIntervalMs: SOROBAN_MIN_REQUEST_INTERVAL_MS,
   metrics: {
@@ -108,39 +152,134 @@ export async function getLedgerEntries(rpcUrl: string, keys: string[]): Promise<
   const entries: LedgerEntryResult['entries'] = [];
   let latestLedger = 0;
   for (let offset = 0; offset < keys.length; offset += GET_LEDGER_ENTRIES_MAX_KEYS) {
-    const result = await rpcCall<LedgerEntryResult>(rpcUrl, 'getLedgerEntries', {
+    const result = await rpcCall<RpcGetLedgerEntriesResult>(rpcUrl, 'getLedgerEntries', {
       keys: keys.slice(offset, offset + GET_LEDGER_ENTRIES_MAX_KEYS),
     });
-    entries.push(...(result.entries ?? []));
+    entries.push(...(result.entries ?? []).map(record => ({
+      key: record.key,
+      xdr: record.xdr,
+      lastModifiedLedgerSeq: record.lastModifiedLedgerSeq,
+      ...(record.liveUntilLedgerSeq !== undefined && { liveUntilLedgerSeq: record.liveUntilLedgerSeq }),
+    })));
     latestLedger = Math.max(latestLedger, result.latestLedger ?? 0);
   }
   return { entries, latestLedger };
 }
 
+interface RpcGetLedgerEntriesResult {
+  entries?: RpcLedgerEntryRecord[];
+  latestLedger: number;
+}
+
+interface RpcLedgerEntryRecord {
+  key: string; // base64 XDR LedgerKey
+  xdr: string; // base64 XDR LedgerEntryData
+  lastModifiedLedgerSeq: number;
+  liveUntilLedgerSeq?: number;
+}
+
+// ─── Contract storage entries ──────────────────────────────────────────────
+
+export type ContractStorageDurability = 'persistent' | 'temporary';
+
+export interface ContractStorageEntry {
+  contractId: string;
+  /** The full LedgerKey (base64 XDR) that addresses this entry. */
+  key: string;
+  durability: ContractStorageDurability;
+  /** Decoded native value, or null when the entry is absent/archived. */
+  value: unknown;
+  /** The raw LedgerEntryData (base64 XDR). */
+  valueXdr: string;
+  /** The ledger at which this entry's TTL expires, if the RPC reported one. */
+  liveUntilLedgerSeq: number | null;
+  lastModifiedLedgerSeq: number;
+}
+
+export interface GetContractStorageEntriesResult {
+  entries: ContractStorageEntry[];
+  latestLedger: number;
+}
+
 /**
- * Fetches contract events for the given contract IDs starting at startLedger,
- * following pagination until the range is exhausted or the per-cycle limit is hit.
- * events is [] if none of the contract IDs emitted anything in range —
- * latestLedger is still returned so the caller can advance its cursor.
+ * Parse a base64 LedgerKey into the contract id and durability it names.
+ *
+ * Only `contractData` keys address contract storage; anything else is a caller
+ * error, so it throws rather than silently producing a row that cannot be
+ * filtered or fetched back.
  */
-export async function getEvents(
+export function parseLedgerKey(keyXdr: string): { contractId: string; durability: ContractStorageDurability } {
+  const key = xdr.LedgerKey.fromXDR(keyXdr, 'base64');
+  if (key.switch().name !== 'contractData') {
+    throw new Error(`refusing to index a non-contract-data ledger key (${key.switch().name}) as contract storage`);
+  }
+  const data = key.contractData();
+  // A contractData key always addresses a contract, so the ScAddress is a
+  // contract hash; the union's value() is typed wider than that.
+  const contractHash = data.contract().value() as unknown as Buffer;
+  const contractId = StrKey.encodeContract(contractHash);
+  const durability = data.durability().name as ContractStorageDurability;
+  return { contractId, durability };
+}
+
+/**
+ * Fetch and parse the contract storage entries for the given LedgerKey XDRs.
+ *
+ * Each returned entry carries the key it was addressed by, the durability and
+ * contract id decoded from that key, the decoded value, the raw LedgerEntryData
+ * XDR, and the last-modified ledger. Keys the RPC does not return are simply
+ * absent from `entries` — distinguishing "archived" from "never existed" is
+ * the caller's job (see indexer/src/db.ts markContractStorageEntriesArchived).
+ */
+export async function getContractStorageEntries(
+  rpcUrl: string,
+  keys: string[]
+): Promise<GetContractStorageEntriesResult> {
+  const { entries: raw, latestLedger } = await getLedgerEntries(rpcUrl, keys);
+  const entries: ContractStorageEntry[] = [];
+  for (const record of raw) {
+    const { contractId, durability } = parseLedgerKey(record.key);
+    const data = xdr.LedgerEntryData.fromXDR(record.xdr, 'base64');
+    let value: unknown = null;
+    if (data.switch().name === 'contractData') {
+      value = scValToNative(data.contractData().val());
+    }
+    entries.push({
+      contractId,
+      key: record.key,
+      durability,
+      value,
+      valueXdr: record.xdr,
+      liveUntilLedgerSeq: record.liveUntilLedgerSeq ?? null,
+      lastModifiedLedgerSeq: record.lastModifiedLedgerSeq,
+    });
+  }
+  return { entries, latestLedger };
+}
+
+/**
+ * One `getEvents` call for a single contract-id chunk, following pagination
+ * until the range is exhausted or the call's event budget is hit.
+ *
+ * Split out of getEvents because the RPC caps a filter at
+ * GET_EVENTS_MAX_CONTRACT_IDS contract ids: a longer list fails the whole call,
+ * so each chunk gets its own request. `records` are still raw — decoding is
+ * getEvents' job, done once over every chunk's output.
+ */
+async function getEventsChunk(
   rpcUrl: string,
   contractIds: string[],
   startLedger: number,
-  maxEventsPerCycle: number
-): Promise<GetEventsResult> {
-  if (contractIds.length === 0) {
-    return { events: [], latestLedger: startLedger, truncated: false };
-  }
-
+  maxEvents: number
+): Promise<{ records: RpcEventRecord[]; latestLedger: number; truncated: boolean }> {
   const PAGE_LIMIT = 200;
   const allEvents: RpcEventRecord[] = [];
   let cursor: string | undefined;
   let latestLedger = startLedger;
   let truncated = false;
 
-  while (allEvents.length < maxEventsPerCycle) {
-    const remaining = maxEventsPerCycle - allEvents.length;
+  while (allEvents.length < maxEvents) {
+    const remaining = maxEvents - allEvents.length;
     const limit = Math.min(PAGE_LIMIT, remaining);
 
     const pagination: Record<string, unknown> = { limit };
@@ -164,9 +303,9 @@ export async function getEvents(
       break;
     }
 
-    if (result.cursor && allEvents.length < maxEventsPerCycle) {
+    if (result.cursor && allEvents.length < maxEvents) {
       cursor = result.cursor;
-    } else if (events.length === limit && allEvents.length >= maxEventsPerCycle) {
+    } else if (events.length === limit && allEvents.length >= maxEvents) {
       truncated = true;
       break;
     } else {
@@ -174,9 +313,51 @@ export async function getEvents(
     }
   }
 
+  return { records: allEvents, latestLedger, truncated };
+}
+
+/**
+ * Fetches contract events for the given contract IDs starting at startLedger,
+ * following pagination until the range is exhausted or the per-cycle limit is hit.
+ * events is [] if none of the contract IDs emitted anything in range —
+ * latestLedger is still returned so the caller can advance its cursor.
+ */
+export async function getEvents(
+  rpcUrl: string,
+  contractIds: string[],
+  startLedger: number,
+  maxEventsPerCycle: number
+): Promise<GetEventsResult> {
+  const unique = [...new Set(contractIds)];
+  if (unique.length === 0) {
+    return { events: [], latestLedger: startLedger, truncated: false };
+  }
+
+  const allEvents: RpcEventRecord[] = [];
+  let latestLedger = startLedger;
+  let truncated = false;
+
+  // One call (with its own pagination) per chunk; the per-cycle event budget
+  // is shared across chunks so the total stays bounded.
+  for (let offset = 0; offset < unique.length; offset += GET_EVENTS_MAX_CONTRACT_IDS) {
+    const remaining = maxEventsPerCycle - allEvents.length;
+    if (remaining <= 0) {
+      truncated = true;
+      break;
+    }
+    const chunk = unique.slice(offset, offset + GET_EVENTS_MAX_CONTRACT_IDS);
+    const result = await getEventsChunk(rpcUrl, chunk, startLedger, remaining);
+    allEvents.push(...result.records);
+    latestLedger = Math.max(latestLedger, result.latestLedger);
+    if (result.truncated) {
+      truncated = true;
+      break;
+    }
+  }
+
   if (truncated) {
     log.warn(
-      { contractIds, startLedger, eventsCollected: allEvents.length, maxEventsPerCycle },
+      { contractCount: unique.length, startLedger, eventsCollected: allEvents.length, maxEventsPerCycle },
       'Soroban getEvents truncated by per-cycle limit; remaining events will be fetched in subsequent cycles'
     );
   }
@@ -188,8 +369,8 @@ export async function getEvents(
     ledger: record.ledger,
     createdAt: record.ledgerClosedAt,
     pagingToken: record.pagingToken,
-    topics: record.topic.map(t => JSON.stringify(decodeScVal(t))),
-    value: decodeScVal(record.value),
+    topics: record.topic.map(t => JSON.stringify(decodeScValLegacy(t))),
+    value: decodeScValLegacy(record.value),
   }));
 
   return { events: mappedEvents, latestLedger, truncated };

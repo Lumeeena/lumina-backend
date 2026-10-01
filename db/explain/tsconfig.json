@@ -1,0 +1,23 @@
+{
+  // The audit tooling lives outside both workspaces: it drives the real query
+  // functions from graphql-server/ and indexer/, so it belongs to neither, and
+  // placing it inside either `src/` would drag the other workspace's files into
+  // that project's rootDir and break its build.
+  //
+  // It therefore needs its own config. `noEmit` because ts-node only ever
+  // compiles this in memory; `commonjs` because that is what the workspaces and
+  // the root package.json are, and because ts-node's defaults otherwise
+  // collide with the TypeScript version installed at the root.
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2022"],
+    "module": "commonjs",
+    "moduleResolution": "node",
+    "esModuleInterop": true,
+    "resolveJsonModule": true,
+    "skipLibCheck": true,
+    "strict": true,
+    "noEmit": true,
+    "types": ["node"]
+  }
+}

@@ -12,6 +12,7 @@ import {
   SearchError,
   searchTransactions,
 } from './search';
+import { decodeCursor as decodeKeysetCursor, encodeCursor as encodeKeysetCursor, InvalidCursorError } from './pagination';
 
 const ISSUER = 'GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN';
 
@@ -169,7 +170,7 @@ test('paging keysets on the whole ranking tuple, so a page boundary is stable', 
   // An OFFSET would shift every subsequent page by one as new matching
   // transactions land, duplicating a row across the seam.
   assert.ok(!/OFFSET/i.test(calls[0]?.sql ?? ''));
-  assert.match(calls[0]?.sql ?? '', /\(.*similarity.*, ledger, hash\) < \(\$\d+::real, \$\d+::bigint, \$\d+\)/s);
+  assert.match(calls[0]?.sql ?? '', /\(.*similarity.*, ledger, hash\) < \(\$\d+::real, \$\d+::bigint, \$\d+::text\)/s);
   assert.deepEqual(calls[0]?.params.slice(3, 6), [0.5, 900, 'zzz']);
 });
 
@@ -177,11 +178,31 @@ test('an invalid cursor is rejected rather than silently ignored', async () => {
   const { pool } = fakePool([]);
 
   // Silently dropping it would restart pagination from the top, which reads to
-  // a client as duplicate results rather than an error.
+  // a client as duplicate results rather than an error. Search reports it the way
+  // every other paginated query does.
   await assert.rejects(
     () => searchTransactions(pool, { network: 'mainnet', query: 'x', limit: 20, cursor: 'garbage!!' }),
-    SearchError
+    (err: unknown) => {
+      assert.ok(err instanceof InvalidCursorError);
+      assert.equal((err as InvalidCursorError).extensions['code'], 'INVALID_CURSOR');
+      return true;
+    }
   );
+});
+
+test('a cursor minted by another query is rejected', async () => {
+  const { pool, calls } = fakePool([]);
+
+  // Tagged with `transactions`, not `search`, so it is rejected instead of
+  // half-applied to a three-column ranking keyset.
+  await assert.rejects(
+    () => searchTransactions(pool, {
+      network: 'mainnet', query: 'x', limit: 20,
+      cursor: encodeKeysetCursor('transactions', [900, 'abc']),
+    }),
+    InvalidCursorError
+  );
+  assert.equal(calls.length, 0);
 });
 
 // ── Asset parsing ──────────────────────────────────────────────────────────
@@ -271,11 +292,28 @@ test('an asset filter composes with account and type filters', async () => {
 test('an asset query paginates by keyset rather than offset', async () => {
   const { pool, calls } = fakePool([]);
 
-  await getOperationsByAsset(pool, { network: 'mainnet', asset: 'XLM', limit: 5, cursor: 'op99' });
+  await getOperationsByAsset(pool, {
+    network: 'mainnet', asset: 'XLM', limit: 5, cursor: encodeKeysetCursor('operations', [900, 'op99']),
+  });
 
   assert.ok(!/OFFSET/i.test(calls[0]?.sql ?? ''));
-  assert.match(calls[0]?.sql ?? '', /\(ledger, id\) </);
+  assert.match(calls[0]?.sql ?? '', /\(ledger, id\) < \(\$\d+::bigint, \$\d+::text\)/);
   assert.ok(calls[0]?.params.includes('op99'));
+});
+
+test('an asset query resolves its cursor inside the same network', async () => {
+  const { pool, calls } = fakePool([]);
+
+  await getOperationsByAsset(pool, { network: 'testnet', asset: 'XLM', limit: 5, cursor: 'op99' });
+
+  // The cursor subquery is a filter like any other, and the one it can forget
+  // is this one: an operation id exists on every network, so resolving it
+  // without the network predicate compares the page against another chain's
+  // row and pages from the wrong boundary.
+  assert.match(
+    calls[0]?.sql ?? '',
+    /SELECT ledger, id FROM operations WHERE id = \$\d+ AND network = \$1/
+  );
 });
 
 test('an invalid asset is rejected before any query runs', async () => {

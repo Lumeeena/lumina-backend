@@ -8,11 +8,22 @@ part of the API contract: naming a network that is not here has to be a
 question a client can ask and get a definite answer to, not a string that
 silently resolves to a different dataset. Declaring a network in `NETWORKS`
 that this enum does not carry fails at startup — see docs/MULTI_NETWORK.md.
+
+The value picks the dataset; it is not a filter, so a query reads one network
+per call.
 """
 enum Network {
+  """Stellar mainnet, live and public."""
   MAINNET
+  """The public test network."""
   TESTNET
+  """The next network, for pre-release builds."""
   FUTURENET
+}
+
+enum LedgerOrder {
+  ASC
+  DESC
 }
 
 """
@@ -29,31 +40,130 @@ Every field takes an optional `network` argument:
   this argument exists to prevent.
 """
 type Query {
-  """Fetch recent transactions, newest first."""
+  """
+  Fetch recent transactions, newest first, from the indexed history.
+
+  Paginates by ledger — see `PageInfo` for the cursor contract. For a
+  transaction known to exist but not yet indexed, use
+  `transaction(hash:)`, which falls back to Horizon.
+  """
   transactions(
-    """Network to read; defaults to the primary network configured for this deployment."""
+    """
+    Network to read; defaults to the primary network configured for this deployment.
+    """
     network: Network
+    """
+    Maximum page size is 100. Larger limits are rejected.
+    """
     limit: Int = 20
+    """Opaque cursor from a previous page's `pageInfo`; see `PageInfo`."""
     cursor: String
+    order: LedgerOrder = DESC
+    successful: Boolean
+    from: String
+    to: String
+    sourceAccount: String
   ): TransactionPage!
 
-  """Get a single transaction by hash."""
-  transaction(network: Network, hash: String!): Transaction
+  """
+  Get a single transaction by hash.
 
-  """Fetch an account by Stellar address."""
-  account(network: Network, address: String!): Account
+  Falls back to Horizon when the hash is not indexed, so a transaction that is
+  merely newer than this deployment's tip still resolves. Returns `null` when
+  neither source knows the hash.
+  """
+  transaction(
+    """Network to read; defaults to the primary network configured for this deployment."""
+    network: Network
+    """Transaction hash, as a 64-character lowercase hex string."""
+    hash: String!
+  ): Transaction
 
   """
-  Fetch operations, optionally filtered by account address and type.
+  Fetch one account by Stellar address.
+
+  **Falls back to Horizon** when the indexer has no row for the address, which is
+  the common case for an account that exists but has not transacted in the range
+  this deployment has indexed. Returns `null` only when neither source has it.
+  """
+  account(
+    """Network to read; defaults to the primary network configured for this deployment."""
+    network: Network
+    """Stellar account address, e.g. `GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN`."""
+    address: String!
+  ): Account
+
+  """
+  List indexed accounts, most recently active first.
+
+  ## Only accounts the indexer has seen are here
+
+  This lists rows in the `accounts` table, not every account on the network. The
+  indexer writes one row per address it encounters while processing ledgers, and
+  never enumerates the network, so the listing is "every address that has shown
+  up in the data this deployment has indexed". An account that exists, holds
+  balances and has never appeared in an indexed transaction or operation is
+  absent — fetch it with `account(address:)`, which falls back to Horizon.
+
+  A consequence worth stating plainly: the listing is a lower bound, not a
+  complete directory, and neither is it a top-N leaderboard. `RECENT_ACTIVITY`
+  ranks by when an account was last *seen by the indexer*, which is the ledger it
+  was last modified in — not how much it has transacted in total. For a busy
+  contract, that is close to what an explorer means by "most active"; for an
+  account holding assets but not transacting, it measures nothing at all.
+
+  ## Ordering
+
+  - `RECENT_ACTIVITY` (default) — `lastModifiedLedger` descending, address
+    ascending as a tiebreaker, so accounts modified in the same ledger have a
+    stable order and the walk terminates.
+  - `ADDRESS` — address ascending. Stable regardless of activity, and the order
+    to use for a prefix range.
+
+  Paginated on the ordering's sort key — see `PageInfo` for the cursor contract.
+  A cursor is only valid for the order that issued it. Indexed only: this query
+  never falls back to Horizon, so an unindexed account is absent rather than
+  fetched one row at a time.
+  """
+  accounts(
+    """Network to read; defaults to the primary network configured for this deployment."""
+    network: Network
+    """Ordering for the listing. Defaults to `RECENT_ACTIVITY`."""
+    orderBy: AccountOrder = RECENT_ACTIVITY
+    """Rows per page. Defaults to 20."""
+    limit: Int = 20
+    """Opaque cursor from a previous page's `pageInfo`; see `PageInfo`."""
+    cursor: String
+  ): AccountPage!
+
+  """
+  Fetch operations, newest first, optionally filtered by account and type.
+
+  Filters combine as AND. `account` matches the submitting account
+  (`sourceAccount`), which is not the same as being involved: to find everything
+  that touches an address — payments to it included — filter `from`/`to` client
+  side, or use `asset`, which does match both sides of a trade.
+
+  Paginates by ledger — see `PageInfo`.
   """
   operations(
+    """Network to read; defaults to the primary network configured for this deployment."""
     network: Network
+    """Only operations submitted by this account address."""
     account: String
+    """Only operations of this type."""
     type: OperationType
-    """Filter to operations involving one asset: "CODE:ISSUER", or "XLM" for native."""
+    """
+    Filter to operations involving one asset: "CODE:ISSUER", or "XLM" for native.
+    """
     asset: String
+    """
+    Maximum page size is 100. Larger limits are rejected.
+    """
     limit: Int = 20
+    """Opaque cursor from a previous page's `pageInfo`; see `PageInfo`."""
     cursor: String
+    order: LedgerOrder = DESC
   ): OperationPage!
 
   """
@@ -62,75 +172,208 @@ type Query {
   Ranking is trigram similarity rather than full-text search: Stellar memos are
   order references and short codes rather than prose, and stemming an
   identifier is wrong. An exact case-insensitive match always ranks first.
+
+  Only transactions that carry a memo are searched. The cursor encodes the
+  ranking tuple rather than a row id, so a page boundary holds its place as new
+  transactions land — see `PageInfo`.
   """
-  search(network: Network, query: String!, limit: Int = 20, cursor: String): TransactionPage!
+  search(
+    """Network to read; defaults to the primary network configured for this deployment."""
+    network: Network
+    """Memo text to search for, up to 256 characters."""
+    query: String!
+    """
+    Maximum page size is 100. Larger limits are rejected.
+    """
+    limit: Int = 20
+    """Opaque cursor from a previous page's `pageInfo`; see `PageInfo`."""
+    cursor: String
+  ): TransactionPage!
 
   """
-  Fetch Soroban contract events by contract ID.
-  Requires Soroban RPC indexing to be enabled.
+  Fetch Soroban contract events by contract ID, newest first.
+
+  Requires Soroban RPC indexing to be enabled; a deployment without it has no
+  events to return. `topic` matches any entry in the event's topic list.
+  Paginates by ledger — see `PageInfo`.
   """
   events(
+    """Network to read; defaults to the primary network configured for this deployment."""
     network: Network
+    """Contract ID the events belong to."""
     contractId: String!
+    """Only events carrying this topic."""
     topic: String
+    """
+    Maximum page size is 100. Larger limits are rejected.
+    """
     limit: Int = 20
+    """Opaque cursor from a previous page's `pageInfo`; see `PageInfo`."""
     cursor: String
+    order: LedgerOrder = DESC
   ): ContractEventPage!
 
-  """Get a specific ledger by sequence number."""
-  ledger(network: Network, sequence: Int!): Ledger
+  """
+  Get a single ledger by sequence number.
 
-  """Get the latest ledger."""
-  latestLedger(network: Network): Ledger
+  Indexed only — no Horizon fallback, since a ledger the indexer has not reached
+  has no indexed transaction or operation rows to be consistent with. Returns
+  `null` for a sequence that has not been indexed.
+  """
+  ledger(
+    """Network to read; defaults to the primary network configured for this deployment."""
+    network: Network
+    """Ledger sequence number."""
+    sequence: Int!
+  ): Ledger
+
+  """
+  Fetch indexed ledgers, newest first.
+
+  The range a throughput chart needs: `ledger(sequence:)` and `latestLedger`
+  only answer for one ledger each, and a series over time has to page through
+  them. Paginates on the sequence — see `PageInfo` for the cursor contract.
+  """
+  ledgers(
+    """Network to read; defaults to the primary network configured for this deployment."""
+    network: Network
+    """Rows per page. Defaults to 20."""
+    limit: Int = 20
+    """Opaque cursor from a previous page's `pageInfo`; see `PageInfo`."""
+    cursor: String
+  ): LedgerPage!
+
+  """
+  Get the newest ledger.
+
+  **Falls back to Horizon** when nothing has been indexed for this network yet,
+  so a fresh database still reports a tip. Cached for a few seconds per network;
+  a fallback answer is never cached. When the ledger comes from Horizon, `baseFee`
+  and `baseReserve` are protocol defaults rather than values read from that
+  ledger.
+  """
+  latestLedger(
+    """Network to read; defaults to the primary network configured for this deployment."""
+    network: Network
+  ): Ledger
 
   """
   Events decoded against a contract's registered custom schema, with named,
   typed fields rather than a raw JSON blob.
+
+  An error, not an empty page, when the contract has no registered schema or no
+  such event — the query cannot answer without the schema, and `contractSchema`
+  is how a client finds out which events exist. Filters are ANDed and typed by
+  the schema. Paginates by ledger — see `PageInfo`.
   """
   customEvents(
+    """Network to read; defaults to the primary network configured for this deployment."""
     network: Network
+    """Contract whose registered schema to decode against."""
     contractId: String!
+    """Event name within that schema."""
     event: String!
+    """Field filters, ANDed together."""
     where: [CustomEventFilter!]
+    """
+    Maximum page size is 100. Larger limits are rejected.
+    """
     limit: Int = 20
+    """Opaque cursor from a previous page's `pageInfo`; see `PageInfo`."""
     cursor: String
+    order: LedgerOrder = DESC
   ): CustomEventPage!
 
-  """The custom schema registered for a contract, if any."""
-  contractSchema(network: Network, contractId: String!): ContractSchema
+  """
+  The custom schema registered for a contract, if any.
+
+  `null` when the contract has none, which is the cheap way to find out whether
+  `customEvents` can be used for it at all and which event names to ask for.
+  """
+  contractSchema(
+    """Network to read; defaults to the primary network configured for this deployment."""
+    network: Network
+    """Contract ID to look up."""
+    contractId: String!
+  ): ContractSchema
 
   """
   Asset detail in one call: current supply and holder count plus a bucketed
-  volume series. Supply is the sum of indexed `accounts.balances` for the
-  asset (a last-seen snapshot, not ledger state) — see the query docs for
-  limitations. The series reuses the `operations(asset:)` predicate, so its
-  buckets always agree with the operation list.
+  volume series.
+
+  Supply is the sum of indexed `accounts.balances` rows, which is a last-seen
+  snapshot rather than ledger state, so it can lag a mint or burn and misses
+  holders outside the indexed set. The series reuses the
+  `operations(asset:)` predicate, so its buckets always agree with the
+  operation list for the same asset and range.
   """
   asset(
+    """Network to read; defaults to the primary network configured for this deployment."""
     network: Network
-    """Asset to inspect: "CODE:ISSUER", or "XLM" for native."""
+    """
+    Asset to inspect: "CODE:ISSUER", or "XLM" for native.
+    """
     asset: String!
-    """Range start (ISO-8601). Defaults to 30 days before `to`."""
+    """
+    Range start (ISO-8601). Defaults to 30 days before `to`.
+    """
     from: String
-    """Range end (ISO-8601). Defaults to now."""
+    """
+    Range end (ISO-8601). Defaults to now.
+    """
     to: String
-    """Bucket width in seconds (min 60). Defaults to 86400 (daily)."""
+    """
+    Bucket width in seconds (min 60). Defaults to 86400 (daily).
+    """
     bucketSeconds: Int = 86400
   ): AssetDetail!
 
   """
-  How far behind the chain this API data is. Advisory — see IndexerStatus for
-  what it does and does not promise.
+  How far behind the chain this API data is, for one network.
+
+  Advisory: it measures lag, it does not guarantee freshness. An unreachable
+  database or Horizon is reported as null fields with `stale: true` rather than
+  as an error, so this query answers precisely when something is wrong.
   """
-  indexerStatus(network: Network): IndexerStatus!
+  indexerStatus(
+    """Network to read; defaults to the primary network configured for this deployment."""
+    network: Network
+  ): IndexerStatus!
 }
 
-type Subscription {
-  """Subscribe to new transactions as they are confirmed."""
-  newTransaction(network: Network): Transaction!
+"""
+Live updates, over a websocket.
 
-  """Subscribe to new operations for a specific account."""
-  accountActivity(network: Network, address: String!): Operation!
+A subscription is filtered by network before any row is read, so a connection
+naming two networks receives only the events for the one it asked about. Events
+are delivered as they are indexed, so they can arrive slightly after the ledger
+they belong to has closed.
+"""
+type Subscription {
+  """
+  Subscribe to new transactions as they are confirmed.
+
+  Delivered in ledger order, oldest first within a ledger — the order they
+  happened, which is the opposite of every paginated query.
+  """
+  newTransaction(
+    """Network to read; defaults to the primary network configured for this deployment."""
+    network: Network
+  ): Transaction!
+
+  """
+  Subscribe to new operations for a specific account.
+
+  Covers operations the account *submitted and* operations that merely touch it
+  — being paid is the case people care about most — so an address that only
+  receives can be watched here.
+  """
+  accountActivity(
+    """Network to read; defaults to the primary network configured for this deployment."""
+    network: Network
+    """Account address to watch."""
+    address: String!
+  ): Operation!
 }
 
 # ─── Indexer freshness ────────────────────────────────────────────────────────
@@ -150,19 +393,29 @@ and either being unreachable is reported as a field (`null` plus
 `stale: true`) rather than as an error.
 """
 type IndexerStatus {
-  """Network these numbers describe."""
+  """
+  Network these numbers describe.
+  """
   network: Network!
 
-  """Highest ledger sequence indexed for this network, or null if none yet."""
+  """
+  Highest ledger sequence indexed for this network, or null if none yet.
+  """
   latestIndexedLedger: Int
 
-  """When that ledger was indexed (ISO-8601), or null if none yet."""
+  """
+  When that ledger was indexed (ISO-8601), or null if none yet.
+  """
   latestIndexedAt: String
 
-  """Horizon current tip for this network, or null if it could not be read."""
+  """
+  Horizon current tip for this network, or null if it could not be read.
+  """
   horizonLedger: Int
 
-  """`horizonLedger - latestIndexedLedger`, or null if the tip is unknown."""
+  """
+  `horizonLedger - latestIndexedLedger`, or null if the tip is unknown.
+  """
   lagLedgers: Int
 
   """
@@ -171,173 +424,464 @@ type IndexerStatus {
   """
   stale: Boolean!
 
-  """When this status was computed (ISO-8601)."""
+  """
+  When this status was computed (ISO-8601).
+  """
   checkedAt: String!
 }
 
 # ─── Pagination ──────────────────────────────────────────────────────────────
 
+"""
+Where to resume, for every paginated query in this schema.
+
+## The contract
+
+Pass `pageInfo.cursor` back as the `cursor` argument of the *same* query to get
+the next page, and stop when `hasNextPage` is false. A cursor is tied to the
+query that issued it: its values are the sort key of the last row on the page, so
+a cursor from one query is rejected by another rather than silently compared
+against the wrong columns.
+
+Cursors are **opaque**. Do not build, parse or persist them across a schema
+change — store them only to resume a walk, and treat one you cannot explain as
+invalid.
+
+## What a cursor is not
+
+- **Not a position.** There is no "page 3"; a cursor names a row's place in this
+  query's ordering, and rows indexed after it landed do not shift it.
+- **Not an offset.** A newly indexed row cannot move a page boundary, so a walk
+  does not repeat or skip rows as the chain advances.
+- **Not durable.** A cursor stays valid for as long as the rows around it are
+  queryable; there is no expiry to detect.
+
+## Errors
+
+- **An invalid cursor is an error**, on every paginated query, with code
+  `INVALID_CURSOR`. It is never an empty page.
+- **The end of the data is not an error.** A valid cursor with nothing after it
+  returns `items: []` with `hasNextPage: false` — that is how a client learns it
+  has finished, and it is the only way "done" is ever reported.
+
+`hasNextPage` is true when a full page came back, so a page of exactly `limit`
+rows may still be the last one; one empty page confirms the end.
+"""
 type PageInfo {
+  """True when the query returned a full page, so there may be more after it."""
   hasNextPage: Boolean!
+  """
+  Cursor for the next page, or null when this page is empty. Pass it back
+  unchanged as the `cursor` argument.
+  """
   cursor: String
 }
 
+"""A page of transactions, in the order its query returns them."""
 type TransactionPage {
+  """The rows on this page."""
   items: [Transaction!]!
+  """Where to resume; see `PageInfo`."""
   pageInfo: PageInfo!
 }
 
+"""
+A page of ledgers, newest first. The rows are identical to what
+`ledger(sequence:)` returns for each of them.
+"""
+type LedgerPage {
+  """The rows on this page."""
+  items: [Ledger!]!
+  """Where to resume; see `PageInfo`."""
+  pageInfo: PageInfo!
+}
+
+"""A page of accounts. Only accounts the indexer has seen — see `accounts`."""
+type AccountPage {
+  """The rows on this page."""
+  items: [Account!]!
+  """Where to resume; see `PageInfo`."""
+  pageInfo: PageInfo!
+}
+
+"""A page of operations, in the order its query returns them."""
 type OperationPage {
+  """The rows on this page."""
   items: [Operation!]!
+  """Where to resume; see `PageInfo`."""
   pageInfo: PageInfo!
 }
 
+"""A page of Soroban contract events, in the order its query returns them."""
 type ContractEventPage {
+  """The rows on this page."""
   items: [ContractEvent!]!
+  """Where to resume; see `PageInfo`."""
+  pageInfo: PageInfo!
+}
+
+type ContractStorageEntryPage {
+  items: [ContractStorageEntry!]!
+  pageInfo: PageInfo!
+}
+
+type AssetPage {
+  items: [Asset!]!
   pageInfo: PageInfo!
 }
 
 # ─── Core Types ───────────────────────────────────────────────────────────────
 
+"""
+One closed ledger.
+
+From the index, except for `latestLedger` on an empty index (see that query).
+Counts are what the ledger closed with, not a recount.
+"""
 type Ledger {
+  """Sequence number, which is also the ledger's position in the chain."""
   sequence: Int!
+  """When the ledger closed (ISO-8601)."""
   closedAt: String!
+  """Successful plus failed transactions in this ledger."""
   transactionCount: Int!
+  """Operations across those transactions."""
   operationCount: Int!
+  """Base fee in stroops. A number, so it is exact only up to 2^53 stroops."""
   baseFee: Int!
+  """Base reserve in stroops — the minimum balance of a 1-entry account."""
   baseReserve: Int!
 }
 
+"""
+One transaction, indexed or fetched from Horizon.
+
+Amounts are strings wherever a 64-bit value is involved, so nothing is rounded on
+the way out.
+"""
 type Transaction {
+  """Transaction hash, 64 lowercase hex characters."""
   hash: String!
+  """Ledger this transaction was included in."""
   ledger: Int!
+  """
+  That ledger, or null when it is not indexed. Null rather than an error: a
+  transaction past the indexed tip still has a `ledger` number to show.
+  """
   ledgerData: Ledger
+  """When the ledger containing it closed (ISO-8601)."""
   createdAt: String!
+  """Account that submitted it, and the source of its fee."""
   sourceAccount: String!
+  """
+  The submitting account. Falls back to Horizon when the indexer has not seen
+  the address. Null when neither source knows it.
+  """
   account: Account
+  """Total fee charged in stroops, as a string (no float rounding)."""
   feeCharged: String!
+  """Operations in this transaction."""
   operationCount: Int!
+  """False when the transaction failed; its operations had no effect."""
   successful: Boolean!
+  """
+  Memo encoding: `none`, `text`, `id`, `hash`, or `return`. Null when the
+  transaction carries no memo at all.
+  """
   memoType: String
+  """Memo text for `text` and `id`; the hash for `hash`; null otherwise."""
   memo: String
-  """Operations may be null when their lookup fails; errors remain local to this field."""
+  """
+  Operations may be null when their lookup fails; errors remain local to this field.
+  """
   operations: [Operation!]
 }
 
+"""
+One account.
+
+A **last-seen snapshot**, not live ledger state: the indexer stores what the
+account looked like when it last saw it, so a dormant account reports its state
+as of `lastModifiedLedger` rather than as of the tip. `account(address:)` falls
+back to Horizon for an address the indexer has no row for, and so answers with
+current state instead — the two sources can disagree for an account the indexer
+has not caught up on.
+"""
 type Account {
+  """Stellar account address (`G...`)."""
   address: String!
+  """Sequence number as a string: it exceeds what a JSON number holds safely."""
   sequence: String!
+  """Count of subentries (trustlines, offers, data entries, ...)."""
   subentryCount: Int!
+  """Ledger this account was last seen modified in."""
   lastModifiedLedger: Int!
+  """Entries sponsored by this account for others."""
   numSponsored: Int!
+  """Sponsoring entries this account pays for."""
   numSponsoring: Int!
+  """Trustline balances, native first. A snapshot, as the type notes."""
   balances: [Balance!]!
+  """Account flags. All false for a non-multisig, non-clawback account."""
   flags: AccountFlags!
+  """Signature weight thresholds."""
   thresholds: Thresholds!
-  """Related rows are optional so a lookup error does not erase the account."""
-  transactions(limit: Int = 10): [Transaction!]
-  operations(limit: Int = 10): [Operation!]
+  """
+  Recent transactions submitted by this account, newest first. Not paginated —
+  a fixed `limit`, for a sidebar.
+  """
+  transactions(
+    """How many to return. Defaults to 10."""
+    limit: Int = 10
+  ): [Transaction!]
+  """
+  Recent operations submitted by this account, newest first. Not paginated.
+  """
+  transactions(
+    """Maximum page size is 100. Larger limits are rejected."""
+    limit: Int = 10
+  ): [Transaction!]
+  operations(
+    """Maximum page size is 100. Larger limits are rejected."""
+    limit: Int = 10
+  ): [Operation!]
 }
 
+"""
+One trustline balance.
+
+Amounts are strings: a single token supply can exceed what a JSON number holds
+without rounding, and a rounded balance is a wrong one.
+"""
 type Balance {
+  """
+  `native` for XLM, `credit_alphanum4` / `credit_alphanum12` for an issued asset,
+  `liquidity_pool` for a pool share.
+  """
   assetType: String!
+  """Asset code, or `XLM` for the native asset. Null when `assetType` is a pool."""
   assetCode: String
+  """Issuing account, or null for the native asset and for pool shares."""
   assetIssuer: String
+  """Balance held, as a decimal string."""
   balance: String!
+  """Maximum this trustline will hold, as a decimal string. Null for no limit."""
   limit: String
+  """Amounts this account has offered to buy, as a decimal string."""
   buyingLiabilities: String
+  """Amounts this account has offered to sell, as a decimal string."""
   sellingLiabilities: String
 }
 
+"""
+Account authorization flags. All false unless set.
+"""
 type AccountFlags {
+  """Authorizing required: an account can only be signed for by its signers."""
   authRequired: Boolean!
+  """Authorizing revocable: the issuer can revoke trustlines and data entries."""
   authRevocable: Boolean!
+  """Authorizing immutable: nothing can be revoked once set."""
   authImmutable: Boolean!
+  """The issuer may claw back held balances, destroying them."""
   authClawbackEnabled: Boolean!
 }
 
+"""
+Signature weight thresholds, as fractions of a weight total of 10,000.
+
+A transaction needs a summed weight above the threshold matching what it touches:
+moving an account's balance takes the high threshold, adding a trustline the
+medium, a master key change the low.
+"""
 type Thresholds {
+  """Weight needed to change a master key (weight 0)."""
   lowThreshold: Int!
+  """Weight needed to add or remove a trustline, offer or data entry."""
   medThreshold: Int!
+  """Weight needed to move funds or change settings above weight 1."""
   highThreshold: Int!
 }
 
+"""
+One operation inside a transaction.
+
+Type-specific fields are flat and null when the operation is not of that type:
+`amount` is null on a `change_trust`, `funder` is null on a payment. A single
+shape beats a union per type here because a client almost always asks for "the
+fields I care about" and reads the rest as absent.
+"""
 type Operation {
+  """Operation ID, unique within its network."""
   id: String!
+  """What this operation does."""
   type: OperationType!
+  """When the containing ledger closed (ISO-8601)."""
   createdAt: String!
+  """Hash of the transaction this operation is in."""
   transactionHash: String!
+  """That transaction, or null when its lookup fails."""
   transaction: Transaction
+  """Account that submitted the operation."""
   sourceAccount: String!
+  """
+  The submitting account. Falls back to Horizon when the indexer has not seen the
+  address.
+  """
   account: Account
 
   # Payment fields
+  """Payment: sender address. Path payments use the path's first hop."""
   from: String
+  """Payment: recipient address. Path payments use the path's last hop."""
   to: String
+  """Payment: amount moved, as a decimal string."""
   amount: String
+  """
+  Payment and offer fields: the asset as one string — `"XLM"` for native, or
+  `"CODE:ISSUER"`. Code and issuer never come apart, because that is what
+  distinguishes one issuer's token from another's.
+  """
   asset: String
 
   # Create account fields
+  """Create account: balance the new account starts with, as a decimal string."""
   startingBalance: String
+  """Create account (and sponsorship): the account paying."""
   funder: String
 
   # Manage offer fields
+  """Offer: the offer's id, absent while it is newly created."""
   offerId: String
+  """Offer: price as a decimal string, always `selling/buying`."""
   price: String
+  """Offer: the asset being sold."""
   selling: String
+  """Offer: the asset being bought."""
   buying: String
 }
 
+"""
+One Soroban contract event, exactly as Soroban RPC reported it.
+"""
 type ContractEvent {
+  """Event ID, unique within its network."""
   id: String!
+  """Event type as reported; `contract` for a plain contract event."""
   type: String!
+  """Contract the event was emitted by."""
   contractId: String!
+  """Ledger the event was emitted in."""
   ledger: Int!
+  """When that ledger closed (ISO-8601)."""
   createdAt: String!
+  """
+  Position in the ledger's event stream, as a string. Monotonic per ledger,
+  which makes it a stable tiebreaker for ordering.
+  """
   pagingToken: String!
+  """Event topics, as they appeared. Filter `events(topic:)` against this list."""
   topics: [String!]!
+  """Event payload, JSON-encoded as a string; null when the event had none."""
   value: String  # JSON-encoded value
 }
 
 # ─── Enums ───────────────────────────────────────────────────────────────────
 
+"""
+Order for the `accounts` listing.
+
+Both orderings are total and stable, so keyset pagination cannot loop. Neither is
+a ranking by transaction volume — see `accounts` for what each one measures.
+"""
+enum AccountOrder {
+  """
+  Most recently active first, by `lastModifiedLedger` descending, then address
+  ascending. The default: a leaderboard of accounts the indexer saw most
+  recently.
+  """
+  RECENT_ACTIVITY
+
+  """Address ascending. Stable over time, and usable for a prefix range."""
+  ADDRESS
+}
+
+"""
+What a Stellar operation does.
+
+Names match the on-ledger operation types. A value that this indexer has not
+seen is not reported, so a query for a new Soroban operation type returns
+nothing rather than an unknown value.
+"""
 enum OperationType {
+  """Send an asset to another account."""
   PAYMENT
+  """Create and fund a new account."""
   CREATE_ACCOUNT
+  """Send an asset, specifying the exact amount received at the end of the path."""
   PATH_PAYMENT_STRICT_SEND
+  """Send an asset, specifying the exact amount taken from the source."""
   PATH_PAYMENT_STRICT_RECEIVE
+  """Create, update or delete a sell offer."""
   MANAGE_SELL_OFFER
+  """Create, update or delete a buy offer."""
   MANAGE_BUY_OFFER
+  """Submit an offer that never takes liquidity, to sit on the book."""
   CREATE_PASSIVE_SELL_OFFER
+  """Change account settings: signers, thresholds, home domain, flags."""
   SET_OPTIONS
+  """Create, update or delete a trustline."""
   CHANGE_TRUST
+  """Set or clear the authorization flags an issuer may set on a trustline."""
   ALLOW_TRUST
+  """Move an account's balance to another account and delete it."""
   ACCOUNT_MERGE
+  """Add, update or delete a data entry on an account."""
   MANAGE_DATA
+  """Advance an account's sequence number without submitting a transaction."""
   BUMP_SEQUENCE
+  """Call a contract function (Soroban)."""
   INVOKE_HOST_FUNCTION
+  """Push a contract's TTL past its current window."""
   EXTEND_FOOTPRINT_TTL
+  """Bring entries back inside the TTL window."""
   RESTORE_FOOTPRINT
 }
 
 # ─── Custom per-contract event schemas ───────────────────────────────────────
 
+"""
+Comparison used by a `CustomEventFilter`.
+
+`GT`, `GTE`, `LT` and `LTE` only make sense on a numeric field; using one on a
+`string` or `address` field matches nothing.
+"""
 enum FilterOp {
+  """Equal to. The right operator for most fields."""
   EQ
+  """Not equal to."""
   NE
+  """Greater than."""
   GT
+  """Greater than or equal to."""
   GTE
+  """Less than."""
   LT
+  """Less than or equal to."""
   LTE
 }
 
 """
-One filter clause. `value` is a string for every type — see CustomEventField
-for why — and is coerced server-side using the type the schema declares.
+One filter clause. `value` is a string for every type — see
+`CustomEventField` for why — and is coerced server-side using the type the
+schema declares.
 """
 input CustomEventFilter {
+  """Field to compare, as the contract's registered schema names it."""
   field: String!
+  """Comparison to apply. `GT`, `GTE`, `LT` and `LTE` need a numeric field."""
   op: FilterOp!
+  """Value to compare against, as a string; coerced to the field's declared type."""
   value: String!
 }
 
@@ -350,67 +894,197 @@ Float would silently round token amounts above 2^53. `type` tells a client how
 to parse the string exactly.
 """
 type CustomEventField {
+  """Field name, as the contract's registered schema spells it."""
   name: String!
+  """
+  Declared type: `address`, `bool`, `string`, `i128`, `bytes`, `u128`, ... Use it
+  to parse `value` exactly.
+  """
   type: String!
+  """Decoded value as a string, or null when the event did not carry the field."""
   value: String
 }
 
+"""
+One event decoded against a contract's registered schema.
+
+`fields` is shaped by the schema, not by the event: every field the schema
+declares appears, with `value: null` for the ones this event did not carry. An
+optional field is therefore distinguishable from an absent one only by its
+declaration, which is why `SchemaField.optional` exists.
+"""
 type CustomEvent {
+  """On-chain event ID, unique within its network and event name."""
   eventId: String!
+  """Contract the event was emitted by."""
   contractId: String!
+  """Event name within the contract."""
   eventName: String!
+  """Ledger the event was emitted in."""
   ledger: Int!
+  """When that ledger closed (ISO-8601)."""
   createdAt: String!
+  """
+  Version of the registered schema this was decoded against, so a stored event
+  can still be read after the schema is revised.
+  """
   schemaVersion: Int!
+  """One entry per field the schema declares for this event."""
   fields: [CustomEventField!]!
 }
 
+"""A page of decoded custom events, in the order its query returns them."""
 type CustomEventPage {
+  """The rows on this page."""
   items: [CustomEvent!]!
+  """Where to resume; see `PageInfo`."""
   pageInfo: PageInfo!
 }
 
+"""One field a registered schema declares for an event."""
 type SchemaField {
+  """Field name, as it appears in a `CustomEventField`."""
   name: String!
+  """Declared type; see `CustomEventField.type`."""
   type: String!
+  """Where the value is read from in the raw event, e.g. `topic[1]` or `value.amount`."""
   source: String!
+  """True when the event may legitimately omit this field."""
   optional: Boolean!
 }
 
+"""One event a registered schema declares."""
 type SchemaEvent {
+  """Event name to pass to `customEvents(event:)`, and to filter on."""
   name: String!
+  """Soroban topic this event is identified by."""
   topic: String!
+  """Fields to decode, in the order the schema declares them."""
   fields: [SchemaField!]!
 }
 
+"""
+A contract's registered event schema.
+
+Returned whole rather than per event, so a client can discover the event names
+and fields before asking for any data.
+"""
 type ContractSchema {
+  """Contract this schema is registered against."""
   contractId: String!
+  """Schema revision, incremented when the registration changes."""
   version: Int!
+  """Events this contract's schema declares."""
   events: [SchemaEvent!]!
 }
 
 # ─── Asset analytics ─────────────────────────────────────────────────────────
+
+enum AssetSort {
+  """
+  Sort by holder count, descending.
+  """
+  HOLDERS
+  """
+  Sort by recent volume, descending.
+  """
+  VOLUME
+}
+
+"""
+A Stellar asset with holder count and volume statistics.
+"""
+type Asset {
+  code: String!
+  issuer: String!
+  holderCount: Int!
+  firstSeenLedger: Int!
+  lastActivityLedger: Int!
+  """
+  Recent volume (last 7 days) in the asset's base units.
+  """
+  recentVolume: String
+}
 
 """
 Everything an asset detail page needs: supply and holders from indexed
 balances plus a bucketed volume series from operations.
 """
 type AssetDetail {
+  """The asset as queried: `XLM` for native, `CODE:ISSUER` otherwise."""
   asset: String!
+  """Asset code, or `XLM` for native. Null only for a liquidity pool share."""
   code: String
+  """Issuing account, or null for the native asset and for pool shares."""
   issuer: String
+  """True for the native asset, XLM."""
   native: Boolean!
-  """Sum of indexed balances, as a decimal string (no float rounding)."""
+  """
+  Sum of indexed balances, as a decimal string (no float rounding).
+  """
   supply: String!
+  """
+  Indexed accounts holding a non-zero balance of this asset. Counts indexed
+  accounts, so an asset held only outside the indexed set is missing from both
+  this and `supply`.
+  """
   holders: Int!
+  """Volume series over the requested range, oldest bucket first."""
   series: [VolumeBucket!]!
 }
 
-"""One bucket of the volume series. Empty buckets report zero volume."""
+"""
+One bucket of the volume series. Empty buckets report zero volume.
+"""
 type VolumeBucket {
+  """Inclusive start of the bucket (ISO-8601)."""
   bucketStart: String!
+  """Exclusive end of the bucket (ISO-8601)."""
   bucketEnd: String!
-  """Summed transfer amounts in the bucket, as a decimal string."""
+  """
+  Summed transfer amounts in the bucket, as a decimal string.
+  """
   volume: String!
+  """Operations counted in this bucket. Zero for an empty bucket."""
   operationCount: Int!
+}
+
+# ─── Balance history ─────────────────────────────────────────────────────────
+
+"""
+Balance history for an account and asset, derived from operations.
+"""
+type BalanceHistory {
+  address: String!
+  asset: String!
+  """
+  Time range start (ISO-8601).
+  """
+  from: String!
+  """
+  Time range end (ISO-8601).
+  """
+  to: String!
+  """
+  Balance snapshots at operation timestamps.
+  """
+  snapshots: [BalanceSnapshot!]!
+}
+
+"""
+One point in the balance history timeline.
+"""
+type BalanceSnapshot {
+  """
+  Timestamp of the operation that changed the balance (ISO-8601).
+  """
+  timestamp: String!
+  """
+  Balance after the operation, as a decimal string.
+  """
+  balance: String!
+  """
+  Operation ID that caused this balance change.
+  """
+  operationId: String!
 }

@@ -158,9 +158,31 @@ export const accountCacheSize = new Gauge({
   registers: [registry],
 });
 
+export const accountFetchDecisions = new Counter({
+  name: 'lumina_account_fetch_decisions_total',
+  help: 'Account Horizon lookups requested or skipped because stored state covers the ledger, by network.',
+  labelNames: ['network', 'outcome'] as const,
+  registers: [registry],
+});
+
 export const sorobanEventsTruncated = new Counter({
   name: 'lumina_soroban_events_truncated_total',
   help: 'Soroban event polling cycles that hit the per-cycle event limit.',
+  labelNames: ['network'] as const,
+  registers: [registry],
+});
+
+/**
+ * Contract ids this network is watching for events, by network.
+ *
+ * Zero for a network with no Soroban RPC configured, which is the value that
+ * distinguishes "not watching anything" from "watching nothing yet" — the gauge
+ * is set every cycle, before the early return, so it reads 0 rather than being
+ * absent from the scrape for a network that has events switched off.
+ */
+export const contractsWatched = new Gauge({
+  name: 'lumina_soroban_contracts_watched',
+  help: 'Contract ids watched for Soroban events, by network.',
   labelNames: ['network'] as const,
   registers: [registry],
 });
@@ -169,6 +191,47 @@ export const sorobanRetentionWindowExceeded = new Counter({
   name: 'lumina_soroban_retention_window_exceeded_total',
   help: 'Times the Soroban event cursor fell behind the RPC retention window.',
   labelNames: ['network'] as const,
+  registers: [registry],
+});
+
+/**
+ * Rows removed by the retention prune, by table.
+ *
+ * Labelled by table because the windows are configured per table, so a
+ * deployment that only sets `RETENTION_OPERATIONS_DAYS` sees all movement on
+ * one series and every other table correctly reads zero rather than being
+ * absent from the scrape.
+ *
+ * A prune is *supposed* to be silent when it has nothing to do, so a flat
+ * counter is the healthy state; a counter that never moves while the database
+ * grows is what to alert on.
+ */
+export const retentionPrunedRows = new Counter({
+  name: 'lumina_retention_pruned_rows_total',
+  help: 'Rows deleted by the retention prune, by table.',
+  labelNames: ['table'] as const,
+  registers: [registry],
+});
+
+export const horizonThrottleInterval = new Gauge({
+  name: 'lumina_horizon_throttle_interval_ms',
+  help: 'Current Horizon request throttle interval in milliseconds.',
+  labelNames: ['name', 'purpose'] as const,
+  registers: [registry],
+});
+
+export const horizonQueuedRequests = new Gauge({
+  name: 'lumina_horizon_queued_requests',
+  help: 'Number of Horizon requests waiting in the throttle queue.',
+  labelNames: ['name', 'purpose'] as const,
+  registers: [registry],
+});
+
+export const horizonWaitTime = new Histogram({
+  name: 'lumina_horizon_wait_time_seconds',
+  help: 'Time spent waiting in the Horizon throttle queue.',
+  labelNames: ['name', 'purpose'] as const,
+  buckets: [0.01, 0.05, 0.1, 0.25, 0.5, 1, 2, 5],
   registers: [registry],
 });
 

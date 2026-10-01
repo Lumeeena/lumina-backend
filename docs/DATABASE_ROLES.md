@@ -37,13 +37,14 @@ Derived from the statements in `indexer/src/db.ts`; keep the two in sync.
 
 | Table | SELECT | INSERT | UPDATE | DELETE | Statement |
 |---|---|---|---|---|---|
-| `ledgers` | yes | yes | — | — | `INSERT … ON CONFLICT (sequence) DO NOTHING` |
-| `transactions` | yes | yes | — | — | `INSERT … ON CONFLICT (hash) DO NOTHING` |
-| `operations` | yes | yes | — | — | `INSERT … ON CONFLICT (id) DO NOTHING` |
-| `contract_events` | yes | yes | — | — | `INSERT … ON CONFLICT (id) DO NOTHING` |
-| `accounts` | yes | yes | yes | — | `INSERT … ON CONFLICT (address) DO UPDATE` |
-| `custom_events` | yes | yes | yes | — | `INSERT … ON CONFLICT (event_id, event_name) DO UPDATE` |
-| `contract_schemas` | yes | yes | yes | yes | upsert, plus `DELETE` when a contract leaves the registry |
+| `ledgers` | yes | yes | — | — | `INSERT … ON CONFLICT (sequence, network) DO NOTHING` |
+| `transactions` | yes | yes | — | — | `INSERT … ON CONFLICT (hash, network) DO NOTHING` |
+| `operations` | yes | yes | — | — | `INSERT … ON CONFLICT (id, ledger, network) DO NOTHING` |
+| `contract_events` | yes | yes | — | — | `INSERT … ON CONFLICT (id, network) DO NOTHING` |
+| `accounts` | yes | yes | yes | — | `INSERT … ON CONFLICT (address, network) DO UPDATE` |
+| `account_refresh_queue` | yes | yes | yes | yes | enqueue, defer, and complete durable account refreshes |
+| `custom_events` | yes | yes | yes | — | `INSERT … ON CONFLICT (event_id, event_name, network) DO UPDATE` |
+| `contract_schemas` | yes | yes | yes | yes | `(contract_id, network)` upsert, plus registry deletion |
 | `api_keys`, `schema_migrations` | — | — | — | — | never touched by the indexer |
 
 `USAGE, SELECT` on sequences is granted as well, so `SERIAL` columns on indexed

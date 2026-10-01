@@ -1,0 +1,590 @@
+{
+  "environment": {
+    "server_version": "16.14",
+    "max_parallel_workers_per_gather": "2",
+    "random_page_cost": "4",
+    "work_mem": "4MB",
+    "shared_buffers": "128MB",
+    "effective_cache_size": "4GB",
+    "pg_trgm.similarity_threshold": "0.3",
+    "seed.version": "seed-958b0e9e0063"
+  },
+  "indexes": [
+    "accounts_pkey",
+    "contract_events_pkey",
+    "contract_schemas_pkey",
+    "custom_events_pkey",
+    "idx_custom_events_contract_event",
+    "idx_custom_events_fields",
+    "idx_custom_events_ledger",
+    "idx_events_contract_id",
+    "idx_events_created_at",
+    "idx_events_ledger",
+    "idx_events_topics",
+    "idx_ledgers_closed_at",
+    "idx_operations_asset_code",
+    "idx_operations_asset_issuer",
+    "idx_operations_asset_type",
+    "idx_operations_created_at",
+    "idx_operations_details",
+    "idx_operations_source",
+    "idx_operations_transaction",
+    "idx_operations_type",
+    "idx_transactions_created_at",
+    "idx_transactions_ledger",
+    "idx_transactions_memo_trgm",
+    "idx_transactions_source",
+    "ledgers_pkey",
+    "operations_pkey",
+    "transactions_pkey"
+  ],
+  "entries": {
+    "tx.first-page": [
+      {
+        "sqlHash": "sha256:297a96686b99321d",
+        "indexes": [
+          "idx_transactions_ledger"
+        ],
+        "seqScans": [],
+        "sorts": 1,
+        "rowsReturned": 20
+      }
+    ],
+    "tx.cursor-page": [
+      {
+        "sqlHash": "sha256:297a96686b99321d",
+        "indexes": [
+          "idx_transactions_ledger",
+          "transactions_pkey"
+        ],
+        "seqScans": [],
+        "sorts": 1,
+        "rowsReturned": 20
+      }
+    ],
+    "tx.deep-cursor": [
+      {
+        "sqlHash": "sha256:297a96686b99321d",
+        "indexes": [
+          "idx_transactions_ledger",
+          "transactions_pkey"
+        ],
+        "seqScans": [],
+        "sorts": 1,
+        "rowsReturned": 20
+      }
+    ],
+    "tx.by-hash": [
+      {
+        "sqlHash": "sha256:eeb3ff1899c6b732",
+        "indexes": [
+          "transactions_pkey"
+        ],
+        "seqScans": [],
+        "sorts": 0,
+        "rowsReturned": 1
+      }
+    ],
+    "tx.by-ledger-busy": [
+      {
+        "sqlHash": "sha256:317ee6cc3fb4b996",
+        "indexes": [
+          "idx_transactions_ledger"
+        ],
+        "seqScans": [],
+        "sorts": 1,
+        "rowsReturned": 600
+      }
+    ],
+    "tx.by-ledger-quiet": [
+      {
+        "sqlHash": "sha256:317ee6cc3fb4b996",
+        "indexes": [
+          "idx_transactions_ledger"
+        ],
+        "seqScans": [],
+        "sorts": 1,
+        "rowsReturned": 4
+      }
+    ],
+    "op.first-page": [
+      {
+        "sqlHash": "sha256:2f1c85a9682275e4",
+        "indexes": [],
+        "seqScans": [
+          "operations"
+        ],
+        "sorts": 1,
+        "rowsReturned": 20
+      }
+    ],
+    "op.hot-account": [
+      {
+        "sqlHash": "sha256:c10e2a2af6fba464",
+        "indexes": [
+          "idx_operations_source"
+        ],
+        "seqScans": [],
+        "sorts": 1,
+        "rowsReturned": 20
+      }
+    ],
+    "op.warm-account": [
+      {
+        "sqlHash": "sha256:c10e2a2af6fba464",
+        "indexes": [
+          "idx_operations_source"
+        ],
+        "seqScans": [],
+        "sorts": 1,
+        "rowsReturned": 20
+      }
+    ],
+    "op.hot-type": [
+      {
+        "sqlHash": "sha256:13a5572b924e65f5",
+        "indexes": [],
+        "seqScans": [
+          "operations"
+        ],
+        "sorts": 1,
+        "rowsReturned": 20
+      }
+    ],
+    "op.rare-type": [
+      {
+        "sqlHash": "sha256:13a5572b924e65f5",
+        "indexes": [
+          "idx_operations_type"
+        ],
+        "seqScans": [],
+        "sorts": 1,
+        "rowsReturned": 20
+      }
+    ],
+    "op.cursor-page-unfiltered": [
+      {
+        "sqlHash": "sha256:43cfc647ab76b54d",
+        "indexes": [
+          "operations_pkey"
+        ],
+        "seqScans": [
+          "operations"
+        ],
+        "sorts": 1,
+        "rowsReturned": 20
+      }
+    ],
+    "op.cold-account": [
+      {
+        "sqlHash": "sha256:c10e2a2af6fba464",
+        "indexes": [
+          "idx_operations_source"
+        ],
+        "seqScans": [],
+        "sorts": 1,
+        "rowsReturned": 3
+      }
+    ],
+    "op.by-transaction": [
+      {
+        "sqlHash": "sha256:448fbe3931c356dd",
+        "indexes": [
+          "idx_operations_transaction"
+        ],
+        "seqScans": [],
+        "sorts": 1,
+        "rowsReturned": 3
+      }
+    ],
+    "op.cursor-page": [
+      {
+        "sqlHash": "sha256:1002bf219993f4bf",
+        "indexes": [
+          "idx_operations_source",
+          "operations_pkey"
+        ],
+        "seqScans": [],
+        "sorts": 1,
+        "rowsReturned": 20
+      }
+    ],
+    "asset.hot": [
+      {
+        "sqlHash": "sha256:e18f5079c25a09b5",
+        "indexes": [],
+        "seqScans": [
+          "operations"
+        ],
+        "sorts": 1,
+        "rowsReturned": 20
+      }
+    ],
+    "asset.rare": [
+      {
+        "sqlHash": "sha256:e18f5079c25a09b5",
+        "indexes": [],
+        "seqScans": [
+          "operations"
+        ],
+        "sorts": 1,
+        "rowsReturned": 20
+      }
+    ],
+    "asset.native": [
+      {
+        "sqlHash": "sha256:eac85bdebbc4edfd",
+        "indexes": [],
+        "seqScans": [
+          "operations"
+        ],
+        "sorts": 1,
+        "rowsReturned": 20
+      }
+    ],
+    "asset.by-account": [
+      {
+        "sqlHash": "sha256:71e8c2eea9802f2b",
+        "indexes": [
+          "idx_operations_source"
+        ],
+        "seqScans": [],
+        "sorts": 1,
+        "rowsReturned": 20
+      }
+    ],
+    "replay.whale": [
+      {
+        "sqlHash": "sha256:ff405fd2fdaef032",
+        "indexes": [],
+        "seqScans": [
+          "operations"
+        ],
+        "sorts": 1,
+        "rowsReturned": 90
+      }
+    ],
+    "replay.warm": [
+      {
+        "sqlHash": "sha256:ff405fd2fdaef032",
+        "indexes": [],
+        "seqScans": [
+          "operations"
+        ],
+        "sorts": 1,
+        "rowsReturned": 0
+      }
+    ],
+    "ev.hot-contract": [
+      {
+        "sqlHash": "sha256:f87273cb1fa195e6",
+        "indexes": [
+          "idx_events_ledger"
+        ],
+        "seqScans": [],
+        "sorts": 1,
+        "rowsReturned": 20
+      }
+    ],
+    "ev.cold-contract": [
+      {
+        "sqlHash": "sha256:f87273cb1fa195e6",
+        "indexes": [
+          "idx_events_contract_id"
+        ],
+        "seqScans": [],
+        "sorts": 1,
+        "rowsReturned": 20
+      }
+    ],
+    "ev.mid-contract-cursor": [
+      {
+        "sqlHash": "sha256:01e6eb6c5a676f8d",
+        "indexes": [
+          "contract_events_pkey",
+          "idx_events_ledger"
+        ],
+        "seqScans": [],
+        "sorts": 1,
+        "rowsReturned": 20
+      }
+    ],
+    "ev.topic": [
+      {
+        "sqlHash": "sha256:e80fa261288f8300",
+        "indexes": [
+          "idx_events_ledger"
+        ],
+        "seqScans": [],
+        "sorts": 1,
+        "rowsReturned": 20
+      }
+    ],
+    "search.first": [
+      {
+        "sqlHash": "sha256:dbf535aa1b5863da",
+        "indexes": [
+          "idx_transactions_memo_trgm"
+        ],
+        "seqScans": [],
+        "sorts": 1,
+        "rowsReturned": 20
+      }
+    ],
+    "search.typo": [
+      {
+        "sqlHash": "sha256:dbf535aa1b5863da",
+        "indexes": [
+          "idx_transactions_memo_trgm"
+        ],
+        "seqScans": [],
+        "sorts": 1,
+        "rowsReturned": 20
+      }
+    ],
+    "search.cursor-page": [
+      {
+        "sqlHash": "sha256:6bed79541a64b049",
+        "indexes": [
+          "idx_transactions_memo_trgm"
+        ],
+        "seqScans": [],
+        "sorts": 1,
+        "rowsReturned": 20
+      }
+    ],
+    "custom.first": [
+      {
+        "sqlHash": "sha256:db2ab7e388f4d506",
+        "indexes": [],
+        "seqScans": [
+          "contract_schemas"
+        ],
+        "sorts": 0,
+        "rowsReturned": 1
+      },
+      {
+        "sqlHash": "sha256:e7e82e1cfe78bb0c",
+        "indexes": [
+          "idx_custom_events_ledger"
+        ],
+        "seqScans": [],
+        "sorts": 1,
+        "rowsReturned": 20
+      }
+    ],
+    "custom.string-filter": [
+      {
+        "sqlHash": "sha256:db2ab7e388f4d506",
+        "indexes": [],
+        "seqScans": [
+          "contract_schemas"
+        ],
+        "sorts": 0,
+        "rowsReturned": 1
+      },
+      {
+        "sqlHash": "sha256:2f34839c6b31eb16",
+        "indexes": [
+          "idx_custom_events_ledger"
+        ],
+        "seqScans": [],
+        "sorts": 1,
+        "rowsReturned": 20
+      }
+    ],
+    "custom.numeric-filter": [
+      {
+        "sqlHash": "sha256:db2ab7e388f4d506",
+        "indexes": [],
+        "seqScans": [
+          "contract_schemas"
+        ],
+        "sorts": 0,
+        "rowsReturned": 1
+      },
+      {
+        "sqlHash": "sha256:5df0909e78b47ca1",
+        "indexes": [
+          "idx_custom_events_ledger"
+        ],
+        "seqScans": [],
+        "sorts": 1,
+        "rowsReturned": 20
+      }
+    ],
+    "custom.selective-event": [
+      {
+        "sqlHash": "sha256:db2ab7e388f4d506",
+        "indexes": [],
+        "seqScans": [
+          "contract_schemas"
+        ],
+        "sorts": 0,
+        "rowsReturned": 1
+      },
+      {
+        "sqlHash": "sha256:e7e82e1cfe78bb0c",
+        "indexes": [
+          "idx_custom_events_contract_event"
+        ],
+        "seqScans": [],
+        "sorts": 1,
+        "rowsReturned": 20
+      }
+    ],
+    "custom.cursor-page": [
+      {
+        "sqlHash": "sha256:db2ab7e388f4d506",
+        "indexes": [],
+        "seqScans": [
+          "contract_schemas"
+        ],
+        "sorts": 0,
+        "rowsReturned": 1
+      },
+      {
+        "sqlHash": "sha256:c46cb09cdeadb22c",
+        "indexes": [
+          "custom_events_pkey",
+          "idx_custom_events_ledger"
+        ],
+        "seqScans": [],
+        "sorts": 1,
+        "rowsReturned": 20
+      }
+    ],
+    "ledger.by-sequence": [
+      {
+        "sqlHash": "sha256:c72b35b2b7aa7d25",
+        "indexes": [
+          "ledgers_pkey"
+        ],
+        "seqScans": [],
+        "sorts": 0,
+        "rowsReturned": 1
+      }
+    ],
+    "ledger.latest": [
+      {
+        "sqlHash": "sha256:1476f669ecc01edc",
+        "indexes": [
+          "ledgers_pkey"
+        ],
+        "seqScans": [],
+        "sorts": 0,
+        "rowsReturned": 1
+      }
+    ],
+    "account.by-address": [
+      {
+        "sqlHash": "sha256:ef301f1e8b10a202",
+        "indexes": [
+          "accounts_pkey"
+        ],
+        "seqScans": [],
+        "sorts": 0,
+        "rowsReturned": 1
+      }
+    ],
+    "account.tx-whale": [
+      {
+        "sqlHash": "sha256:1b929d3f39546db7",
+        "indexes": [
+          "idx_transactions_ledger"
+        ],
+        "seqScans": [],
+        "sorts": 0,
+        "rowsReturned": 10
+      }
+    ],
+    "account.tx-warm": [
+      {
+        "sqlHash": "sha256:1b929d3f39546db7",
+        "indexes": [
+          "idx_transactions_ledger"
+        ],
+        "seqScans": [],
+        "sorts": 0,
+        "rowsReturned": 10
+      }
+    ],
+    "account.tx-cold": [
+      {
+        "sqlHash": "sha256:1b929d3f39546db7",
+        "indexes": [
+          "idx_transactions_source"
+        ],
+        "seqScans": [],
+        "sorts": 1,
+        "rowsReturned": 1
+      }
+    ],
+    "account.ops-cold": [
+      {
+        "sqlHash": "sha256:4561daba7766c22a",
+        "indexes": [
+          "idx_operations_source"
+        ],
+        "seqScans": [],
+        "sorts": 1,
+        "rowsReturned": 3
+      }
+    ],
+    "account.ops-whale": [
+      {
+        "sqlHash": "sha256:4561daba7766c22a",
+        "indexes": [
+          "idx_operations_source"
+        ],
+        "seqScans": [],
+        "sorts": 1,
+        "rowsReturned": 10
+      }
+    ],
+    "account.ops-warm": [
+      {
+        "sqlHash": "sha256:4561daba7766c22a",
+        "indexes": [
+          "idx_operations_source"
+        ],
+        "seqScans": [],
+        "sorts": 1,
+        "rowsReturned": 10
+      }
+    ],
+    "indexer.max-ledger": [
+      {
+        "sqlHash": "sha256:18dd899ec35cb181",
+        "indexes": [
+          "ledgers_pkey"
+        ],
+        "seqScans": [],
+        "sorts": 0,
+        "rowsReturned": 1
+      }
+    ],
+    "indexer.max-event-ledger": [
+      {
+        "sqlHash": "sha256:9cad76405e474c75",
+        "indexes": [
+          "idx_events_ledger"
+        ],
+        "seqScans": [],
+        "sorts": 0,
+        "rowsReturned": 1
+      }
+    ],
+    "indexer.load-schemas": [
+      {
+        "sqlHash": "sha256:fd31065bb737c938",
+        "indexes": [],
+        "seqScans": [
+          "contract_schemas"
+        ],
+        "sorts": 0,
+        "rowsReturned": 1
+      }
+    ]
+  }
+}

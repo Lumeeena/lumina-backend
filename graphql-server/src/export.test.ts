@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import type { Pool } from 'pg';
-import { ExportLimiter, hasExportPermission, writeDatabaseExport } from './export';
+import { ExportLimiter, buildCsvExportStatement, hasExportPermission, writeDatabaseExport } from './export';
 import { hashApiKey } from './keys';
 
 test('export limiter enforces per-key windows and releases concurrency exactly once', () => {
@@ -93,5 +93,80 @@ test('incremental export with early stop returns latest maxLedger seen so far', 
   }, { sinceLedger: 40 });
 
   assert.equal(result.maxLedger, 50);
+});
+
+// ─── CSV export statement ────────────────────────────────────────────────────
+//
+// The one statement in the codebase written by interpolation rather than by
+// binding: COPY cannot take parameters, so the values are canonicalised and the
+// identifiers are looked up. These assert the shape exactly, because "the
+// values happen to be safe today" is not something a future edit preserves.
+
+test('the CSV export statement is built from the allow-list, not from the request', () => {
+  assert.equal(
+    buildCsvExportStatement('operations', {}),
+    'COPY (SELECT * FROM operations ) TO STDOUT WITH CSV HEADER'
+  );
+});
+
+test('ledger bounds are written as canonical integers', () => {
+  assert.equal(
+    buildCsvExportStatement('transactions', { minLedger: '1000', maxLedger: '2000' }),
+    'COPY (SELECT * FROM transactions WHERE ledger >= 1000 AND ledger <= 2000) TO STDOUT WITH CSV HEADER'
+  );
+});
+
+test('a table that is not on the allow-list cannot reach a statement', () => {
+  assert.equal(buildCsvExportStatement('api_keys', {}), null);
+  assert.equal(buildCsvExportStatement('accounts', {}), null);
+  assert.equal(buildCsvExportStatement('', {}), null);
+  assert.equal(buildCsvExportStatement('operations; DROP TABLE users', {}), null);
+});
+
+test('the columns a table is filtered on come from the allow-list entry', () => {
+  // The date and ledger columns differ per table, and both are interpolated, so
+  // each is asserted against the entry rather than against a table name that
+  // arrived from a request.
+  assert.equal(
+    buildCsvExportStatement('ledgers', { minLedger: '1', minDate: '2026-01-01T00:00:00Z' }),
+    "COPY (SELECT * FROM ledgers WHERE sequence >= 1 AND closed_at >= '2026-01-01T00:00:00.000Z') TO STDOUT WITH CSV HEADER"
+  );
+  assert.equal(
+    buildCsvExportStatement('operations', { minLedger: '1', minDate: '2026-01-01T00:00:00Z' }),
+    "COPY (SELECT * FROM operations WHERE ledger >= 1 AND created_at >= '2026-01-01T00:00:00.000Z') TO STDOUT WITH CSV HEADER"
+  );
+});
+
+test('a hostile ledger bound produces the same statement as a benign one', () => {
+  // parseInt is what makes this safe: everything after the first non-digit is
+  // discarded, so the statement cannot carry a quote, a semicolon or a comment.
+  for (const hostile of ["1; DROP TABLE users--", "1' OR '1'='1", '1) UNION SELECT * FROM api_keys--', '1\n--']) {
+    assert.equal(
+      buildCsvExportStatement('operations', { minLedger: hostile }),
+      buildCsvExportStatement('operations', { minLedger: '1' }),
+      `hostile input survived: ${hostile}`
+    );
+  }
+});
+
+test('a hostile date produces no clause at all', () => {
+  for (const hostile of ["2026-01-01'; DROP TABLE users--", 'not-a-date', "2026-01-01' OR '1'='1"]) {
+    assert.equal(
+      buildCsvExportStatement('operations', { minDate: hostile }),
+      buildCsvExportStatement('operations', {}),
+      `hostile input survived: ${hostile}`
+    );
+  }
+});
+
+test('no request value reaches the statement as text', () => {
+  const statement = buildCsvExportStatement('operations', {
+    minLedger: "1; DROP TABLE users--",
+    minDate: "2026-01-01'; DROP TABLE users--",
+  }) ?? '';
+
+  assert.ok(!statement.includes('DROP'), statement);
+  assert.ok(!statement.includes('--'), statement);
+  assert.ok(!statement.includes("'"), 'the only quote a value may add is the one around a canonical ISO date');
 });
 
