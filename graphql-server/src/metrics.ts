@@ -59,6 +59,26 @@ export const horizonAccountFallbacks = new Counter({
   registers: [registry],
 });
 
+/**
+ * Outbound Horizon traffic, by HTTP status. The fallback path is the only code
+ * here that talks to a service this deployment does not control, and `error`
+ * counts a request that never got a response at all: the shape a timeout that
+ * is too eager, or a connection that was dropped, leaves behind.
+ */
+export const horizonRequests = new Counter({
+  name: 'lumina_graphql_horizon_requests_total',
+  help: 'Outbound Horizon requests by HTTP status.',
+  labelNames: ['status'] as const,
+  registers: [registry],
+});
+
+export const horizonRequestDuration = new Histogram({
+  name: 'lumina_graphql_horizon_request_duration_seconds',
+  help: 'Outbound Horizon request latency.',
+  buckets: [0.05, 0.1, 0.25, 0.5, 1, 2, 5, 10],
+  registers: [registry],
+});
+
 // Pool saturation is the metric that explains a latency cliff nothing else
 // accounts for: queries queue invisibly once every connection is checked out.
 export const dbPoolTotal = new Gauge({

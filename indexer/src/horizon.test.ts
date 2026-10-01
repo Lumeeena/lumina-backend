@@ -73,6 +73,27 @@ test('getLedgerTransactions stops after a single short page with no next link', 
   const txs = await getLedgerTransactions('https://horizon.example.com', 100);
   assert.equal(txs.length, 1);
 });
+test('requests are paced, so a burst cannot trip Horizon\'s rate limit', async () => {
+  const times: number[] = [];
+  (global as unknown as { fetch: typeof fetch }).fetch = (async () => {
+    times.push(Date.now());
+    return { ok: true, status: 200, json: async () => ({ _embedded: { records: [] } }) };
+  }) as unknown as typeof fetch;
+
+  await getLatestLedgerSequence('https://horizon.example.com');
+  await getLatestLedgerSequence('https://horizon.example.com');
+  await getLatestLedgerSequence('https://horizon.example.com');
+
+  assert.equal(times.length, 3);
+  assert.ok(
+    times[1] - times[0] >= 80,
+    `expected requests to be at least 80ms apart, got ${times[1] - times[0]}ms`
+  );
+  assert.ok(
+    times[2] - times[1] >= 80,
+    `expected requests to be at least 80ms apart, got ${times[2] - times[1]}ms`
+  );
+});
 
 test('getAccount returns null when Horizon reports an unknown account', async () => {
   mockFetchSequence([{ ok: false, status: 404, body: {} }]);

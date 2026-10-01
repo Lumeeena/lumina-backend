@@ -38,6 +38,7 @@ Breaking changes are rare and advance the major version. Deprecation notices app
 - Every query, argument, type field and enum value now carries a description, so the playground explains what each one is for rather than repeating its type: why `account(address:)` can answer for an address the index has never seen, which fields are null for which operation type, which queries fall back to Horizon and which read only the index, and where a page resumes. A schema test fails the build if a description goes missing, since a bare name in the docs is a defect a type change would not surface (#50)
 - One cursor contract for every paginated query (`transactions`, `operations`, `search`, `events`, `customEvents`, `ledgers`, `accounts`): a cursor carries the sort key of the last row on its page plus the query that issued it, and an invalid cursor is an `INVALID_CURSOR` error everywhere instead of a silent empty page on some queries. Reaching the end of the data is still an empty page with `hasNextPage: false`, never an error. Cursors are opaque, so existing page tokens are reissued rather than reused (#49)
 - Version is now reported in application startup logs
+- The Horizon client is one implementation in the new `shared` workspace package, consumed by both services. The GraphQL server's fallback requests are throttled like the indexer's, the Horizon types and the retry policy exist once, and `indexer/src/throttle.ts` moved there so Soroban RPC pacing and Horizon pacing cannot diverge (#25)
 
 ## How to Release
 

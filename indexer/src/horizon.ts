@@ -1,9 +1,30 @@
 /**
- * Typed Horizon client for the indexer. Kept independent of the frontend's and
- * graphql-server's Horizon clients so this service has no cross-package imports.
+ * The indexer's Horizon client.
+ *
+ * The implementation lives in `@lumina/shared` so this service and the GraphQL
+ * server cannot drift apart again — the server's copy had no throttle, so the
+ * service with the smaller request budget was the one being rate-limited. What
+ * stays here is what is specific to the indexer: its metrics registry, its log
+ * sink and its pacing knobs.
+ *
+ * The signatures are unchanged (a Horizon base URL as the first argument), so no
+ * call site and no test had to move, and the suite in `horizon.test.ts` now
+ * exercises the shared client.
  */
-
-import { horizonRequestDuration, horizonRequests, horizonThrottleInterval, horizonQueuedRequests, horizonWaitTime } from './metrics';
+import {
+  createHorizonClient,
+  type HorizonAccount,
+  type HorizonLedger,
+  type HorizonOperation,
+  type HorizonTransaction,
+} from '@lumina/shared';
+import {
+  horizonRequestDuration,
+  horizonRequests,
+  horizonThrottleInterval,
+  horizonQueuedRequests,
+  horizonWaitTime,
+} from './metrics';
 import { subsystem } from './logger';
 import { createThrottle, type RequestPurpose } from './throttle';
 
@@ -53,22 +74,14 @@ export interface HorizonBalance {
   selling_liabilities?: string;
 }
 
-export interface HorizonAccount {
-  account_id: string;
-  sequence: string;
-  subentry_count: number;
-  last_modified_ledger: number;
-  num_sponsored: number;
-  num_sponsoring: number;
-  balances: HorizonBalance[];
-  flags: { auth_required: boolean; auth_revocable: boolean; auth_immutable: boolean; auth_clawback_enabled: boolean };
-  thresholds: { low_threshold: number; med_threshold: number; high_threshold: number };
-}
-
-interface HorizonPage<T> {
-  _embedded: { records: T[] };
-  _links: { next?: { href: string } };
-}
+export type {
+  HorizonAccount,
+  HorizonBalance,
+  HorizonLedger,
+  HorizonOperation,
+  HorizonTransaction,
+} from '@lumina/shared';
+export { PAGE_LIMIT } from '@lumina/shared';
 
 interface HorizonClientConfig {
   minIntervalMs: number;
@@ -80,23 +93,16 @@ interface HorizonClientConfig {
 let throttle: ReturnType<typeof createThrottle>['throttle'];
 let fetchJson: ReturnType<typeof createThrottle>['fetchJson'];
 
-/**
- * Per-request ceiling on the raw account fetch below.
- *
- * Account lookups are the indexer's highest-volume outbound call and the one
- * most likely to be dropped mid-flight by an overloaded Horizon. An unbounded
- * request can hang a whole account-refresh batch on a socket that will never
- * answer, so it gets the same treatment as the rest of the throttle.
- */
-const ACCOUNT_REQUEST_TIMEOUT_MS = 15_000;
+const REQUEST_TIMEOUT_MS = parseInt(process.env.HORIZON_REQUEST_TIMEOUT_MS ?? '10000', 10);
 
 export function initializeHorizonClient(config: HorizonClientConfig): void {
-  const client = createThrottle({
+  const client = createHorizonClient({
     name: 'horizon',
     minIntervalMs: config.minIntervalMs,
     maxIntervalMs: config.maxIntervalMs,
     authToken: config.authToken,
     tipWeightFactor: config.tipWeightFactor,
+    requestTimeoutMs: REQUEST_TIMEOUT_MS,
     metrics: {
       requestsTotal: horizonRequests,
       requestDuration: horizonRequestDuration,
@@ -104,8 +110,9 @@ export function initializeHorizonClient(config: HorizonClientConfig): void {
       queuedRequests: horizonQueuedRequests,
       waitTime: horizonWaitTime,
     },
+    logger: subsystem('horizon'),
   });
-  
+
   throttle = client.throttle;
   fetchJson = client.fetchJson;
 }
@@ -121,54 +128,34 @@ async function fetchAllPages<T>(url: string, purpose: RequestPurpose = 'default'
   return records;
 }
 
-export async function getLatestLedgerSequence(horizonUrl: string): Promise<number> {
-  const page = await fetchJson<HorizonPage<HorizonLedger>>(`${horizonUrl}/ledgers?order=desc&limit=1`, undefined, 'tip');
-  return page._embedded.records[0]?.sequence ?? 0;
+export function getLatestLedgerSequence(horizonUrl: string): Promise<number> {
+  return client.getLatestLedgerSequence(horizonUrl);
 }
 
 export function getLedger(horizonUrl: string, sequence: number, purpose: RequestPurpose = 'tip'): Promise<HorizonLedger> {
-  return fetchJson<HorizonLedger>(`${horizonUrl}/ledgers/${sequence}`, undefined, purpose);
+  return client.getLedger(sequence, horizonUrl);
 }
 
-export function getLedgerTransactions(horizonUrl: string, sequence: number, purpose: RequestPurpose = 'tip'): Promise<HorizonTransaction[]> {
-  return fetchAllPages<HorizonTransaction>(
-    `${horizonUrl}/ledgers/${sequence}/transactions?order=asc&limit=${PAGE_LIMIT}`,
-    purpose
-  );
+export function getLedgerTransactions(
+  horizonUrl: string,
+  sequence: number,
+  purpose: RequestPurpose = 'tip'
+): Promise<HorizonTransaction[]> {
+  return client.getLedgerTransactions(sequence, horizonUrl, purpose);
+}
 }
 
-export function getLedgerOperations(horizonUrl: string, sequence: number, purpose: RequestPurpose = 'tip'): Promise<HorizonOperation[]> {
-  return fetchAllPages<HorizonOperation>(
-    `${horizonUrl}/ledgers/${sequence}/operations?order=asc&limit=${PAGE_LIMIT}`,
-    purpose
-  );
+export function getLedgerOperations(
+  horizonUrl: string,
+  sequence: number,
+  purpose: RequestPurpose = 'tip'
+): Promise<HorizonOperation[]> {
+  return client.getLedgerOperations(sequence, horizonUrl, purpose);
+}
 }
 
-/** Returns null for accounts that don't exist; transient HTTP failures throw so durable jobs can retry. */
-export async function getAccount(horizonUrl: string, address: string): Promise<HorizonAccount | null> {
-  // Account lookups are the bulk of the indexer's outbound traffic, so they go
-  // through the same gate as everything else rather than racing it. This one
-  // cannot use fetchJson: a 404 is a normal answer here (an account created
-  // after the ledger, or one Horizon has not indexed), not a failed request.
-  await throttle('default');
-  const stopTimer = horizonRequestDuration.startTimer();
-  let res: Response;
-  try {
-    res = await fetch(`${horizonUrl}/accounts/${address}`, {
-      signal: AbortSignal.timeout(ACCOUNT_REQUEST_TIMEOUT_MS),
-    });
-  } catch (err) {
-    horizonRequests.inc({ status: 'error' });
-    stopTimer();
-    throw err;
-  }
-  stopTimer();
-  horizonRequests.inc({ status: String(res.status) });
-
-  if (!res.ok) {
-    if (res.status === 404) return null;
-    log.warn({ address, status: res.status }, 'horizon account fetch failed');
-    throw new Error(`Horizon account fetch failed with status ${res.status}`);
-  }
-  return (await res.json()) as HorizonAccount;
+/** `null` for accounts that don't exist or have been merged away. */
+export function getAccount(horizonUrl: string, address: string): Promise<HorizonAccount | null> {
+  return client.getAccount(address, horizonUrl);
+}
 }
