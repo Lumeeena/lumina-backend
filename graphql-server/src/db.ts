@@ -258,6 +258,7 @@ type LedgerOrder = 'ASC' | 'DESC';
 
 export interface TransactionQueryOptions {
   order?: LedgerOrder;
+  direction?: PaginationDirection;
   successful?: boolean | null;
   from?: string | null;
   to?: string | null;
@@ -271,8 +272,11 @@ export async function getTransactions(
   cursor?: string | null,
   options: TransactionQueryOptions = {}
 ) {
-  const order = options.order ?? 'DESC';
-  const cursorOperator = order === 'ASC' ? '>' : '<';
+  const baseOrder = options.order ?? 'DESC';
+  const direction = options.direction ?? 'FORWARD';
+  const isForward = direction === 'FORWARD';
+  const queryOrder = isForward ? baseOrder : (baseOrder === 'DESC' ? 'ASC' : 'DESC');
+  const cursorOperator = baseOrder === 'ASC' ? (isForward ? '>' : '<') : (isForward ? '<' : '>');
   const conditions = ['network = $1'];
   const params: unknown[] = [network];
 
@@ -303,11 +307,12 @@ export async function getTransactions(
   const { rows } = await pool.query<TransactionRow>(
     `SELECT * FROM transactions
      WHERE ${conditions.join(' AND ')}
-     ORDER BY ledger ${order}, hash ${order}
+     ORDER BY ledger ${queryOrder}, hash ${queryOrder}
      LIMIT $${params.length}`,
     params
   );
-  return rows.map(mapTransaction);
+  const items = rows.map(mapTransaction);
+  return isForward ? items : items.reverse();
 }
 
 export async function getTransactionByHash(pool: Pool, network: string, hash: string) {
@@ -335,11 +340,15 @@ export async function getOperations(
     type?: string | null;
     limit: number;
     cursor?: string | null;
+    direction?: PaginationDirection;
     order?: LedgerOrder;
   }
 ) {
-  const order = opts.order ?? 'DESC';
-  const cursorOperator = order === 'ASC' ? '>' : '<';
+  const baseOrder = opts.order ?? 'DESC';
+  const direction = opts.direction ?? 'FORWARD';
+  const isForward = direction === 'FORWARD';
+  const queryOrder = isForward ? baseOrder : (baseOrder === 'DESC' ? 'ASC' : 'DESC');
+  const cursorOperator = baseOrder === 'ASC' ? (isForward ? '>' : '<') : (isForward ? '<' : '>');
   const conditions: string[] = [];
   const params: unknown[] = [];
 
@@ -366,10 +375,11 @@ export async function getOperations(
   params.push(opts.limit);
 
   const { rows } = await pool.query<OperationRow>(
-    `SELECT * FROM operations ${where} ORDER BY ledger ${order}, id ${order} LIMIT $${params.length}`,
+    `SELECT * FROM operations ${where} ORDER BY ledger ${queryOrder}, id ${queryOrder} LIMIT $${params.length}`,
     params
   );
-  return rows.map(mapOperation);
+  const items = rows.map(mapOperation);
+  return isForward ? items : items.reverse();
 }
 
 export async function getOperationsByTransactionHash(pool: Pool, network: string, hash: string) {
@@ -411,17 +421,21 @@ export async function getLedgers(
   pool: Pool,
   network: string,
   limit: number,
-  cursor?: string | null
+  cursor?: string | null,
+  direction: PaginationDirection = 'FORWARD'
 ) {
+  const isForward = direction === 'FORWARD';
+  const queryOrder = isForward ? 'DESC' : 'ASC';
   const params: unknown[] = [network];
-  const condition = cursorCondition(params, KEYSETS.ledgers, cursor);
+  const condition = cursorCondition(params, KEYSETS.ledgers, cursor, direction, 'DESC');
   params.push(limit);
 
   const { rows } = await pool.query<LedgerRow>(
-    `SELECT * FROM ledgers WHERE network = $1${condition ? ` AND ${condition}` : ''} ORDER BY sequence DESC LIMIT $${params.length}`,
+    `SELECT * FROM ledgers WHERE network = $1${condition ? ` AND ${condition}` : ''} ORDER BY sequence ${queryOrder} LIMIT $${params.length}`,
     params
   );
-  return rows.map(mapLedger);
+  const items = rows.map(mapLedger);
+  return isForward ? items : items.reverse();
 }
 
 export async function getLedgerBySequence(pool: Pool, network: string, sequence: number) {
@@ -550,22 +564,36 @@ export async function getAccounts(
     orderBy?: AccountOrder | null;
     limit: number;
     cursor?: string | null;
+    direction?: PaginationDirection;
   }
 ) {
   const order = ACCOUNT_ORDERS[opts.orderBy ?? 'RECENT_ACTIVITY'] ?? ACCOUNT_ORDERS.RECENT_ACTIVITY;
+  const direction = opts.direction ?? 'FORWARD';
+  const isForward = direction === 'FORWARD';
+
+  let queryOrderBy = order.orderBy;
+  if (!isForward) {
+    if (opts.orderBy === 'ADDRESS') {
+      queryOrderBy = 'address DESC';
+    } else {
+      queryOrderBy = 'last_modified_ledger ASC, address DESC';
+    }
+  }
 
   const params: unknown[] = [opts.network];
-  const condition = cursorCondition(params, order.keyset, opts.cursor);
+  const baseOrder = opts.orderBy === 'ADDRESS' ? 'ASC' : 'DESC';
+  const condition = cursorCondition(params, order.keyset, opts.cursor, direction, baseOrder);
   params.push(opts.limit);
 
   const { rows } = await pool.query<AccountRow>(
     `SELECT * FROM accounts
       WHERE network = $1${condition ? ` AND ${condition}` : ''}
-      ORDER BY ${order.orderBy}
+      ORDER BY ${queryOrderBy}
       LIMIT $${params.length}`,
     params
   );
-  return rows.map(accountFromRow);
+  const items = rows.map(accountFromRow);
+  return isForward ? items : items.reverse();
 }
 
 export async function getAccountTransactions(pool: Pool, network: string, address: string, limit: number) {
@@ -592,11 +620,15 @@ export async function getEventsByContract(
     topic?: string | null;
     limit: number;
     cursor?: string | null;
+    direction?: PaginationDirection;
     order?: LedgerOrder;
   }
 ) {
-  const order = opts.order ?? 'DESC';
-  const cursorOperator = order === 'ASC' ? '>' : '<';
+  const baseOrder = opts.order ?? 'DESC';
+  const direction = opts.direction ?? 'FORWARD';
+  const isForward = direction === 'FORWARD';
+  const queryOrder = isForward ? baseOrder : (baseOrder === 'DESC' ? 'ASC' : 'DESC');
+  const cursorOperator = baseOrder === 'ASC' ? (isForward ? '>' : '<') : (isForward ? '<' : '>');
   const conditions = ['contract_id = $1'];
   const params: unknown[] = [opts.contractId];
 
@@ -617,10 +649,11 @@ export async function getEventsByContract(
   params.push(opts.limit);
 
   const { rows } = await pool.query<EventRow>(
-    `SELECT * FROM contract_events WHERE ${conditions.join(' AND ')} ORDER BY ledger ${order}, id ${order} LIMIT $${params.length}`,
+    `SELECT * FROM contract_events WHERE ${conditions.join(' AND ')} ORDER BY ledger ${queryOrder}, id ${queryOrder} LIMIT $${params.length}`,
     params
   );
-  return rows.map(mapEvent);
+  const items = rows.map(mapEvent);
+  return isForward ? items : items.reverse();
 }
 
 /**
@@ -646,8 +679,13 @@ export async function getContractStorageEntries(
     keyPrefix?: string | null;
     limit: number;
     cursor?: string | null;
+    direction?: PaginationDirection;
   }
 ) {
+  const direction = opts.direction ?? 'FORWARD';
+  const isForward = direction === 'FORWARD';
+  const queryOrder = isForward ? 'DESC' : 'ASC';
+  const cursorOperator = isForward ? '<' : '>';
   const conditions = ['contract_id = $1'];
   const params: unknown[] = [opts.contractId];
 
@@ -673,17 +711,18 @@ export async function getContractStorageEntries(
     // (network is always $2, pushed second), so the next page starts strictly
     // after it rather than restarting the whole ordering.
     conditions.push(
-      `(last_modified_ledger, key) < (SELECT last_modified_ledger, key FROM contract_storage_entries WHERE key = $${params.length} AND contract_id = $1 AND network = $2)`
+      `(last_modified_ledger, key) ${cursorOperator} (SELECT last_modified_ledger, key FROM contract_storage_entries WHERE key = $${params.length} AND contract_id = $1 AND network = $2)`
     );
   }
 
   params.push(opts.limit);
 
   const { rows } = await pool.query<ContractStorageEntryRow>(
-    `SELECT * FROM contract_storage_entries WHERE ${conditions.join(' AND ')} ORDER BY last_modified_ledger DESC, key DESC LIMIT $${params.length}`,
+    `SELECT * FROM contract_storage_entries WHERE ${conditions.join(' AND ')} ORDER BY last_modified_ledger ${queryOrder}, key ${queryOrder} LIMIT $${params.length}`,
     params
   );
-  return rows.map(mapContractStorageEntry);
+  const items = rows.map(mapContractStorageEntry);
+  return isForward ? items : items.reverse();
 }
 
 /**

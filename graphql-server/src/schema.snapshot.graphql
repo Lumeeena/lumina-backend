@@ -58,6 +58,8 @@ type Query {
     limit: Int = 20
     """Opaque cursor from a previous page's `pageInfo`; see `PageInfo`."""
     cursor: String
+    """Traversal direction from cursor; defaults to FORWARD."""
+    direction: PaginationDirection = FORWARD
     order: LedgerOrder = DESC
     successful: Boolean
     from: String
@@ -167,6 +169,8 @@ type Query {
     limit: Int = 20
     """Opaque cursor from a previous page's `pageInfo`; see `PageInfo`."""
     cursor: String
+    """Traversal direction from cursor; defaults to FORWARD."""
+    direction: PaginationDirection = FORWARD
     order: LedgerOrder = DESC
     """Opt-in request for total matching count."""
     includeTotalCount: Boolean = false
@@ -194,6 +198,8 @@ type Query {
     limit: Int = 20
     """Opaque cursor from a previous page's `pageInfo`; see `PageInfo`."""
     cursor: String
+    """Traversal direction from cursor; defaults to FORWARD."""
+    direction: PaginationDirection = FORWARD
   ): TransactionPage!
 
   """
@@ -216,8 +222,37 @@ type Query {
     limit: Int = 20
     """Opaque cursor from a previous page's `pageInfo`; see `PageInfo`."""
     cursor: String
+    """Traversal direction from cursor; defaults to FORWARD."""
+    direction: PaginationDirection = FORWARD
     order: LedgerOrder = DESC
   ): ContractEventPage!
+
+  """
+  Fetch indexed Soroban contract storage entries for a contract, newest change
+  first. Optionally filtered by durability and by a key prefix.
+
+  `key` is the base64 XDR LedgerKey that addresses the entry, so it round-trips
+  back into a Soroban `getLedgerEntries` call; `keyPrefix` matches that string.
+
+  An entry whose TTL has expired is reported with `state: ARCHIVED` rather than
+  dropped, so a contract that has archived state is distinguishable from one
+  where the key was never set. Requires Soroban RPC indexing to be enabled.
+  """
+  contractStorageEntries(
+    """Network to read; defaults to the primary network configured for this deployment."""
+    network: Network
+    contractId: String!
+    """Only entries with this durability. Omit for both."""
+    durability: ContractStorageDurability
+    """Only entries whose base64 XDR key starts with this prefix."""
+    keyPrefix: String
+    """Maximum page size is 100. Larger limits are rejected."""
+    limit: Int = 20
+    """Opaque cursor from a previous page's `pageInfo`; see `PageInfo`."""
+    cursor: String
+    """Traversal direction from cursor; defaults to FORWARD."""
+    direction: PaginationDirection = FORWARD
+  ): ContractStorageEntryPage!
 
   """
   Get a single ledger by sequence number.
@@ -289,6 +324,8 @@ type Query {
     limit: Int = 20
     """Opaque cursor from a previous page's `pageInfo`; see `PageInfo`."""
     cursor: String
+    """Traversal direction from cursor; defaults to FORWARD."""
+    direction: PaginationDirection = FORWARD
     order: LedgerOrder = DESC
   ): CustomEventPage!
 
@@ -461,6 +498,14 @@ type IndexerStatus {
 
 # ─── Pagination ──────────────────────────────────────────────────────────────
 
+"""Direction to walk from a cursor in bidirectional pagination."""
+enum PaginationDirection {
+  """Walk forwards towards older entries (or next page in sort order)."""
+  FORWARD
+  """Walk backwards towards newer entries (or previous page in sort order)."""
+  BACKWARD
+}
+
 """
 Where to resume, for every paginated query in this schema.
 
@@ -499,6 +544,12 @@ rows may still be the last one; one empty page confirms the end.
 type PageInfo {
   """True when the query returned a full page, so there may be more after it."""
   hasNextPage: Boolean!
+  """True when there is a preceding page in the current traversal direction."""
+  hasPreviousPage: Boolean!
+  """Cursor for the first item on this page, or null when this page is empty."""
+  startCursor: String
+  """Cursor for the last item on this page, or null when this page is empty."""
+  endCursor: String
   """
   Cursor for the next page, or null when this page is empty. Pass it back
   unchanged as the `cursor` argument.

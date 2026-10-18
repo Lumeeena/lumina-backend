@@ -160,6 +160,7 @@ export const resolvers = {
         network?: string | null;
         limit?: number;
         cursor?: string | null;
+        direction?: PaginationDirection | null;
         order?: 'ASC' | 'DESC' | null;
         successful?: boolean | null;
         from?: string | null;
@@ -248,6 +249,7 @@ export const resolvers = {
         asset?: string | null;
         limit?: number;
         cursor?: string | null;
+        direction?: PaginationDirection | null;
         order?: 'ASC' | 'DESC' | null;
         includeTotalCount?: boolean | null;
       },
@@ -300,7 +302,7 @@ export const resolvers = {
 
     async search(
       _: unknown,
-      args: { network?: string | null; query: string; limit?: number; cursor?: string | null },
+      args: { network?: string | null; query: string; limit?: number; cursor?: string | null; direction?: PaginationDirection | null },
       ctx: Context
     ) {
       return memoizeRequestQuery(ctx.queryMemo, 'search', args, async () => {
@@ -320,7 +322,15 @@ export const resolvers = {
 
     async events(
       _: unknown,
-      args: { network?: string | null; contractId: string; topic?: string | null; limit?: number; cursor?: string | null; order?: 'ASC' | 'DESC' | null },
+      args: {
+        network?: string | null;
+        contractId: string;
+        topic?: string | null;
+        limit?: number;
+        cursor?: string | null;
+        direction?: PaginationDirection | null;
+        order?: 'ASC' | 'DESC' | null;
+      },
       ctx: Context
     ) {
       return memoizeRequestQuery(ctx.queryMemo, 'events', args, async () => {
@@ -347,6 +357,7 @@ export const resolvers = {
         keyPrefix?: string | null;
         limit?: number;
         cursor?: string | null;
+        direction?: PaginationDirection | null;
       },
       ctx: Context
     ) {
@@ -430,6 +441,7 @@ export const resolvers = {
         where?: CustomEventFilter[] | null;
         limit?: number;
         cursor?: string | null;
+        direction?: PaginationDirection | null;
         order?: 'ASC' | 'DESC' | null;
       },
       ctx: Context

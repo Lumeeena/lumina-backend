@@ -21,7 +21,10 @@
  */
 import { createThrottle, type ThrottleMetrics } from './throttle';
 
-/** Horizon's page size, and the signal that another page exists. */
+/**
+ * Horizon's page size, and the signal that another page exists.
+ * See `docs/HORIZON_CONTRACT.md` for full field dependencies and contract details.
+ */
 export const PAGE_LIMIT = 200;
 
 export interface HorizonLedger {

@@ -187,7 +187,11 @@ BEGIN
       ('contract_schemas', 'SELECT'),
       ('contract_schemas', 'INSERT'),
       ('contract_schemas', 'UPDATE'),
-      ('contract_schemas', 'DELETE')
+      ('contract_schemas', 'DELETE'),
+      -- Backfill progress tracking
+      ('backfill_progress', 'SELECT'),
+      ('backfill_progress', 'INSERT'),
+      ('backfill_progress', 'UPDATE')
     ) AS grants(tbl, priv)
   LOOP
     -- Tolerate schema versions where a table does not exist yet.

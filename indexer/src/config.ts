@@ -19,6 +19,8 @@ export interface Config {
   databaseUrl: string;
   pollIntervalMs: number;
   startLedger: number | undefined;
+  backfillStartLedger: number | undefined;
+  backfillEndLedger: number | undefined;
   dbPoolMax: number | undefined;
   dbPoolIdleTimeoutMs: number | undefined;
   dbPoolConnectionTimeoutMs: number | undefined;
@@ -190,6 +192,8 @@ export function loadConfig(): Config {
     databaseUrl: stringWithDefault('DATABASE_URL', 'postgresql://localhost:5432/lumina'),
     pollIntervalMs: intWithDefault('POLL_INTERVAL_MS', 5000, 100),
     startLedger: optionalInt('START_LEDGER', 1),
+    backfillStartLedger: optionalInt('BACKFILL_START_LEDGER', 1),
+    backfillEndLedger: optionalInt('BACKFILL_END_LEDGER', 1),
     dbPoolMax: optionalInt('DB_POOL_MAX', 1),
     dbPoolIdleTimeoutMs: optionalInt('DB_POOL_IDLE_TIMEOUT', 1000),
     dbPoolConnectionTimeoutMs: optionalInt('DB_POOL_CONNECTION_TIMEOUT', 0),
@@ -267,6 +271,17 @@ export function loadConfig(): Config {
     process.exit(1);
   }
 
+  // Validate backfill range if configured
+  if (config.backfillStartLedger !== undefined && config.backfillEndLedger !== undefined) {
+    if (config.backfillStartLedger > config.backfillEndLedger) {
+      log.fatal(
+        { startLedger: config.backfillStartLedger, endLedger: config.backfillEndLedger },
+        'Configuration error: BACKFILL_START_LEDGER must be <= BACKFILL_END_LEDGER'
+      );
+      process.exit(1);
+    }
+  }
+
   // Log the resolved configuration with sensitive data redacted
   log.info(
     {
@@ -278,6 +293,8 @@ export function loadConfig(): Config {
       databaseUrl: redactDatabaseUrl(config.databaseUrl),
       pollIntervalMs: config.pollIntervalMs,
       startLedger: config.startLedger,
+      backfillStartLedger: config.backfillStartLedger,
+      backfillEndLedger: config.backfillEndLedger,
       dbPoolMax: config.dbPoolMax,
       dbPoolIdleTimeoutMs: config.dbPoolIdleTimeoutMs,
       dbPoolConnectionTimeoutMs: config.dbPoolConnectionTimeoutMs,

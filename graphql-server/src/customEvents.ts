@@ -27,7 +27,7 @@
  * below — a value not present in them is rejected before any SQL is built.
  */
 import type { Pool } from 'pg';
-import { cursorCondition, KEYSETS } from './pagination';
+import { cursorCondition, KEYSETS, type PaginationDirection } from './pagination';
 
 export const NUMERIC_TYPES = new Set(['i32', 'u32', 'i64', 'u64', 'i128', 'u128']);
 
@@ -164,12 +164,16 @@ export interface CustomEventQuery {
   where?: CustomEventFilter[] | null;
   limit: number;
   cursor?: string | null;
+  direction?: PaginationDirection;
   order?: 'ASC' | 'DESC' | null;
 }
 
 export async function getCustomEvents(pool: Pool, query: CustomEventQuery) {
-  const order = query.order ?? 'DESC';
-  const cursorOperator = order === 'ASC' ? '>' : '<';
+  const baseOrder = query.order ?? 'DESC';
+  const direction = query.direction ?? 'FORWARD';
+  const isForward = direction === 'FORWARD';
+  const queryOrder = isForward ? baseOrder : (baseOrder === 'DESC' ? 'ASC' : 'DESC');
+  const cursorOperator = baseOrder === 'ASC' ? (isForward ? '>' : '<') : (isForward ? '<' : '>');
   const schema = await getContractSchema(pool, query.network, query.contractId);
   if (!schema) {
     throw new CustomQueryError(`No custom schema registered for contract ${query.contractId}`);
@@ -200,12 +204,13 @@ export async function getCustomEvents(pool: Pool, query: CustomEventQuery) {
   const { rows } = await pool.query<CustomEventRow>(
     `SELECT * FROM custom_events
       WHERE ${conditions.join(' AND ')}
-      ORDER BY ledger ${order}, event_id ${order}
+      ORDER BY ledger ${queryOrder}, event_id ${queryOrder}
       LIMIT $${params.length}`,
     params
   );
 
-  return rows.map(row => mapCustomEvent(row, event));
+  const items = rows.map(row => mapCustomEvent(row, event));
+  return isForward ? items : items.reverse();
 }
 
 /**

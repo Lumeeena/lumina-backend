@@ -120,6 +120,20 @@ export const latestIndexedLedger = new Gauge({
   registers: [registry],
 });
 
+export const backfillLedger = new Gauge({
+  name: 'lumina_backfill_current_ledger',
+  help: 'Current backfill ledger sequence being walked backward, by network.',
+  labelNames: ['network'] as const,
+  registers: [registry],
+});
+
+export const backfilledLedgers = new Counter({
+  name: 'lumina_backfilled_ledgers_total',
+  help: 'Historical ledgers successfully backfilled, by network.',
+  labelNames: ['network'] as const,
+  registers: [registry],
+});
+
 export const latestHorizonLedger = new Gauge({
   name: 'lumina_latest_horizon_ledger',
   help: 'Highest ledger sequence Horizon reports, by network.',
@@ -247,6 +261,20 @@ export function recordIndexedLedger(
   operationsIndexed.inc(operations);
   latestIndexedLedger.set({ network }, sequence);
   lastSuccessfulIndexTimestamp.set({ network }, Date.now() / 1000);
+}
+
+/** Record a completed backfill ledger and advance backfill counters/gauges. */
+export function recordBackfillLedger(
+  network: string,
+  sequence: number,
+  transactions: number,
+  operations: number
+): void {
+  ledgersIndexed.inc();
+  transactionsIndexed.inc(transactions);
+  operationsIndexed.inc(operations);
+  backfilledLedgers.inc({ network });
+  backfillLedger.set({ network }, sequence);
 }
 
 /** Update the lag gauges from Horizon's reported tip. */

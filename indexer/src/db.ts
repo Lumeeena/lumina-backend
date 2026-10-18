@@ -93,6 +93,80 @@ export async function getLatestIndexedLedger(pool: Pool, network: string): Promi
 }
 
 /**
+ * Lowest ledger indexed for one network.
+ */
+export async function getEarliestIndexedLedger(pool: Pool, network: string): Promise<number> {
+  const { rows } = await pool.query<{ min: string | null }>(
+    'SELECT MIN(sequence) AS min FROM ledgers WHERE network = $1',
+    [network]
+  );
+  return rows[0]?.min ? Number(rows[0].min) : 0;
+}
+
+export interface BackfillProgressRecord {
+  network: string;
+  startLedger: number;
+  endLedger: number;
+  currentLedger: number;
+  completedAt: string | null;
+}
+
+/**
+ * Gets or initializes backfill progress for a network and ledger range.
+ * If no progress row exists yet, inserts one starting at endLedger.
+ */
+export async function getOrInitBackfillProgress(
+  pool: Pool,
+  network: string,
+  startLedger: number,
+  endLedger: number
+): Promise<BackfillProgressRecord> {
+  const { rows } = await pool.query<{
+    network: string;
+    start_ledger: string;
+    end_ledger: string;
+    current_ledger: string;
+    completed_at: string | null;
+  }>(
+    `INSERT INTO backfill_progress (network, start_ledger, end_ledger, current_ledger)
+     VALUES ($1, $2, $3, $3)
+     ON CONFLICT (network, start_ledger, end_ledger) DO UPDATE SET updated_at = NOW()
+     RETURNING network, start_ledger, end_ledger, current_ledger, completed_at`,
+    [network, startLedger, endLedger]
+  );
+
+  const row = rows[0]!;
+  return {
+    network: row.network,
+    startLedger: Number(row.start_ledger),
+    endLedger: Number(row.end_ledger),
+    currentLedger: Number(row.current_ledger),
+    completedAt: row.completed_at,
+  };
+}
+
+/**
+ * Updates the current backfill ledger cursor, marking completed if it reaches startLedger - 1.
+ */
+export async function updateBackfillProgress(
+  pool: Pool,
+  network: string,
+  startLedger: number,
+  endLedger: number,
+  currentLedger: number
+): Promise<void> {
+  const completed = currentLedger < startLedger;
+  await pool.query(
+    `UPDATE backfill_progress
+     SET current_ledger = $4,
+         completed_at = CASE WHEN $5 THEN NOW() ELSE completed_at END,
+         updated_at = NOW()
+     WHERE network = $1 AND start_ledger = $2 AND end_ledger = $3`,
+    [network, startLedger, endLedger, currentLedger, completed]
+  );
+}
+
+/**
  * Creates any missing `operations` partitions covering the ledger range up
  * to `partitionsAhead` partitions past the current max indexed ledger. Safe
  * to call repeatedly — it no-ops once the needed partitions already exist.
