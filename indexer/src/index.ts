@@ -46,9 +46,11 @@ import {
   markContractStorageEntriesArchived,
   upsertContractStorageEntries,
   enqueueLedgerRetry,
-  markContractStorageEntriesArchived,
   recordContractStorageHistory,
-  upsertContractStorageEntries,
+  recordFailedLedger,
+  clearFailedLedger,
+  findLedgerGaps,
+  countLedgerGaps,
 } from './db';
 import { decodeEvents } from './customDecode';
 import { loadConfig } from './config';
@@ -62,6 +64,8 @@ import {
   ledgerIndexDuration,
   recordHorizonTip,
   recordIndexedLedger,
+  recordLedgerGaps,
+  ledgerGapsCount,
   accountCacheSize,
   sorobanEventsTruncated,
   contractsWatched,
@@ -129,6 +133,7 @@ const INDEXED_CONTRACT_IDS = config.indexedContractIds;
 // unreachable leaves that network's contract list stale, and says nothing about
 // any other network's.
 const REGISTRY_POLL_EVERY_N_TICKS = Math.max(1, Math.round(config.registryPollIntervalMs / POLL_INTERVAL_MS));
+const GAP_REPAIR_EVERY_N_TICKS = Math.max(1, Math.round(30000 / POLL_INTERVAL_MS));
 
 // How long an account's Horizon data is considered fresh enough to skip
 // re-fetching. Busy accounts (exchanges, bots) show up in most ledgers —
@@ -302,11 +307,37 @@ async function fetchAndIndexLedger(loop: NetworkLoop, sequence: number): Promise
   );
 }
 
+/**
+ * Computes retry backoff with equal jitter:
+ * Half of the exponential backoff is deterministic to guarantee a minimum delay,
+ * and the remaining half is jittered up to the ceiling.
+ * The maximum delay is bounded by maxDelayMs.
+ */
+export function calculateBackoffWithJitter(
+  baseMs: number,
+  attempt: number,
+  maxDelayMs = 30000,
+  randomFn: () => number = Math.random
+): number {
+  if (baseMs <= 0) return 0;
+  const ceiling = Math.min(maxDelayMs, baseMs * 2 ** (attempt - 1));
+  const half = Math.floor(ceiling / 2);
+  return half + Math.floor(randomFn() * (ceiling - half + 1));
+}
+
 /** Records a ledger that exhausted its retries for the durable retry worker to pick up. */
 export type EnqueueLedgerRetry = (
   network: string,
   sequence: number,
   error: string
+) => Promise<void>;
+
+/** Records a ledger that exhausted its retries in failed_ledgers. */
+export type RecordFailedLedger = (
+  network: string,
+  sequence: number,
+  error: string,
+  attempts: number
 ) => Promise<void>;
 
 export async function fetchAndIndexLedgerWithRetry(
@@ -319,7 +350,9 @@ export async function fetchAndIndexLedgerWithRetry(
   // a database — this function used to reach for the module pool on exhaustion,
   // which made "did it give up correctly" untestable without Postgres. Same
   // shape as accountRefresh's injected fetchAccount.
-  enqueueRetry: EnqueueLedgerRetry = (net, seq, err) => enqueueLedgerRetry(pool, net, seq, err)
+  enqueueRetry: EnqueueLedgerRetry = (net, seq, err) => enqueueLedgerRetry(pool, net, seq, err),
+  recordFailed?: RecordFailedLedger,
+  sleepFn: (ms: number) => Promise<void> = ms => new Promise(r => setTimeout(r, ms))
 ): Promise<boolean> {
   const actualRetryAttempts = retryAttempts ?? config.ledgerRetryAttempts;
   const actualRetryBaseMs = retryBaseMs ?? config.ledgerRetryBaseMs;
@@ -331,23 +364,67 @@ export async function fetchAndIndexLedgerWithRetry(
       if (attempt === actualRetryAttempts) {
         indexingErrors.inc({ loop: 'ledger' });
         const errorMsg = message(err);
-        log.error({ network, ledger: sequence, attempts: attempt, err: errorMsg }, 'giving up on ledger; enqueueing for durable retry');
+        log.error({ network, ledger: sequence, attempts: attempt, err: errorMsg }, 'giving up on ledger; recording failure and enqueueing for durable retry');
         // Deliberately allowed to throw: if the retry cannot be recorded the
         // ledger is unindexed and unrecorded, and letting the error propagate
         // is what keeps the cursor from advancing past it.
+        if (recordFailed) {
+          await recordFailed(network, sequence, errorMsg, attempt);
+        } else {
+          await recordFailedLedger(pool, network, sequence, errorMsg, attempt).catch(() => {});
+        }
         await enqueueRetry(network, sequence, errorMsg);
         return false;
       }
-      const delay = actualRetryBaseMs * 2 ** (attempt - 1);
+      const delay = calculateBackoffWithJitter(actualRetryBaseMs, attempt);
       log.warn(
         { network, ledger: sequence, attempt, maxAttempts: actualRetryAttempts, retryInMs: delay, err: message(err) },
         'ledger failed, retrying'
       );
-      await new Promise(r => setTimeout(r, delay));
+      await sleepFn(delay);
     }
   }
   return false;
 }
+
+/**
+ * Detects missing ledger sequence numbers below the tip and re-fetches them.
+ * Updates the ledgerGapsCount metric before and after repair.
+ */
+export async function repairLedgerGaps(
+  pool: Pool,
+  network: string,
+  indexOne: (sequence: number) => Promise<boolean>,
+  batchLimit = 10
+): Promise<{ detected: number; repaired: number }> {
+  const initialGapCount = await countLedgerGaps(pool, network);
+  recordLedgerGaps(network, initialGapCount);
+
+  if (initialGapCount === 0) {
+    return { detected: 0, repaired: 0 };
+  }
+
+  const gaps = await findLedgerGaps(pool, network, batchLimit);
+  let repaired = 0;
+
+  for (const seq of gaps) {
+    if (isShuttingDown) break;
+    log.info({ network, ledger: seq }, 'attempting gap repair for missing ledger');
+    const success = await indexOne(seq);
+    if (success) {
+      repaired++;
+      log.info({ network, ledger: seq }, 'gap repair successfully indexed ledger');
+    } else {
+      log.warn({ network, ledger: seq }, 'gap repair could not index ledger; leaving for next pass');
+    }
+  }
+
+  const remainingGaps = await countLedgerGaps(pool, network);
+  recordLedgerGaps(network, remainingGaps);
+
+  return { detected: initialGapCount, repaired };
+}
+
 
 export async function runLedgerCatchUp(
   cursor: number,
@@ -626,9 +703,16 @@ async function runNetworkLoop(loop: NetworkLoop): Promise<void> {
     try {
       if (!initialised) {
         await initCursor();
+        const initialGaps = await countLedgerGaps(pool, name).catch(() => 0);
+        recordLedgerGaps(name, initialGaps);
       }
       if (loop.registry && loop.loopTick % REGISTRY_POLL_EVERY_N_TICKS === 0) {
         await pollRegistry(loop);
+      }
+      if (loop.loopTick % GAP_REPAIR_EVERY_N_TICKS === 0) {
+        await repairLedgerGaps(pool, name, indexOne).catch(err => {
+          log.error({ network: name, err: message(err) }, 'gap repair pass failed');
+        });
       }
       loop.loopTick++;
 

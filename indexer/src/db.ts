@@ -220,6 +220,8 @@ export async function deferAccountRefreshes(
   );
 }
 
+export const BATCH_CHUNK_SIZE = 500;
+
 /**
  * Writes a ledger, transactions, operations, and account refresh intents in a
  * single transaction. If it rolls back, the ledger is retried; after commit,
@@ -252,49 +254,88 @@ export async function indexLedger(
       ]
     );
 
-    for (const tx of transactions) {
-      await client.query(
-        `INSERT INTO transactions (hash, ledger, created_at, source_account, fee_charged, operation_count, successful, memo_type, memo, network)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-         ON CONFLICT (hash, network) DO NOTHING`,
-        [
-          tx.hash,
-          tx.ledger,
-          tx.created_at,
-          tx.source_account,
-          tx.fee_charged,
-          tx.operation_count,
-          tx.successful,
-          tx.memo_type,
-          tx.memo ?? null,
-          network,
-        ]
-      );
+    if (transactions.length > 0) {
+      for (let i = 0; i < transactions.length; i += BATCH_CHUNK_SIZE) {
+        const chunk = transactions.slice(i, i + BATCH_CHUNK_SIZE);
+        const values: unknown[] = [];
+        const rows: string[] = [];
+
+        chunk.forEach((tx, rowIdx) => {
+          const offset = rowIdx * 10;
+          rows.push(
+            `($${offset + 1}, $${offset + 2}, $${offset + 3}, $${offset + 4}, $${offset + 5}, $${offset + 6}, $${offset + 7}, $${offset + 8}, $${offset + 9}, $${offset + 10})`
+          );
+          values.push(
+            tx.hash,
+            tx.ledger,
+            tx.created_at,
+            tx.source_account,
+            tx.fee_charged,
+            tx.operation_count,
+            tx.successful,
+            tx.memo_type,
+            tx.memo ?? null,
+            network
+          );
+        });
+
+        await client.query(
+          `INSERT INTO transactions (hash, ledger, created_at, source_account, fee_charged, operation_count, successful, memo_type, memo, network)
+           VALUES ${rows.join(', ')}
+           ON CONFLICT (hash, network) DO NOTHING`,
+          values
+        );
+      }
     }
 
-    for (const op of operations) {
-      // No ON CONFLICT inference clause, deliberately. The two shapes this
-      // insert has to work against do not agree on a key: a database built
-      // from db/schema.sql has a plain `operations` keyed (id, network), while
-      // a deployment that ran the original 006_partition_operations still has
-      // it partitioned by ledger and keyed (id, ledger, network) — 007 could not
-      // add `network` to that key without carrying the partition key too.
-      // Naming either target breaks the other shape; naming none works on both.
-      //
-      // That is safe here because the inference clause is a no-op for a plain
-      // DO NOTHING: it only picks which unique violation is tolerated, and
-      // `operations` has exactly one unique constraint either way. A DO UPDATE
-      // insert would need the target, since it has to know which row to
-      // overwrite.
-      await client.query(
-        `INSERT INTO operations (id, type, transaction_hash, ledger, created_at, source_account, details, network)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-         ON CONFLICT DO NOTHING`,
-        [op.id, op.type, op.transaction_hash, ledger.sequence, op.created_at, op.source_account, JSON.stringify(op), network]
-      );
+    if (operations.length > 0) {
+      for (let i = 0; i < operations.length; i += BATCH_CHUNK_SIZE) {
+        const chunk = operations.slice(i, i + BATCH_CHUNK_SIZE);
+        const values: unknown[] = [];
+        const rows: string[] = [];
 
-      // Process asset-related operations for trustlines, assets, and volume tracking
-      await processAssetOperation(client, network, ledger.sequence, op);
+        chunk.forEach((op, rowIdx) => {
+          const offset = rowIdx * 8;
+          rows.push(
+            `($${offset + 1}, $${offset + 2}, $${offset + 3}, $${offset + 4}, $${offset + 5}, $${offset + 6}, $${offset + 7}, $${offset + 8})`
+          );
+          values.push(
+            op.id,
+            op.type,
+            op.transaction_hash,
+            ledger.sequence,
+            op.created_at,
+            op.source_account,
+            JSON.stringify(op),
+            network
+          );
+        });
+
+        // No ON CONFLICT inference clause, deliberately. The two shapes this
+        // insert has to work against do not agree on a key: a database built
+        // from db/schema.sql has a plain `operations` keyed (id, network), while
+        // a deployment that ran the original 006_partition_operations still has
+        // it partitioned by ledger and keyed (id, ledger, network) — 007 could not
+        // add `network` to that key without carrying the partition key too.
+        // Naming either target breaks the other shape; naming none works on both.
+        //
+        // That is safe here because the inference clause is a no-op for a plain
+        // DO NOTHING: it only picks which unique violation is tolerated, and
+        // `operations` has exactly one unique constraint either way. A DO UPDATE
+        // insert would need the target, since it has to know which row to
+        // overwrite.
+        await client.query(
+          `INSERT INTO operations (id, type, transaction_hash, ledger, created_at, source_account, details, network)
+           VALUES ${rows.join(', ')}
+           ON CONFLICT DO NOTHING`,
+          values
+        );
+      }
+
+      for (const op of operations) {
+        // Process asset-related operations for trustlines, assets, and volume tracking
+        await processAssetOperation(client, network, ledger.sequence, op);
+      }
     }
 
     if (accountAddresses.length > 0) {
@@ -307,6 +348,9 @@ export async function indexLedger(
         [network, accountAddresses, ledger.sequence]
       );
     }
+
+    // Clear from failed_ledgers if previously recorded as failed
+    await clearFailedLedger(client, network, ledger.sequence);
 
     // Queued inside the transaction on purpose: Postgres delivers notifications
     // at commit, so a rolled-back ledger announces nothing and no subscriber is
@@ -693,6 +737,154 @@ export async function removeLedgerFromRetryQueue(
     'DELETE FROM ledger_retry_queue WHERE ledger = $1 AND network = $2',
     [ledger, network]
   );
+}
+
+/**
+ * Record a ledger that exhausted retries into failed_ledgers.
+ */
+export async function recordFailedLedger(
+  pool: Pool | PoolClient,
+  network: string,
+  sequence: number,
+  error: string,
+  attemptCount: number
+): Promise<void> {
+  await pool.query(
+    `INSERT INTO failed_ledgers (sequence, network, error, attempt_count, failed_at)
+     VALUES ($1, $2, $3, $4, NOW())
+     ON CONFLICT (sequence, network) DO UPDATE SET
+       error = EXCLUDED.error,
+       attempt_count = EXCLUDED.attempt_count,
+       failed_at = EXCLUDED.failed_at`,
+    [sequence, network, error, attemptCount]
+  );
+}
+
+/**
+ * Remove a ledger from failed_ledgers after successful indexing.
+ */
+export async function clearFailedLedger(
+  client: Pool | PoolClient,
+  network: string,
+  sequence: number
+): Promise<void> {
+  await client.query(
+    'DELETE FROM failed_ledgers WHERE sequence = $1 AND network = $2',
+    [sequence, network]
+  );
+}
+
+/**
+ * Get all failed ledgers for a network.
+ */
+export async function getFailedLedgers(
+  pool: Pool,
+  network: string,
+  limit = 100
+): Promise<{ sequence: number; error: string | null; attempt_count: number; failed_at: string }[]> {
+  const { rows } = await pool.query<{
+    sequence: string;
+    error: string | null;
+    attempt_count: number;
+    failed_at: string;
+  }>(
+    `SELECT sequence, error, attempt_count, failed_at
+     FROM failed_ledgers
+     WHERE network = $1
+     ORDER BY sequence ASC
+     LIMIT $2`,
+    [network, limit]
+  );
+  return rows.map(r => ({
+    sequence: Number(r.sequence),
+    error: r.error,
+    attempt_count: r.attempt_count,
+    failed_at: r.failed_at,
+  }));
+}
+
+/**
+ * Detect missing ledger sequence numbers below the highest indexed ledger.
+ * Also includes any ledgers in failed_ledgers.
+ */
+export async function findLedgerGaps(
+  pool: Pool,
+  network: string,
+  limit = 100
+): Promise<number[]> {
+  const { rows } = await pool.query<{ sequence: string }>(
+    `WITH seq_gaps AS (
+       SELECT sequence,
+              LEAD(sequence) OVER (ORDER BY sequence) AS next_sequence
+       FROM ledgers
+       WHERE network = $1
+     ),
+     gap_ranges AS (
+       SELECT sequence + 1 AS gap_start, next_sequence - 1 AS gap_end
+       FROM seq_gaps
+       WHERE next_sequence > sequence + 1
+     ),
+     detected_gaps AS (
+       SELECT s.seq::bigint AS sequence
+       FROM gap_ranges,
+            LATERAL generate_series(gap_start, gap_end) AS s(seq)
+     ),
+     failed AS (
+       SELECT sequence
+       FROM failed_ledgers
+       WHERE network = $1
+     )
+     SELECT DISTINCT sequence
+     FROM (
+       SELECT sequence FROM detected_gaps
+       UNION ALL
+       SELECT sequence FROM failed
+     ) all_gaps
+     ORDER BY sequence ASC
+     LIMIT $2`,
+    [network, limit]
+  );
+  return rows.map(r => Number(r.sequence));
+}
+
+/**
+ * Count the total number of missing ledger sequence numbers below the maximum indexed ledger.
+ */
+export async function countLedgerGaps(
+  pool: Pool,
+  network: string
+): Promise<number> {
+  const { rows } = await pool.query<{ count: string }>(
+    `WITH seq_gaps AS (
+       SELECT sequence,
+              LEAD(sequence) OVER (ORDER BY sequence) AS next_sequence
+       FROM ledgers
+       WHERE network = $1
+     ),
+     gap_ranges AS (
+       SELECT sequence + 1 AS gap_start, next_sequence - 1 AS gap_end
+       FROM seq_gaps
+       WHERE next_sequence > sequence + 1
+     ),
+     detected_gaps AS (
+       SELECT s.seq::bigint AS sequence
+       FROM gap_ranges,
+            LATERAL generate_series(gap_start, gap_end) AS s(seq)
+     ),
+     failed AS (
+       SELECT sequence
+       FROM failed_ledgers
+       WHERE network = $1
+     )
+     SELECT COUNT(DISTINCT sequence)::int AS count
+     FROM (
+       SELECT sequence FROM detected_gaps
+       UNION ALL
+       SELECT sequence FROM failed
+     ) all_gaps`,
+    [network]
+  );
+  return rows[0]?.count !== undefined ? Number(rows[0].count) : 0;
 }
 
 

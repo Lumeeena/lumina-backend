@@ -445,6 +445,19 @@ CREATE TABLE IF NOT EXISTS ledger_retry_queue (
 CREATE INDEX IF NOT EXISTS idx_retry_queue_next_attempt ON ledger_retry_queue (next_attempt_at)
     WHERE NOT permanently_failed;
 
+-- ─── Failed Ledgers ───────────────────────────────────────────────────────────
+
+CREATE TABLE IF NOT EXISTS failed_ledgers (
+    sequence        BIGINT NOT NULL,
+    network         TEXT NOT NULL DEFAULT 'mainnet',
+    error           TEXT,
+    attempt_count   INTEGER NOT NULL DEFAULT 1,
+    failed_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (sequence, network)
+);
+
+CREATE INDEX IF NOT EXISTS idx_failed_ledgers_sequence ON failed_ledgers (sequence, network);
+
 -- Lower insert-triggered vacuum/analyze thresholds for the append-heavy tables.
 ALTER TABLE transactions SET (
     autovacuum_vacuum_insert_threshold = 5000,

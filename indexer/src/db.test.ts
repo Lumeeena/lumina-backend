@@ -14,6 +14,11 @@ import {
   markContractStorageEntriesArchived,
   upsertAccount,
   upsertContractStorageEntries,
+  recordFailedLedger,
+  clearFailedLedger,
+  findLedgerGaps,
+  countLedgerGaps,
+  BATCH_CHUNK_SIZE,
 } from './db';
 import type { ContractStorageEntry } from './soroban';
 import { indexerPoolErrors } from './metrics';
@@ -36,7 +41,7 @@ function makeFakeClient(opts: { failOn?: string } = {}) {
       if (trimmed.startsWith('BEGIN') || trimmed.startsWith('COMMIT') || trimmed.startsWith('ROLLBACK')) {
         calls.push(trimmed);
       } else {
-        calls.push(trimmed.match(/INSERT INTO (\w+)/)?.[1] ?? trimmed);
+        calls.push(trimmed.match(/(?:INSERT INTO|DELETE FROM) (\w+)/)?.[1] ?? trimmed);
       }
       if (opts.failOn && trimmed.includes(opts.failOn)) {
         throw new Error(`simulated failure: ${opts.failOn}`);
@@ -68,6 +73,7 @@ test('indexLedger writes ledger, transactions, and operations inside one commit'
     'ledgers',
     'transactions',
     'operations',
+    'failed_ledgers',
     'SELECT pg_notify($1, $2)',
     'COMMIT',
     'RELEASE',
@@ -217,6 +223,7 @@ test('indexLedger queues account refreshes in the ledger transaction', async () 
     'transactions',
     'operations',
     'account_refresh_queue',
+    'failed_ledgers',
     'SELECT pg_notify($1, $2)',
     'COMMIT',
     'RELEASE',
@@ -518,3 +525,113 @@ test('getTrackedContractStorageKeys reads every key for one network, active or a
   assert.doesNotMatch(queries[0]!.sql, /state/);
   assert.deepEqual(queries[0]?.params, ['testnet']);
 });
+
+test('indexLedger batches hundreds of transactions and operations into chunks under parameter limit', async () => {
+  const executedQueries: { sql: string; paramCount: number }[] = [];
+  const client = {
+    query: async (sql: string, params: unknown[] = []) => {
+      executedQueries.push({ sql: sql.trim(), paramCount: params.length });
+      return { rows: [] };
+    },
+    release: () => {},
+  };
+
+  const pool = fakePool(client);
+  const manyTxs = Array.from({ length: 1200 }, (_, i) => ({
+    ...tx,
+    hash: `tx_${i}`,
+  }));
+  const manyOps = Array.from({ length: 1200 }, (_, i) => ({
+    ...op,
+    id: `op_${i}`,
+    type: 'account_merge', // avoid trigger of processAssetOperation
+  }));
+
+  await indexLedger(pool, 'mainnet', ledger, manyTxs, manyOps);
+
+  const txInserts = executedQueries.filter(q => q.sql.startsWith('INSERT INTO transactions'));
+  const opInserts = executedQueries.filter(q => q.sql.startsWith('INSERT INTO operations'));
+
+  // 1200 rows with BATCH_CHUNK_SIZE=500 should produce ceil(1200/500) = 3 queries each
+  assert.equal(txInserts.length, 3);
+  assert.equal(opInserts.length, 3);
+
+  // Each chunk respects the parameter limit (500 * 10 = 5000 and 500 * 8 = 4000, well below 65535)
+  assert.equal(txInserts[0]?.paramCount, 500 * 10);
+  assert.equal(txInserts[1]?.paramCount, 500 * 10);
+  assert.equal(txInserts[2]?.paramCount, 200 * 10);
+
+  assert.equal(opInserts[0]?.paramCount, 500 * 8);
+  assert.equal(opInserts[1]?.paramCount, 500 * 8);
+  assert.equal(opInserts[2]?.paramCount, 200 * 8);
+
+  // Multi-row INSERT ... VALUES syntax is used with ON CONFLICT DO NOTHING
+  assert.match(txInserts[0]!.sql, /INSERT INTO transactions .* VALUES \(\$1, .*\), \(\$11, .* ON CONFLICT \(hash, network\) DO NOTHING/);
+  assert.match(opInserts[0]!.sql, /INSERT INTO operations .* VALUES \(\$1, .*\), \(\$9, .* ON CONFLICT DO NOTHING/);
+});
+
+test('recordFailedLedger writes or updates failure record with error and attempts', async () => {
+  const executed: { sql: string; params: unknown[] }[] = [];
+  const pool = {
+    query: async (sql: string, params: unknown[] = []) => {
+      executed.push({ sql: sql.trim(), params });
+      return { rows: [] };
+    },
+  } as unknown as Pool;
+
+  await recordFailedLedger(pool, 'mainnet', 500, 'Horizon 429', 5);
+
+  assert.equal(executed.length, 1);
+  assert.match(executed[0]!.sql, /INSERT INTO failed_ledgers/);
+  assert.match(executed[0]!.sql, /ON CONFLICT \(sequence, network\) DO UPDATE/);
+  assert.deepEqual(executed[0]!.params, [500, 'mainnet', 'Horizon 429', 5]);
+});
+
+test('clearFailedLedger deletes recorded failed ledger on successful index', async () => {
+  const executed: { sql: string; params: unknown[] }[] = [];
+  const pool = {
+    query: async (sql: string, params: unknown[] = []) => {
+      executed.push({ sql: sql.trim(), params });
+      return { rows: [] };
+    },
+  } as unknown as Pool;
+
+  await clearFailedLedger(pool, 'mainnet', 500);
+
+  assert.equal(executed.length, 1);
+  assert.match(executed[0]!.sql, /DELETE FROM failed_ledgers WHERE sequence = \$1 AND network = \$2/);
+  assert.deepEqual(executed[0]!.params, [500, 'mainnet']);
+});
+
+test('findLedgerGaps detects missing sequences and failed ledgers', async () => {
+  const executed: { sql: string; params: unknown[] }[] = [];
+  const pool = {
+    query: async (sql: string, params: unknown[] = []) => {
+      executed.push({ sql: sql.trim(), params });
+      return { rows: [{ sequence: '102' }, { sequence: '105' }] };
+    },
+  } as unknown as Pool;
+
+  const gaps = await findLedgerGaps(pool, 'mainnet', 50);
+
+  assert.deepEqual(gaps, [102, 105]);
+  assert.match(executed[0]!.sql, /LEAD\(sequence\)/);
+  assert.match(executed[0]!.sql, /failed_ledgers/);
+  assert.deepEqual(executed[0]!.params, ['mainnet', 50]);
+});
+
+test('countLedgerGaps returns the total count of gaps', async () => {
+  const executed: { sql: string; params: unknown[] }[] = [];
+  const pool = {
+    query: async (sql: string, params: unknown[] = []) => {
+      executed.push({ sql: sql.trim(), params });
+      return { rows: [{ count: '7' }] };
+    },
+  } as unknown as Pool;
+
+  const count = await countLedgerGaps(pool, 'testnet');
+
+  assert.equal(count, 7);
+  assert.deepEqual(executed[0]!.params, ['testnet']);
+});
+

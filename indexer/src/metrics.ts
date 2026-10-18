@@ -138,6 +138,13 @@ export const indexingLag = new Gauge({
   registers: [registry],
 });
 
+export const ledgerGapsCount = new Gauge({
+  name: 'lumina_ledger_gaps_count',
+  help: 'Count of missing ledger sequences below the indexed tip, by network.',
+  labelNames: ['network'] as const,
+  registers: [registry],
+});
+
 export const lastSuccessfulIndexTimestamp = new Gauge({
   name: 'lumina_last_successful_index_timestamp_seconds',
   help: 'Unix time of the last successfully indexed ledger, by network.',
@@ -253,6 +260,11 @@ export function recordIndexedLedger(
 export function recordHorizonTip(network: string, sequence: number, latestIndexed: number): void {
   latestHorizonLedger.set({ network }, sequence);
   indexingLag.set({ network }, Math.max(0, sequence - latestIndexed));
+}
+
+/** Record the current count of ledger gaps. */
+export function recordLedgerGaps(network: string, count: number): void {
+  ledgerGapsCount.set({ network }, count);
 }
 
 export function metricsContentType(): string {

@@ -18,6 +18,7 @@ import {
   operationsIndexed,
   recordHorizonTip,
   recordIndexedLedger,
+  recordLedgerGaps,
   registry,
   renderMetrics,
   transactionsIndexed,
@@ -55,6 +56,15 @@ test('recordHorizonTip derives lag from the two ledger positions', async () => {
   assert.equal(await value('lumina_latest_horizon_ledger', { network: 'mainnet' }), 1000);
   assert.equal(await value('lumina_indexing_lag_ledgers', { network: 'mainnet' }), 60);
 });
+
+test('recordLedgerGaps updates gap count gauge per network', async () => {
+  recordLedgerGaps('mainnet', 5);
+  recordLedgerGaps('testnet', 0);
+
+  assert.equal(await value('lumina_ledger_gaps_count', { network: 'mainnet' }), 5);
+  assert.equal(await value('lumina_ledger_gaps_count', { network: 'testnet' }), 0);
+});
+
 
 test('each network keeps its own tip and lag, never a shared series', async () => {
   // Two chains do not share a cursor. Averaging or maxing them would report a
