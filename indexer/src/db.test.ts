@@ -48,7 +48,7 @@ function makeFakeClient(opts: { failOn?: string } = {}) {
       if (trimmed.startsWith('BEGIN') || trimmed.startsWith('COMMIT') || trimmed.startsWith('ROLLBACK')) {
         calls.push(trimmed);
       } else {
-        calls.push(trimmed.match(/INSERT INTO (\w+)/)?.[1] ?? trimmed);
+        calls.push(trimmed.match(/(?:INSERT INTO|DELETE FROM) (\w+)/)?.[1] ?? trimmed);
       }
       if (opts.failOn && trimmed.includes(opts.failOn)) {
         throw new Error(`simulated failure: ${opts.failOn}`);
@@ -80,6 +80,7 @@ test('indexLedger writes ledger, transactions, and operations inside one commit'
     'ledgers',
     'transactions',
     'operations',
+    'failed_ledgers',
     'SELECT pg_notify($1, $2)',
     'COMMIT',
     'RELEASE',
@@ -229,6 +230,7 @@ test('indexLedger queues account refreshes in the ledger transaction', async () 
     'transactions',
     'operations',
     'account_refresh_queue',
+    'failed_ledgers',
     'SELECT pg_notify($1, $2)',
     'COMMIT',
     'RELEASE',
