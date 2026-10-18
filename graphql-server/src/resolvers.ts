@@ -17,7 +17,7 @@ import {
   mapAccount,
   type AccountOrder,
 } from './db';
-import { DEFAULT_PAGE_LIMIT, KEYSETS, pageInfo } from './pagination';
+import { DEFAULT_PAGE_LIMIT, KEYSETS, pageInfo, type PaginationDirection } from './pagination';
 import { createLoaders, type RequestLoaders } from './loaders';
 import { getAccount as getAccountFromHorizon, getLatestLedger as getLatestLedgerFromHorizon } from './horizon';
 import { createSubscriptionResolvers } from './subscriptions';
@@ -153,6 +153,7 @@ export const resolvers = {
         network?: string | null;
         limit?: number;
         cursor?: string | null;
+        direction?: PaginationDirection | null;
         order?: 'ASC' | 'DESC' | null;
         successful?: boolean | null;
         from?: string | null;
@@ -163,8 +164,10 @@ export const resolvers = {
     ) {
       const limit = getPageSize(args.limit);
       const network = networkArgument(args, ctx);
+      const direction = args.direction ?? 'FORWARD';
       const items = await getTransactions(ctx.pool, network.name, limit, args.cursor ?? null, {
         order: args.order ?? 'DESC',
+        direction,
         successful: args.successful,
         from: args.from,
         to: args.to,
@@ -172,10 +175,14 @@ export const resolvers = {
       });
       return {
         items,
-        pageInfo: {
-          hasNextPage: items.length === limit,
-          cursor: items.at(-1)?.hash ?? null,
-        },
+        pageInfo: pageInfo(
+          KEYSETS.transactions,
+          items,
+          limit,
+          tx => [tx.ledger, tx.hash],
+          direction,
+          Boolean(args.cursor)
+        ),
       };
     },
 
@@ -191,11 +198,18 @@ export const resolvers = {
 
     async accounts(
       _: unknown,
-      args: { network?: string | null; orderBy?: string | null; limit?: number; cursor?: string | null },
+      args: {
+        network?: string | null;
+        orderBy?: string | null;
+        limit?: number;
+        cursor?: string | null;
+        direction?: PaginationDirection | null;
+      },
       ctx: Context
     ) {
       const network = networkArgument(args, ctx);
       const limit = args.limit ?? DEFAULT_PAGE_LIMIT;
+      const direction = args.direction ?? 'FORWARD';
       // The enum cannot name an unknown value, and every declared order is in
       // ACCOUNT_ORDERS, so the fallback is unreachable in practice — but a bad
       // order must not reach SQL as an ORDER BY.
@@ -205,10 +219,18 @@ export const resolvers = {
         orderBy,
         limit,
         cursor: args.cursor ?? null,
+        direction,
       });
       return {
         items,
-        pageInfo: pageInfo(ACCOUNT_ORDERS[orderBy].keyset, items, limit, account => ACCOUNT_ORDERS[orderBy].keyOf(account)),
+        pageInfo: pageInfo(
+          ACCOUNT_ORDERS[orderBy].keyset,
+          items,
+          limit,
+          account => ACCOUNT_ORDERS[orderBy].keyOf(account),
+          direction,
+          Boolean(args.cursor)
+        ),
       };
     },
 
@@ -221,12 +243,14 @@ export const resolvers = {
         asset?: string | null;
         limit?: number;
         cursor?: string | null;
+        direction?: PaginationDirection | null;
         order?: 'ASC' | 'DESC' | null;
       },
       ctx: Context
     ) {
       const limit = getPageSize(args.limit);
       const network = networkArgument(args, ctx);
+      const direction = args.direction ?? 'FORWARD';
 
       // The asset filter needs its own query: an asset can appear as the
       // payment asset or either side of an offer, which the generic operations
@@ -239,6 +263,7 @@ export const resolvers = {
             type: args.type ?? null,
             limit,
             cursor: args.cursor ?? null,
+            direction,
             order: args.order ?? 'DESC',
           })
         : await getOperations(ctx.pool, {
@@ -247,50 +272,88 @@ export const resolvers = {
             type: args.type ?? null,
             limit,
             cursor: args.cursor ?? null,
+            direction,
             order: args.order ?? 'DESC',
           });
 
       return {
         items,
         // The asset filter keyset is the same ordering on the same table.
-        pageInfo: pageInfo(args.asset ? KEYSETS.assetOperations : KEYSETS.operations, items, limit, operation => [operation.ledger, operation.id]),
+        pageInfo: pageInfo(
+          args.asset ? KEYSETS.assetOperations : KEYSETS.operations,
+          items,
+          limit,
+          operation => [operation.ledger, operation.id],
+          direction,
+          Boolean(args.cursor)
+        ),
       };
     },
 
     async search(
       _: unknown,
-      args: { network?: string | null; query: string; limit?: number; cursor?: string | null },
+      args: { network?: string | null; query: string; limit?: number; cursor?: string | null; direction?: PaginationDirection | null },
       ctx: Context
     ) {
       const limit = getPageSize(args.limit);
       const network = networkArgument(args, ctx);
-      const { items, nextCursor } = await searchTransactions(ctx.pool, {
+      const direction = args.direction ?? 'FORWARD';
+      const { items, startCursor, endCursor, nextCursor } = await searchTransactions(ctx.pool, {
         network: network.name,
         query: args.query,
         limit,
         cursor: args.cursor ?? null,
+        direction,
       });
-      // Search already computed the cursor for the next page from the ranking
-      // tuple, so its own value is used rather than one rebuilt from the rows.
-      return { items, pageInfo: { hasNextPage: items.length === limit, cursor: nextCursor } };
+      const isFullPage = items.length === limit;
+      return {
+        items,
+        pageInfo: {
+          hasNextPage: direction === 'FORWARD' ? isFullPage : Boolean(args.cursor),
+          hasPreviousPage: direction === 'FORWARD' ? Boolean(args.cursor) : isFullPage,
+          startCursor,
+          endCursor,
+          cursor: nextCursor,
+        },
+      };
     },
 
     async events(
       _: unknown,
-      args: { network?: string | null; contractId: string; topic?: string | null; limit?: number; cursor?: string | null; order?: 'ASC' | 'DESC' | null },
+      args: {
+        network?: string | null;
+        contractId: string;
+        topic?: string | null;
+        limit?: number;
+        cursor?: string | null;
+        direction?: PaginationDirection | null;
+        order?: 'ASC' | 'DESC' | null;
+      },
       ctx: Context
     ) {
       const limit = getPageSize(args.limit);
       const network = networkArgument(args, ctx);
+      const direction = args.direction ?? 'FORWARD';
       const items = await getEventsByContract(ctx.pool, {
         network: network.name,
         contractId: args.contractId,
         topic: args.topic ?? null,
         limit,
         cursor: args.cursor ?? null,
+        direction,
         order: args.order ?? 'DESC',
       });
-      return { items, pageInfo: pageInfo(KEYSETS.events, items, limit, event => [event.ledger, event.id]) };
+      return {
+        items,
+        pageInfo: pageInfo(
+          KEYSETS.events,
+          items,
+          limit,
+          event => [event.ledger, event.id],
+          direction,
+          Boolean(args.cursor)
+        ),
+      };
     },
 
     async contractStorageEntries(
@@ -302,11 +365,13 @@ export const resolvers = {
         keyPrefix?: string | null;
         limit?: number;
         cursor?: string | null;
+        direction?: PaginationDirection | null;
       },
       ctx: Context
     ) {
       const limit = getPageSize(args.limit);
       const network = networkArgument(args, ctx);
+      const direction = args.direction ?? 'FORWARD';
       const items = await getContractStorageEntries(ctx.pool, {
         network: network.name,
         contractId: args.contractId,
@@ -314,12 +379,19 @@ export const resolvers = {
         keyPrefix: args.keyPrefix ?? null,
         limit,
         cursor: args.cursor ?? null,
+        direction,
       });
+      const first = items.at(0);
+      const last = items.at(-1);
+      const isFullPage = items.length === limit;
       return {
         items,
         pageInfo: {
-          hasNextPage: items.length === limit,
-          cursor: items.at(-1)?.key ?? null,
+          hasNextPage: direction === 'FORWARD' ? isFullPage : Boolean(args.cursor),
+          hasPreviousPage: direction === 'FORWARD' ? Boolean(args.cursor) : isFullPage,
+          startCursor: first?.key ?? null,
+          endCursor: last?.key ?? null,
+          cursor: last?.key ?? null,
         },
       };
     },
@@ -355,13 +427,24 @@ export const resolvers = {
 
     async ledgers(
       _: unknown,
-      args: { network?: string | null; limit?: number; cursor?: string | null },
+      args: { network?: string | null; limit?: number; cursor?: string | null; direction?: PaginationDirection | null },
       ctx: Context
     ) {
       const network = networkArgument(args, ctx);
       const limit = args.limit ?? DEFAULT_PAGE_LIMIT;
-      const items = await getLedgers(ctx.pool, network.name, limit, args.cursor ?? null);
-      return { items, pageInfo: pageInfo(KEYSETS.ledgers, items, limit, ledger => ledger.sequence) };
+      const direction = args.direction ?? 'FORWARD';
+      const items = await getLedgers(ctx.pool, network.name, limit, args.cursor ?? null, direction);
+      return {
+        items,
+        pageInfo: pageInfo(
+          KEYSETS.ledgers,
+          items,
+          limit,
+          ledger => ledger.sequence,
+          direction,
+          Boolean(args.cursor)
+        ),
+      };
     },
 
     async customEvents(
@@ -373,12 +456,14 @@ export const resolvers = {
         where?: CustomEventFilter[] | null;
         limit?: number;
         cursor?: string | null;
+        direction?: PaginationDirection | null;
         order?: 'ASC' | 'DESC' | null;
       },
       ctx: Context
     ) {
       const limit = getPageSize(args.limit);
       const network = networkArgument(args, ctx);
+      const direction = args.direction ?? 'FORWARD';
       const items = await getCustomEvents(ctx.pool, {
         network: network.name,
         contractId: args.contractId,
@@ -386,11 +471,22 @@ export const resolvers = {
         where: args.where ?? null,
         limit,
         cursor: args.cursor ?? null,
+        direction,
         order: args.order ?? 'DESC',
       });
       // The sort key is (ledger, eventId): the id alone is not unique within a
       // ledger, so keysetting on it would skip and repeat rows.
-      return { items, pageInfo: pageInfo(KEYSETS.customEvents, items, limit, event => [event.ledger, event.eventId]) };
+      return {
+        items,
+        pageInfo: pageInfo(
+          KEYSETS.customEvents,
+          items,
+          limit,
+          event => [event.ledger, event.eventId],
+          direction,
+          Boolean(args.cursor)
+        ),
+      };
     },
 
     async contractSchema(
