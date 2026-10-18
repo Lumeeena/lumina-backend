@@ -94,6 +94,74 @@ type Query {
   ): Account
 
   """
+  Query asset statistics (Issue #7).
+  """
+  asset(
+    """Network to read; defaults to the primary network configured for this deployment."""
+    network: Network
+    code: String!
+    issuer: String!
+  ): AssetStats
+
+  """
+  List all indexed assets with holder counts and volume (Issue #7).
+  """
+  assets(
+    """Network to read; defaults to the primary network configured for this deployment."""
+    network: Network
+    limit: Int = 20
+    cursor: String
+    sortBy: AssetSortField = HOLDERS
+  ): AssetStatsPage!
+
+  """
+  Get trustline change history for an asset (Issue #7).
+  """
+  trustlineHistory(
+    """Network to read; defaults to the primary network configured for this deployment."""
+    network: Network
+    code: String!
+    issuer: String!
+    limit: Int = 20
+    cursor: String
+  ): [TrustlineChange!]!
+
+  """
+  Query contract storage state (Issue #9).
+  """
+  contractStorage(
+    """Network to read; defaults to the primary network configured for this deployment."""
+    network: Network
+    contractId: String!
+    key: JSON!
+  ): ContractStorageEntry
+
+  """
+  List all storage entries for a contract (Issue #9).
+  """
+  contractStorageEntries(
+    """Network to read; defaults to the primary network configured for this deployment."""
+    network: Network
+    contractId: String!
+    limit: Int = 100
+    cursor: String
+  ): ContractStorageEntryPage!
+
+  """
+  Get export job status (Issue #10).
+  """
+  exportJob(
+    """Network to read; defaults to the primary network configured for this deployment."""
+    network: Network
+    id: String!
+  ): ExportJob
+
+  """
+  Get API usage stats for the authenticated key (Issue #8).
+  """
+  myUsage(hours: Int = 24): UsageStats!
+
+  """
   List indexed accounts, most recently active first.
 
   ## Only accounts the indexer has seen are here
@@ -1087,4 +1155,115 @@ type BalanceSnapshot {
   Operation ID that caused this balance change.
   """
   operationId: String!
+}
+
+
+"""Asset analytics statistics (Issue #7)."""
+type AssetStats {
+  code: String!
+  issuer: String!
+  holderCount: Int!
+  circulatingSupply: String
+  volume24h: String
+  firstSeenLedger: Int!
+  lastActivityLedger: Int!
+}
+
+"""Paginated asset stats results."""
+type AssetStatsPage {
+  data: [AssetStats!]!
+  cursor: String
+  hasMore: Boolean!
+}
+
+"""Field to sort assets by."""
+enum AssetSortField {
+  HOLDERS
+  VOLUME
+  ACTIVITY
+}
+
+"""Trustline change event (Issue #7)."""
+type TrustlineChange {
+  accountAddress: String!
+  assetCode: String!
+  assetIssuer: String!
+  operationId: String!
+  ledgerSequence: Int!
+  limitBefore: String
+  limitAfter: String!
+  changedAt: String!
+}
+
+"""Contract storage entry (Issue #9)."""
+type ContractStorageEntry {
+  contractId: String!
+  storageKey: JSON!
+  storageValue: JSON!
+  durability: StorageDurability!
+  lastChangedLedger: Int!
+}
+
+"""Paginated contract storage entries."""
+type ContractStorageEntryPage {
+  data: [ContractStorageEntry!]!
+  cursor: String
+  hasMore: Boolean!
+}
+
+"""Storage durability type."""
+enum StorageDurability {
+  TEMPORARY
+  PERSISTENT
+  INSTANCE
+}
+
+"""Export job (Issue #10)."""
+type ExportJob {
+  id: String!
+  status: ExportStatus!
+  format: ExportFormat!
+  outputLocation: String
+  rowCount: Int
+  errorMessage: String
+  createdAt: String!
+  completedAt: String
+}
+
+"""Export job status."""
+enum ExportStatus {
+  PENDING
+  RUNNING
+  COMPLETE
+  FAILED
+}
+
+"""Export format."""
+enum ExportFormat {
+  CSV
+  PARQUET
+}
+
+"""API usage statistics (Issue #8)."""
+type UsageStats {
+  requests: Int!
+  avgResponseTime: Float!
+  rateLimit: Int
+  remainingQuota: Int
+}
+
+"""Request bulk data export (Issue #10)."""
+type Mutation {
+  requestExport(
+    network: Network
+    filter: ExportFilter!
+  ): ExportJob!
+}
+
+"""Export filter input."""
+input ExportFilter {
+  table: String!
+  fromLedger: Int
+  toLedger: Int
+  format: ExportFormat = CSV
 }
