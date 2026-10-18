@@ -94,6 +94,45 @@ export interface HorizonLatestLedger {
   operation_count: number;
 }
 
+export interface HorizonTradePrice {
+  n: number | string;
+  d: number | string;
+}
+
+export interface HorizonTrade {
+  id: string;
+  paging_token: string;
+  ledger_close_time: string;
+  trade_type?: string;
+  base_offer_id?: string;
+  base_account: string;
+  base_amount: string;
+  base_asset_type: string;
+  base_asset_code?: string;
+  base_asset_issuer?: string;
+  counter_offer_id?: string;
+  counter_account?: string;
+  counter_amount: string;
+  counter_asset_type: string;
+  counter_asset_code?: string;
+  counter_asset_issuer?: string;
+  base_is_seller?: boolean;
+  price?: HorizonTradePrice;
+}
+
+export interface HorizonTradesFilter {
+  cursor?: string;
+  order?: 'asc' | 'desc';
+  limit?: number;
+  base_asset_type?: string;
+  base_asset_code?: string;
+  base_asset_issuer?: string;
+  counter_asset_type?: string;
+  counter_asset_code?: string;
+  counter_asset_issuer?: string;
+  offer_id?: string;
+}
+
 interface HorizonPage<T> {
   _embedded: { records: T[] };
   _links: { next?: { href: string } };
@@ -145,6 +184,7 @@ export interface HorizonClient {
     baseUrl?: string
   ): Promise<HorizonTransaction[]>;
   getLatestLedger(baseUrl?: string): Promise<HorizonLatestLedger | null>;
+  getTrades(params?: HorizonTradesFilter, baseUrl?: string): Promise<HorizonTrade[]>;
 }
 
 const DEFAULT_MIN_INTERVAL_MS = 100;
@@ -317,6 +357,24 @@ export function createHorizonClient(options: HorizonClientOptions = {}): Horizon
         'null'
       );
       return page?._embedded?.records?.[0] ?? null;
+    },
+
+    async getTrades(params: HorizonTradesFilter = {}, baseUrl?: string): Promise<HorizonTrade[]> {
+      const q = new URLSearchParams();
+      if (params.cursor) q.set('cursor', params.cursor);
+      if (params.order) q.set('order', params.order);
+      if (params.limit) q.set('limit', String(params.limit));
+      if (params.base_asset_type) q.set('base_asset_type', params.base_asset_type);
+      if (params.base_asset_code) q.set('base_asset_code', params.base_asset_code);
+      if (params.base_asset_issuer) q.set('base_asset_issuer', params.base_asset_issuer);
+      if (params.counter_asset_type) q.set('counter_asset_type', params.counter_asset_type);
+      if (params.counter_asset_code) q.set('counter_asset_code', params.counter_asset_code);
+      if (params.counter_asset_issuer) q.set('counter_asset_issuer', params.counter_asset_issuer);
+      if (params.offer_id) q.set('offer_id', params.offer_id);
+      const qs = q.toString();
+      const path = `/trades${qs ? `?${qs}` : ''}`;
+      const page = await request<HorizonPage<HorizonTrade>>(url(path, baseUrl), 'null');
+      return page?._embedded?.records ?? [];
     },
   };
 }

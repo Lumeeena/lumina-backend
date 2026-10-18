@@ -17,6 +17,9 @@ import {
   type HorizonLedger,
   type HorizonOperation,
   type HorizonTransaction,
+  type HorizonTrade,
+  type HorizonTradePrice,
+  type HorizonTradesFilter,
 } from '@lumina/shared';
 import {
   horizonRequestDuration,
@@ -141,8 +144,7 @@ export function getLedgerTransactions(
   sequence: number,
   purpose: RequestPurpose = 'tip'
 ): Promise<HorizonTransaction[]> {
-  return client.getLedgerTransactions(sequence, horizonUrl, purpose);
-}
+  return client.getLedgerTransactions(sequence, horizonUrl);
 }
 
 export function getLedgerOperations(
@@ -150,12 +152,19 @@ export function getLedgerOperations(
   sequence: number,
   purpose: RequestPurpose = 'tip'
 ): Promise<HorizonOperation[]> {
-  return client.getLedgerOperations(sequence, horizonUrl, purpose);
-}
+  return client.getLedgerOperations(sequence, horizonUrl);
 }
 
 /** `null` for accounts that don't exist or have been merged away. */
 export function getAccount(horizonUrl: string, address: string): Promise<HorizonAccount | null> {
   return client.getAccount(address, horizonUrl);
 }
+
+export function getTrades(
+  horizonUrl: string,
+  params?: HorizonTradesFilter
+): Promise<HorizonTrade[]> {
+  return client.getTrades(params, horizonUrl);
 }
+
+export type { HorizonTrade, HorizonTradePrice, HorizonTradesFilter };

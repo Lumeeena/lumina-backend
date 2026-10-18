@@ -49,6 +49,8 @@ import {
   markContractStorageEntriesArchived,
   recordContractStorageHistory,
   upsertContractStorageEntries,
+  insertTrades,
+  getLatestTradePagingToken,
 } from './db';
 import { decodeEvents } from './customDecode';
 import { loadConfig } from './config';
@@ -83,7 +85,7 @@ import {
 } from './retention';
 import { initErrorTracking, captureException, shutdownErrorTracking } from './errorTracking';
 import { getRetentionInfo, getContractStorageEntries } from './soroban';
-import { getLatestLedgerSequence, getLedger, getLedgerOperations, getLedgerTransactions, initializeHorizonClient } from './horizon';
+import { getLatestLedgerSequence, getLedger, getLedgerOperations, getLedgerTransactions, getTrades, initializeHorizonClient } from './horizon';
 import type { RequestPurpose } from './throttle';
 import { getActiveContracts, resolveRegistryConfigs, type RegistryConfig } from './registry';
 import { getEvents, getLatestLedgerSequence as getLatestRpcLedgerSequence, type ContractEvent } from './soroban';
@@ -192,6 +194,7 @@ interface NetworkLoop {
   state: NetworkState;
   cursor: number;
   eventsCursor: number;
+  tradesCursor: string;
   loopTick: number;
   discoveredContractIds: string[];
   accountCache: Map<string, number>;
@@ -228,6 +231,7 @@ function createLoop(network: NetworkConfig, registries: Map<string, RegistryConf
     },
     cursor: 0,
     eventsCursor: 0,
+    tradesCursor: '',
     loopTick: 0,
     discoveredContractIds: [],
     accountCache: new Map<string, number>(),
@@ -582,6 +586,37 @@ async function pollContractStorage(loop: NetworkLoop): Promise<void> {
   }
 }
 
+/**
+ * Ingests executed trades from Horizon's /trades endpoint.
+ * Trades are where price discovery happens and cannot be inferred reliably
+ * from operations alone because a single path payment or DEX operation
+ * can cross multiple offers and produce multiple trade records.
+ */
+export async function pollTrades(loop: NetworkLoop): Promise<void> {
+  const name = loop.network.name;
+  try {
+    if (!loop.tradesCursor) {
+      const dbCursor = await getLatestTradePagingToken(pool, name);
+      if (dbCursor) {
+        loop.tradesCursor = dbCursor;
+      }
+    }
+    const trades = await getTrades(loop.network.horizonUrl, {
+      cursor: loop.tradesCursor || undefined,
+      order: 'asc',
+      limit: 200,
+    });
+    if (trades.length > 0) {
+      await insertTrades(pool, name, trades);
+      loop.tradesCursor = trades[trades.length - 1].paging_token;
+      routine.success({ network: name, count: trades.length }, 'trades indexed');
+    }
+  } catch (err) {
+    indexingErrors.inc({ loop: 'trades' });
+    log.error({ network: name, err: message(err) }, 'trades polling failed');
+  }
+}
+
 /** Run one network's polling loop until the process shuts down. */
 async function runNetworkLoop(loop: NetworkLoop): Promise<void> {
   const name = loop.network.name;
@@ -643,6 +678,7 @@ async function runNetworkLoop(loop: NetworkLoop): Promise<void> {
       if (isShuttingDown) break;
       await pollContractEvents(loop);
       await pollContractStorage(loop);
+      await pollTrades(loop);
     } catch (err) {
       indexingErrors.inc({ loop: 'main' });
       log.error({ network: name, err: message(err) }, 'indexer loop error');

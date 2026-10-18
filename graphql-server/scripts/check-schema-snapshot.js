@@ -34,10 +34,12 @@ function baseSnapshot() {
 
   for (const ref of candidates) {
     try {
-      return execFileSync('git', ['show', ref], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
+      const text = execFileSync('git', ['show', ref], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
+      buildSchema(text);
+      return text;
     } catch {
-      // Local checkouts may not have a base ref. Falling back to the committed
-      // snapshot still catches uncommitted schema drift.
+      // Local checkouts may not have a base ref or candidate ref may be invalid.
+      // Falling back to the committed snapshot still catches uncommitted schema drift.
     }
   }
   return read(snapshotPath);

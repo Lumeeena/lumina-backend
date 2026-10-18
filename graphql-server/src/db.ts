@@ -10,7 +10,7 @@
  * would fail a test rather than pass review.
  */
 import { Pool } from 'pg';
-import { cursorCondition, KEYSETS } from './pagination';
+import { cursorCondition, KEYSETS, CountPrecision, type TotalCount } from './pagination';
 
 // ─── Row shapes (snake_case, matching db/schema.sql) ──────────────────────────
 
@@ -729,3 +729,178 @@ export async function getAccountOperationsInLedger(
   );
   return rows.map(mapOperation);
 }
+
+export interface TradeRow {
+  id: string;
+  paging_token: string;
+  ledger_close_time: Date;
+  trade_type: string;
+  base_account: string;
+  base_amount: string;
+  base_asset_type: string;
+  base_asset_code: string | null;
+  base_asset_issuer: string | null;
+  base_offer_id: string | null;
+  counter_account: string | null;
+  counter_amount: string;
+  counter_asset_type: string;
+  counter_asset_code: string | null;
+  counter_asset_issuer: string | null;
+  counter_offer_id: string | null;
+  base_is_seller: boolean | null;
+  price_n: string | null;
+  price_d: string | null;
+  price: string | null;
+  network: string;
+}
+
+export function mapTrade(row: TradeRow) {
+  return {
+    id: row.id,
+    pagingToken: row.paging_token,
+    ledgerCloseTime: row.ledger_close_time.toISOString(),
+    tradeType: row.trade_type,
+    baseAccount: row.base_account,
+    baseAmount: row.base_amount,
+    baseAssetType: row.base_asset_type,
+    baseAssetCode: row.base_asset_code,
+    baseAssetIssuer: row.base_asset_issuer,
+    baseOfferId: row.base_offer_id,
+    counterAccount: row.counter_account,
+    counterAmount: row.counter_amount,
+    counterAssetType: row.counter_asset_type,
+    counterAssetCode: row.counter_asset_code,
+    counterAssetIssuer: row.counter_asset_issuer,
+    counterOfferId: row.counter_offer_id,
+    baseIsSeller: row.base_is_seller,
+    price: row.price,
+    priceNumerator: row.price_n,
+    priceDenominator: row.price_d,
+  };
+}
+
+export interface TradeFilter {
+  baseAsset?: { assetType?: string | null; assetCode?: string | null; assetIssuer?: string | null };
+  counterAsset?: { assetType?: string | null; assetCode?: string | null; assetIssuer?: string | null };
+  account?: string | null;
+  limit?: number;
+  cursor?: string | null;
+}
+
+export async function getTradesFromDb(
+  pool: Pool,
+  network: string,
+  filter: TradeFilter = {}
+) {
+  const limit = Math.min(filter.limit ?? 20, 100);
+  const conditions = ['network = $1'];
+  const params: unknown[] = [network];
+
+  if (filter.account) {
+    params.push(filter.account);
+    const pos = params.length;
+    conditions.push(`(base_account = $${pos} OR counter_account = $${pos})`);
+  }
+
+  if (filter.baseAsset) {
+    if (filter.baseAsset.assetType) {
+      params.push(filter.baseAsset.assetType);
+      conditions.push(`base_asset_type = $${params.length}`);
+    }
+    if (filter.baseAsset.assetCode) {
+      params.push(filter.baseAsset.assetCode);
+      conditions.push(`base_asset_code = $${params.length}`);
+    }
+    if (filter.baseAsset.assetIssuer) {
+      params.push(filter.baseAsset.assetIssuer);
+      conditions.push(`base_asset_issuer = $${params.length}`);
+    }
+  }
+
+  if (filter.counterAsset) {
+    if (filter.counterAsset.assetType) {
+      params.push(filter.counterAsset.assetType);
+      conditions.push(`counter_asset_type = $${params.length}`);
+    }
+    if (filter.counterAsset.assetCode) {
+      params.push(filter.counterAsset.assetCode);
+      conditions.push(`counter_asset_code = $${params.length}`);
+    }
+    if (filter.counterAsset.assetIssuer) {
+      params.push(filter.counterAsset.assetIssuer);
+      conditions.push(`counter_asset_issuer = $${params.length}`);
+    }
+  }
+
+  const cursorClause = cursorCondition(params, KEYSETS.trades, filter.cursor);
+  if (cursorClause) {
+    conditions.push(cursorClause);
+  }
+
+  params.push(limit);
+  const limitPos = params.length;
+
+  const sql = `
+    SELECT * FROM trades
+    WHERE ${conditions.join(' AND ')}
+    ORDER BY ledger_close_time DESC, id DESC
+    LIMIT $${limitPos}
+  `;
+
+  const { rows } = await pool.query<TradeRow>(sql, params);
+  return rows.map(mapTrade);
+}
+
+export async function getTableCountEstimateOrExact(
+  pool: Pool,
+  tableName: string,
+  network: string,
+  options: { whereClause?: string; params?: unknown[]; affordableThreshold?: number } = {}
+): Promise<TotalCount> {
+  const affordableThreshold = options.affordableThreshold ?? 5000;
+  if (options.whereClause && options.whereClause !== 'network = $1') {
+    const sql = `SELECT COUNT(*)::bigint AS count FROM ${tableName} WHERE ${options.whereClause}`;
+    const { rows } = await pool.query<{ count: string }>(sql, options.params ?? [network]);
+    return {
+      value: parseInt(rows[0]?.count ?? '0', 10),
+      precision: CountPrecision.EXACT,
+      isEstimate: false,
+    };
+  }
+
+  if (tableName === 'ledgers') {
+    const { rows } = await pool.query<{ count: string }>(
+      'SELECT COUNT(*)::bigint AS count FROM ledgers WHERE network = $1',
+      [network]
+    );
+    return {
+      value: parseInt(rows[0]?.count ?? '0', 10),
+      precision: CountPrecision.EXACT,
+      isEstimate: false,
+    };
+  }
+
+  const { rows: metaRows } = await pool.query<{ reltuples: string }>(
+    'SELECT reltuples::bigint FROM pg_class WHERE relname = $1',
+    [tableName]
+  );
+  const estimate = parseInt(metaRows[0]?.reltuples ?? '0', 10);
+  if (estimate >= 0 && estimate < affordableThreshold) {
+    const { rows } = await pool.query<{ count: string }>(
+      `SELECT COUNT(*)::bigint AS count FROM ${tableName} WHERE network = $1`,
+      [network]
+    );
+    return {
+      value: parseInt(rows[0]?.count ?? '0', 10),
+      precision: CountPrecision.EXACT,
+      isEstimate: false,
+    };
+  }
+
+  return {
+    value: Math.max(0, estimate),
+    precision: CountPrecision.ESTIMATE,
+    isEstimate: true,
+  };
+}
+
