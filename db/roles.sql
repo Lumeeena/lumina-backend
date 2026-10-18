@@ -191,7 +191,31 @@ BEGIN
       -- Backfill progress tracking
       ('backfill_progress', 'SELECT'),
       ('backfill_progress', 'INSERT'),
-      ('backfill_progress', 'UPDATE')
+      ('backfill_progress', 'UPDATE'),
+      -- Liquidity pools & shares (Issue #201)
+      ('liquidity_pools', 'SELECT'),
+      ('liquidity_pools', 'INSERT'),
+      ('liquidity_pools', 'UPDATE'),
+      ('liquidity_pool_shares', 'SELECT'),
+      ('liquidity_pool_shares', 'INSERT'),
+      ('liquidity_pool_shares', 'UPDATE'),
+      -- Claimable balances & claimants (Issue #202)
+      ('claimable_balances', 'SELECT'),
+      ('claimable_balances', 'INSERT'),
+      ('claimable_balances', 'UPDATE'),
+      ('claimable_balance_claimants', 'SELECT'),
+      ('claimable_balance_claimants', 'INSERT'),
+      ('claimable_balance_claimants', 'UPDATE'),
+      -- Path payments & hops (Issue #206)
+      ('path_payments', 'SELECT'),
+      ('path_payments', 'INSERT'),
+      ('path_payment_hops', 'SELECT'),
+      ('path_payment_hops', 'INSERT'),
+      -- Set options signers & thresholds (Issue #207)
+      ('account_signer_changes', 'SELECT'),
+      ('account_signer_changes', 'INSERT'),
+      ('account_threshold_changes', 'SELECT'),
+      ('account_threshold_changes', 'INSERT')
     ) AS grants(tbl, priv)
   LOOP
     -- Tolerate schema versions where a table does not exist yet.

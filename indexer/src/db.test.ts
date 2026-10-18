@@ -14,6 +14,18 @@ import {
   markContractStorageEntriesArchived,
   upsertAccount,
   upsertContractStorageEntries,
+  processLiquidityPoolOperation,
+  getLiquidityPool,
+  getAccountPoolShares,
+  processClaimableBalanceOperation,
+  getClaimableBalance,
+  getClaimableBalancesForAccount,
+  processPathPaymentOperation,
+  getPathPayment,
+  findPathPaymentsByAsset,
+  processSetOptionsOperation,
+  getSignerChangesForAccount,
+  getThresholdChangesForAccount,
 } from './db';
 import type { ContractStorageEntry } from './soroban';
 import { indexerPoolErrors } from './metrics';
@@ -518,3 +530,461 @@ test('getTrackedContractStorageKeys reads every key for one network, active or a
   assert.doesNotMatch(queries[0]!.sql, /state/);
   assert.deepEqual(queries[0]?.params, ['testnet']);
 });
+
+test('processLiquidityPoolOperation handles deposits and updates pool reserves and account shares', async () => {
+  const executed: { sql: string; params: unknown[] }[] = [];
+  const client = {
+    query: async (sql: string, params: unknown[] = []) => {
+      executed.push({ sql: sql.trim(), params });
+      return { rows: [] };
+    },
+  } as unknown as PoolClient;
+
+  const depositOp = {
+    ...op,
+    id: 'op_lp_1',
+    type: 'liquidity_pool_deposit',
+    liquidity_pool_id: 'pool_abc123',
+    source_account: 'GA_DEPOSITOR',
+    reserves_deposited: [
+      { asset: 'native', amount: '100.0000000' },
+      { asset: { code: 'USDC', issuer: 'GISSUER' }, amount: '50.0000000' },
+    ],
+    shares_received: '70.7106781',
+  };
+
+  await processLiquidityPoolOperation(client, 'mainnet', 500, depositOp);
+
+  assert.equal(executed.length, 2);
+  // Upsert pool
+  assert.match(executed[0]!.sql, /INSERT INTO liquidity_pools/);
+  assert.deepEqual(executed[0]!.params, [
+    'pool_abc123',
+    'native',
+    'USDC:GISSUER',
+    '100.0000000',
+    '50.0000000',
+    '70.7106781',
+    500,
+    'mainnet',
+  ]);
+  // Upsert account shares
+  assert.match(executed[1]!.sql, /INSERT INTO liquidity_pool_shares/);
+  assert.deepEqual(executed[1]!.params, [
+    'pool_abc123',
+    'GA_DEPOSITOR',
+    '70.7106781',
+    500,
+    'mainnet',
+  ]);
+});
+
+test('processLiquidityPoolOperation handles withdraws and decrements reserves and shares', async () => {
+  const executed: { sql: string; params: unknown[] }[] = [];
+  const client = {
+    query: async (sql: string, params: unknown[] = []) => {
+      executed.push({ sql: sql.trim(), params });
+      return { rows: [] };
+    },
+  } as unknown as PoolClient;
+
+  const withdrawOp = {
+    ...op,
+    id: 'op_lp_2',
+    type: 'liquidity_pool_withdraw',
+    liquidity_pool_id: 'pool_abc123',
+    source_account: 'GA_DEPOSITOR',
+    reserves_received: [
+      { asset: 'native', amount: '20.0000000' },
+      { asset: { code: 'USDC', issuer: 'GISSUER' }, amount: '10.0000000' },
+    ],
+    shares: '14.1421356',
+  };
+
+  await processLiquidityPoolOperation(client, 'mainnet', 501, withdrawOp);
+
+  assert.equal(executed.length, 2);
+  // Update pool reserves and shares
+  assert.match(executed[0]!.sql, /UPDATE liquidity_pools/);
+  assert.deepEqual(executed[0]!.params, [
+    '20.0000000',
+    '10.0000000',
+    '14.1421356',
+    501,
+    'pool_abc123',
+    'mainnet',
+  ]);
+  // Update account shares
+  assert.match(executed[1]!.sql, /UPDATE liquidity_pool_shares/);
+  assert.deepEqual(executed[1]!.params, [
+    '14.1421356',
+    501,
+    'pool_abc123',
+    'GA_DEPOSITOR',
+    'mainnet',
+  ]);
+});
+
+test('getLiquidityPool and getAccountPoolShares query pool reserves and user shares', async () => {
+  const pool = {
+    query: async (sql: string) => {
+      if (sql.includes('FROM liquidity_pools')) {
+        return {
+          rows: [{
+            pool_id: 'pool_abc123',
+            asset_a: 'native',
+            asset_b: 'USDC:GISSUER',
+            fee_bp: 30,
+            reserve_a: '80.0000000',
+            reserve_b: '40.0000000',
+            total_shares: '56.5685425',
+            last_ledger: '501',
+          }],
+        };
+      }
+      if (sql.includes('FROM liquidity_pool_shares')) {
+        return {
+          rows: [{
+            pool_id: 'pool_abc123',
+            account: 'GA_DEPOSITOR',
+            shares: '56.5685425',
+            last_ledger: '501',
+          }],
+        };
+      }
+      return { rows: [] };
+    },
+  } as unknown as Pool;
+
+  const lp = await getLiquidityPool(pool, 'mainnet', 'pool_abc123');
+  assert.ok(lp);
+  assert.equal(lp.reserve_a, '80.0000000');
+  assert.equal(lp.fee_bp, 30);
+  assert.equal(lp.last_ledger, 501);
+
+  const shares = await getAccountPoolShares(pool, 'mainnet', 'GA_DEPOSITOR');
+  assert.equal(shares.length, 1);
+  assert.equal(shares[0]?.shares, '56.5685425');
+  assert.equal(shares[0]?.account, 'GA_DEPOSITOR');
+});
+
+test('processClaimableBalanceOperation records creation with predicates in queryable form', async () => {
+  const executed: { sql: string; params: unknown[] }[] = [];
+  const client = {
+    query: async (sql: string, params: unknown[] = []) => {
+      executed.push({ sql: sql.trim(), params });
+      return { rows: [] };
+    },
+  } as unknown as PoolClient;
+
+  const createClaimOp = {
+    ...op,
+    id: 'op_cb_1',
+    type: 'create_claimable_balance',
+    balance_id: '00000000balance_123',
+    asset: 'USDC:GISSUER',
+    amount: '250.0000000',
+    sponsor: 'G_SPONSOR',
+    created_at: '2026-02-01T12:00:00Z',
+    claimants: [
+      {
+        destination: 'G_BENEFICIARY_1',
+        predicate: { unconditional: true },
+      },
+      {
+        destination: 'G_BENEFICIARY_2',
+        predicate: { abs_before: '2026-12-31T23:59:59Z' },
+      },
+    ],
+  };
+
+  await processClaimableBalanceOperation(client, 'mainnet', 600, createClaimOp);
+
+  assert.equal(executed.length, 3);
+  // Main claimable balance table
+  assert.match(executed[0]!.sql, /INSERT INTO claimable_balances/);
+  assert.deepEqual(executed[0]!.params, [
+    '00000000balance_123',
+    'USDC:GISSUER',
+    '250.0000000',
+    'G_SPONSOR',
+    JSON.stringify(createClaimOp.claimants),
+    600,
+    '2026-02-01T12:00:00Z',
+    'mainnet',
+  ]);
+
+  // Claimant 1 (unconditional)
+  assert.match(executed[1]!.sql, /INSERT INTO claimable_balance_claimants/);
+  assert.equal(executed[1]!.params[1], 'G_BENEFICIARY_1');
+  assert.equal(executed[1]!.params[2], 'unconditional');
+
+  // Claimant 2 (abs_before)
+  assert.match(executed[2]!.sql, /INSERT INTO claimable_balance_claimants/);
+  assert.equal(executed[2]!.params[1], 'G_BENEFICIARY_2');
+  assert.equal(executed[2]!.params[2], 'abs_before');
+  assert.equal(executed[2]!.params[4], '2026-12-31T23:59:59Z');
+});
+
+test('processClaimableBalanceOperation marks claimable balance as claimed rather than deleting', async () => {
+  const executed: { sql: string; params: unknown[] }[] = [];
+  const client = {
+    query: async (sql: string, params: unknown[] = []) => {
+      executed.push({ sql: sql.trim(), params });
+      return { rows: [] };
+    },
+  } as unknown as PoolClient;
+
+  const claimOp = {
+    ...op,
+    id: 'op_cb_2',
+    type: 'claim_claimable_balance',
+    balance_id: '00000000balance_123',
+    source_account: 'G_BENEFICIARY_1',
+    created_at: '2026-02-02T10:00:00Z',
+  };
+
+  await processClaimableBalanceOperation(client, 'mainnet', 605, claimOp);
+
+  assert.equal(executed.length, 1);
+  assert.match(executed[0]!.sql, /UPDATE claimable_balances/);
+  assert.match(executed[0]!.sql, /SET status = 'claimed'/);
+  assert.deepEqual(executed[0]!.params, [
+    'G_BENEFICIARY_1',
+    '2026-02-02T10:00:00Z',
+    605,
+    '00000000balance_123',
+    'mainnet',
+  ]);
+});
+
+test('getClaimableBalancesForAccount queries claimable balances by claimant destination', async () => {
+  const pool = {
+    query: async () => ({
+      rows: [{
+        balance_id: '00000000balance_123',
+        destination: 'G_BENEFICIARY_1',
+        predicate_type: 'unconditional',
+        asset: 'USDC:GISSUER',
+        amount: '250.0000000',
+        sponsor: 'G_SPONSOR',
+        status: 'unclaimed',
+        created_at: '2026-02-01T12:00:00Z',
+      }],
+    }),
+  } as unknown as Pool;
+
+  const balances = await getClaimableBalancesForAccount(pool, 'mainnet', 'G_BENEFICIARY_1');
+  assert.equal(balances.length, 1);
+  assert.equal(balances[0]?.balance_id, '00000000balance_123');
+  assert.equal(balances[0]?.status, 'unclaimed');
+});
+
+test('processPathPaymentOperation records distinct source/destination amounts and routing path', async () => {
+  const executed: { sql: string; params: unknown[] }[] = [];
+  const client = {
+    query: async (sql: string, params: unknown[] = []) => {
+      executed.push({ sql: sql.trim(), params });
+      return { rows: [] };
+    },
+  } as unknown as PoolClient;
+
+  const pathPaymentOp = {
+    ...op,
+    id: 'op_pp_1',
+    transaction_hash: 'tx_path_99',
+    type: 'path_payment_strict_send',
+    from: 'G_SENDER',
+    to: 'G_RECEIVER',
+    source_asset_type: 'native',
+    source_amount: '100.0000000',
+    dest_asset_type: 'credit_alphanum4',
+    dest_asset_code: 'EURC',
+    dest_asset_issuer: 'G_EURC_ISSUER',
+    dest_amount: '85.5000000',
+    path: [
+      { asset_type: 'credit_alphanum4', asset_code: 'USDC', asset_issuer: 'G_USDC_ISSUER' },
+      { asset_type: 'credit_alphanum4', asset_code: 'XLM_BRIDGE', asset_issuer: 'G_BRIDGE_ISSUER' },
+    ],
+    created_at: '2026-03-01T08:00:00Z',
+  };
+
+  await processPathPaymentOperation(client, 'mainnet', 700, pathPaymentOp);
+
+  // 1 path_payments row + 2 path_payment_hops rows
+  assert.equal(executed.length, 3);
+  assert.match(executed[0]!.sql, /INSERT INTO path_payments/);
+  assert.deepEqual(executed[0]!.params, [
+    'op_pp_1',
+    'tx_path_99',
+    700,
+    'mainnet',
+    'strict_send',
+    'G_SENDER',
+    'G_RECEIVER',
+    'native',
+    '100.0000000',
+    'EURC:G_EURC_ISSUER',
+    '85.5000000',
+    ['USDC:G_USDC_ISSUER', 'XLM_BRIDGE:G_BRIDGE_ISSUER'],
+    2,
+    '2026-03-01T08:00:00Z',
+  ]);
+
+  assert.match(executed[1]!.sql, /INSERT INTO path_payment_hops/);
+  assert.deepEqual(executed[1]!.params, ['op_pp_1', 0, 'USDC:G_USDC_ISSUER', 'mainnet']);
+  assert.deepEqual(executed[2]!.params, ['op_pp_1', 1, 'XLM_BRIDGE:G_BRIDGE_ISSUER', 'mainnet']);
+});
+
+test('findPathPaymentsByAsset finds payments that routed through an intermediate asset', async () => {
+  const pool = {
+    query: async (_sql: string, params: unknown[] = []) => {
+      assert.equal(params[1], 'USDC:G_USDC_ISSUER');
+      return {
+        rows: [{
+          operation_id: 'op_pp_1',
+          transaction_hash: 'tx_path_99',
+          payment_type: 'strict_send',
+          source_asset: 'native',
+          dest_asset: 'EURC:G_EURC_ISSUER',
+          path_assets: ['USDC:G_USDC_ISSUER', 'XLM_BRIDGE:G_BRIDGE_ISSUER'],
+          created_at: '2026-03-01T08:00:00Z',
+        }],
+      };
+    },
+  } as unknown as Pool;
+
+  const payments = await findPathPaymentsByAsset(pool, 'mainnet', 'USDC:G_USDC_ISSUER');
+  assert.equal(payments.length, 1);
+  assert.equal(payments[0]?.operation_id, 'op_pp_1');
+  assert.deepEqual(payments[0]?.path_assets, ['USDC:G_USDC_ISSUER', 'XLM_BRIDGE:G_BRIDGE_ISSUER']);
+});
+
+test('processSetOptionsOperation records signer additions, removals, and threshold changes', async () => {
+  const executed: { sql: string; params: unknown[] }[] = [];
+  const client = {
+    query: async (sql: string, params: unknown[] = []) => {
+      executed.push({ sql: sql.trim(), params });
+      return { rows: [] };
+    },
+  } as unknown as PoolClient;
+
+  // 1. Signer addition with thresholds
+  const setOptionsAdd = {
+    ...op,
+    id: 'op_opt_1',
+    transaction_hash: 'tx_opt_1',
+    type: 'set_options',
+    source_account: 'G_SIGNER_ACCOUNT',
+    signer_key: 'G_NEW_SIGNER_KEY',
+    signer_weight: 10,
+    master_key_weight: 20,
+    low_threshold: 10,
+    med_threshold: 20,
+    high_threshold: 30,
+    home_domain: 'lumina.network',
+    set_flags_s: ['auth_required'],
+    created_at: '2026-04-01T15:00:00Z',
+  };
+
+  await processSetOptionsOperation(client, 'mainnet', 800, setOptionsAdd);
+
+  assert.equal(executed.length, 2);
+  // Signer change
+  assert.match(executed[0]!.sql, /INSERT INTO account_signer_changes/);
+  assert.deepEqual(executed[0]!.params, [
+    'G_SIGNER_ACCOUNT',
+    'op_opt_1',
+    'tx_opt_1',
+    800,
+    'mainnet',
+    'G_NEW_SIGNER_KEY',
+    10,
+    'added',
+    '2026-04-01T15:00:00Z',
+  ]);
+
+  // Threshold change
+  assert.match(executed[1]!.sql, /INSERT INTO account_threshold_changes/);
+  assert.deepEqual(executed[1]!.params, [
+    'G_SIGNER_ACCOUNT',
+    'op_opt_1',
+    'tx_opt_1',
+    800,
+    'mainnet',
+    20,
+    10,
+    20,
+    30,
+    'lumina.network',
+    ['auth_required'],
+    null,
+    '2026-04-01T15:00:00Z',
+  ]);
+
+  // 2. Signer removal (weight 0)
+  executed.length = 0;
+  const setOptionsRemove = {
+    ...op,
+    id: 'op_opt_2',
+    transaction_hash: 'tx_opt_2',
+    type: 'set_options',
+    source_account: 'G_SIGNER_ACCOUNT',
+    signer_key: 'G_OLD_SIGNER_KEY',
+    signer_weight: 0,
+    created_at: '2026-04-02T11:00:00Z',
+  };
+
+  await processSetOptionsOperation(client, 'mainnet', 801, setOptionsRemove);
+
+  assert.equal(executed.length, 1);
+  assert.match(executed[0]!.sql, /INSERT INTO account_signer_changes/);
+  assert.equal(executed[0]!.params[7], 'removed');
+});
+
+test('getSignerChangesForAccount and getThresholdChangesForAccount query account security history', async () => {
+  const pool = {
+    query: async (sql: string) => {
+      if (sql.includes('FROM account_signer_changes')) {
+        return {
+          rows: [{
+            id: '1',
+            account: 'G_SIGNER_ACCOUNT',
+            operation_id: 'op_opt_1',
+            signer_key: 'G_NEW_SIGNER_KEY',
+            weight: 10,
+            action: 'added',
+            created_at: '2026-04-01T15:00:00Z',
+          }],
+        };
+      }
+      if (sql.includes('FROM account_threshold_changes')) {
+        return {
+          rows: [{
+            id: '1',
+            account: 'G_SIGNER_ACCOUNT',
+            operation_id: 'op_opt_1',
+            master_weight: 20,
+            low_threshold: 10,
+            med_threshold: 20,
+            high_threshold: 30,
+            home_domain: 'lumina.network',
+            created_at: '2026-04-01T15:00:00Z',
+          }],
+        };
+      }
+      return { rows: [] };
+    },
+  } as unknown as Pool;
+
+  const signers = await getSignerChangesForAccount(pool, 'mainnet', 'G_SIGNER_ACCOUNT');
+  assert.equal(signers.length, 1);
+  assert.equal(signers[0]?.signer_key, 'G_NEW_SIGNER_KEY');
+  assert.equal(signers[0]?.action, 'added');
+
+  const thresholds = await getThresholdChangesForAccount(pool, 'mainnet', 'G_SIGNER_ACCOUNT');
+  assert.equal(thresholds.length, 1);
+  assert.equal(thresholds[0]?.low_threshold, 10);
+  assert.equal(thresholds[0]?.home_domain, 'lumina.network');
+});
+

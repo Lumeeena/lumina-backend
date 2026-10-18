@@ -369,6 +369,12 @@ export async function indexLedger(
 
       // Process asset-related operations for trustlines, assets, and volume tracking
       await processAssetOperation(client, network, ledger.sequence, op);
+
+      // Process liquidity pools, claimable balances, path payments, and set_options operations
+      await processLiquidityPoolOperation(client, network, ledger.sequence, op);
+      await processClaimableBalanceOperation(client, network, ledger.sequence, op);
+      await processPathPaymentOperation(client, network, ledger.sequence, op);
+      await processSetOptionsOperation(client, network, ledger.sequence, op);
     }
 
     if (accountAddresses.length > 0) {
@@ -1083,4 +1089,560 @@ export async function getLatestTradePagingToken(
   );
   return rows[0]?.paging_token ?? null;
 }
+
+// ─── Helpers ──────────────────────────────────────────────────────────────────
+
+function formatAsset(obj: any): string {
+  if (!obj) return 'native';
+  if (typeof obj === 'string') return obj;
+  if (obj.asset_type === 'native' || obj.asset === 'native') return 'native';
+  const code = obj.asset_code || obj.code;
+  const issuer = obj.asset_issuer || obj.issuer;
+  if (code && issuer) return `${code}:${issuer}`;
+  if (obj.asset) return obj.asset;
+  return 'native';
+}
+
+function formatAssetFromPrefix(op: any, prefix: string): string {
+  const assetType = op[`${prefix}asset_type`];
+  if (assetType === 'native') return 'native';
+  const code = op[`${prefix}asset_code`];
+  const issuer = op[`${prefix}asset_issuer`];
+  if (code && issuer) return `${code}:${issuer}`;
+  if (op[`${prefix}asset`]) return op[`${prefix}asset`];
+  return 'native';
+}
+
+// ─── Liquidity Pools (Issue #201) ─────────────────────────────────────────────
+
+export async function processLiquidityPoolOperation(
+  client: PoolClient,
+  network: string,
+  ledger: number,
+  operation: HorizonOperation
+): Promise<void> {
+  const opType = operation.type;
+  if (opType !== 'liquidity_pool_deposit' && opType !== 'liquidity_pool_withdraw') {
+    return;
+  }
+
+  const poolId = (operation.liquidity_pool_id as string) || '';
+  if (!poolId) return;
+
+  if (opType === 'liquidity_pool_deposit') {
+    const reserves = (operation.reserves_deposited as Array<{ asset: any; amount: string }>) ||
+      (operation.reserves_max as Array<{ asset: any; amount: string }>) || [];
+    const assetA = reserves[0] ? formatAsset(reserves[0].asset) : ((operation.asset_a as string) || 'native');
+    const amountA = reserves[0] ? reserves[0].amount : ((operation.amount_a as string) || (operation.max_amount_a as string) || '0');
+    const assetB = reserves[1] ? formatAsset(reserves[1].asset) : ((operation.asset_b as string) || 'unknown');
+    const amountB = reserves[1] ? reserves[1].amount : ((operation.amount_b as string) || (operation.max_amount_b as string) || '0');
+    const sharesReceived = (operation.shares_received as string) || (operation.shares as string) || '0';
+    const account = operation.source_account;
+
+    await client.query(
+      `INSERT INTO liquidity_pools (pool_id, asset_a, asset_b, fee_bp, reserve_a, reserve_b, total_shares, last_ledger, network, updated_at)
+       VALUES ($1, $2, $3, 30, $4::numeric, $5::numeric, $6::numeric, $7, $8, NOW())
+       ON CONFLICT (pool_id, network) DO UPDATE SET
+         reserve_a = liquidity_pools.reserve_a + EXCLUDED.reserve_a,
+         reserve_b = liquidity_pools.reserve_b + EXCLUDED.reserve_b,
+         total_shares = liquidity_pools.total_shares + EXCLUDED.total_shares,
+         last_ledger = EXCLUDED.last_ledger,
+         updated_at = NOW()`,
+      [poolId, assetA, assetB, amountA, amountB, sharesReceived, ledger, network]
+    );
+
+    await client.query(
+      `INSERT INTO liquidity_pool_shares (pool_id, account, shares, last_ledger, network, updated_at)
+       VALUES ($1, $2, $3::numeric, $4, $5, NOW())
+       ON CONFLICT (pool_id, account, network) DO UPDATE SET
+         shares = liquidity_pool_shares.shares + EXCLUDED.shares,
+         last_ledger = EXCLUDED.last_ledger,
+         updated_at = NOW()`,
+      [poolId, account, sharesReceived, ledger, network]
+    );
+  } else if (opType === 'liquidity_pool_withdraw') {
+    const reserves = (operation.reserves_received as Array<{ asset: any; amount: string }>) ||
+      (operation.reserves_min as Array<{ asset: any; amount: string }>) || [];
+    const amountA = reserves[0] ? reserves[0].amount : ((operation.amount_a as string) || (operation.min_amount_a as string) || '0');
+    const amountB = reserves[1] ? reserves[1].amount : ((operation.amount_b as string) || (operation.min_amount_b as string) || '0');
+    const sharesBurned = (operation.shares as string) || '0';
+    const account = operation.source_account;
+
+    await client.query(
+      `UPDATE liquidity_pools
+       SET reserve_a = GREATEST(0, reserve_a - $1::numeric),
+           reserve_b = GREATEST(0, reserve_b - $2::numeric),
+           total_shares = GREATEST(0, total_shares - $3::numeric),
+           last_ledger = $4,
+           updated_at = NOW()
+       WHERE pool_id = $5 AND network = $6`,
+      [amountA, amountB, sharesBurned, ledger, poolId, network]
+    );
+
+    await client.query(
+      `UPDATE liquidity_pool_shares
+       SET shares = GREATEST(0, shares - $1::numeric),
+           last_ledger = $2,
+           updated_at = NOW()
+       WHERE pool_id = $3 AND account = $4 AND network = $5`,
+      [sharesBurned, ledger, poolId, account, network]
+    );
+  }
+}
+
+export async function getLiquidityPool(
+  pool: Pool,
+  network: string,
+  poolId: string
+): Promise<{
+  pool_id: string;
+  asset_a: string;
+  asset_b: string;
+  fee_bp: number;
+  reserve_a: string;
+  reserve_b: string;
+  total_shares: string;
+  last_ledger: number;
+} | null> {
+  const { rows } = await pool.query(
+    `SELECT pool_id, asset_a, asset_b, fee_bp, reserve_a, reserve_b, total_shares, last_ledger
+     FROM liquidity_pools
+     WHERE pool_id = $1 AND network = $2`,
+    [poolId, network]
+  );
+  if (!rows[0]) return null;
+  return {
+    ...rows[0],
+    fee_bp: Number(rows[0].fee_bp),
+    last_ledger: Number(rows[0].last_ledger),
+  };
+}
+
+export async function getAccountPoolShares(
+  pool: Pool,
+  network: string,
+  account: string
+): Promise<Array<{
+  pool_id: string;
+  account: string;
+  shares: string;
+  last_ledger: number;
+}>> {
+  const { rows } = await pool.query(
+    `SELECT pool_id, account, shares, last_ledger
+     FROM liquidity_pool_shares
+     WHERE account = $1 AND network = $2 AND shares > 0
+     ORDER BY updated_at DESC`,
+    [account, network]
+  );
+  return rows.map(r => ({
+    ...r,
+    last_ledger: Number(r.last_ledger),
+  }));
+}
+
+// ─── Claimable Balances (Issue #202) ──────────────────────────────────────────
+
+export async function processClaimableBalanceOperation(
+  client: PoolClient,
+  network: string,
+  ledger: number,
+  operation: HorizonOperation
+): Promise<void> {
+  const opType = operation.type;
+  if (opType !== 'create_claimable_balance' && opType !== 'claim_claimable_balance') {
+    return;
+  }
+
+  const balanceId = (operation.balance_id as string) || (operation.claimable_balance_id as string) || operation.id;
+  if (!balanceId) return;
+
+  if (opType === 'create_claimable_balance') {
+    const asset = formatAsset(operation);
+    const amount = (operation.amount as string) || '0';
+    const sponsor = (operation.sponsor as string) || operation.source_account;
+    const claimants = (operation.claimants as Array<{ destination: string; predicate?: Record<string, unknown> }>) || [];
+
+    await client.query(
+      `INSERT INTO claimable_balances (balance_id, asset, amount, sponsor, claimants, status, created_ledger, created_at, network)
+       VALUES ($1, $2, $3::numeric, $4, $5, 'unclaimed', $6, $7, $8)
+       ON CONFLICT (balance_id, network) DO NOTHING`,
+      [balanceId, asset, amount, sponsor, JSON.stringify(claimants), ledger, operation.created_at, network]
+    );
+
+    for (const claimant of claimants) {
+      const dest = claimant.destination;
+      const pred = claimant.predicate || {};
+      let predicateType = 'unconditional';
+      let absBefore: string | null = null;
+      let relBefore: string | null = null;
+
+      if (pred.abs_before) {
+        predicateType = 'abs_before';
+        absBefore = String(pred.abs_before);
+      } else if (pred.abs_before_epoch) {
+        predicateType = 'abs_before';
+        absBefore = new Date(Number(pred.abs_before_epoch) * 1000).toISOString();
+      } else if (pred.rel_before != null) {
+        predicateType = 'rel_before';
+        relBefore = String(pred.rel_before);
+      } else if (pred.unconditional) {
+        predicateType = 'unconditional';
+      } else if (pred.and || pred.or || pred.not) {
+        predicateType = 'compound';
+      }
+
+      await client.query(
+        `INSERT INTO claimable_balance_claimants (balance_id, destination, predicate_type, predicate_details, abs_before, rel_before, network)
+         VALUES ($1, $2, $3, $4, $5::timestamptz, $6::bigint, $7)
+         ON CONFLICT (balance_id, destination, network) DO NOTHING`,
+        [balanceId, dest, predicateType, JSON.stringify(pred), absBefore, relBefore, network]
+      );
+    }
+  } else if (opType === 'claim_claimable_balance') {
+    const claimant = (operation.claimant as string) || operation.source_account;
+
+    await client.query(
+      `UPDATE claimable_balances
+       SET status = 'claimed',
+           claimed_by = $1,
+           claimed_at = $2,
+           claimed_ledger = $3
+       WHERE balance_id = $4 AND network = $5`,
+      [claimant, operation.created_at, ledger, balanceId, network]
+    );
+  }
+}
+
+export async function getClaimableBalance(
+  pool: Pool,
+  network: string,
+  balanceId: string
+): Promise<{
+  balance_id: string;
+  asset: string;
+  amount: string;
+  sponsor: string | null;
+  status: string;
+  claimed_by: string | null;
+  claimed_at: string | null;
+  created_ledger: number;
+  created_at: string;
+} | null> {
+  const { rows } = await pool.query(
+    `SELECT balance_id, asset, amount, sponsor, status, claimed_by, claimed_at, created_ledger, created_at
+     FROM claimable_balances
+     WHERE balance_id = $1 AND network = $2`,
+    [balanceId, network]
+  );
+  if (!rows[0]) return null;
+  return {
+    ...rows[0],
+    created_ledger: Number(rows[0].created_ledger),
+  };
+}
+
+export async function getClaimableBalancesForAccount(
+  pool: Pool,
+  network: string,
+  account: string,
+  status?: string
+): Promise<Array<{
+  balance_id: string;
+  destination: string;
+  predicate_type: string;
+  asset: string;
+  amount: string;
+  sponsor: string | null;
+  status: string;
+  created_at: string;
+}>> {
+  let query = `
+    SELECT cb.balance_id, cbc.destination, cbc.predicate_type, cb.asset, cb.amount, cb.sponsor, cb.status, cb.created_at
+    FROM claimable_balances cb
+    JOIN claimable_balance_claimants cbc
+      ON cb.balance_id = cbc.balance_id AND cb.network = cbc.network
+    WHERE cbc.destination = $1 AND cb.network = $2
+  `;
+  const params: unknown[] = [account, network];
+  if (status) {
+    query += ` AND cb.status = $3`;
+    params.push(status);
+  }
+  query += ` ORDER BY cb.created_at DESC`;
+
+  const { rows } = await pool.query(query, params);
+  return rows;
+}
+
+// ─── Path Payments (Issue #206) ───────────────────────────────────────────────
+
+export async function processPathPaymentOperation(
+  client: PoolClient,
+  network: string,
+  ledger: number,
+  operation: HorizonOperation
+): Promise<void> {
+  const opType = operation.type;
+  if (opType !== 'path_payment_strict_send' && opType !== 'path_payment_strict_receive') {
+    return;
+  }
+
+  const fromAccount = (operation.from as string) || operation.source_account;
+  const toAccount = (operation.to as string) || '';
+  const isSend = opType === 'path_payment_strict_send';
+  const paymentType = isSend ? 'strict_send' : 'strict_receive';
+
+  const sourceAsset = formatAssetFromPrefix(operation, 'source_');
+  const destAsset = formatAssetFromPrefix(operation, 'dest_') !== 'native' || operation['dest_asset_type']
+    ? formatAssetFromPrefix(operation, 'dest_')
+    : formatAsset(operation);
+
+  const sourceAmount = String(
+    isSend
+      ? (operation.source_amount ?? operation.amount ?? '0')
+      : (operation.source_amount ?? operation.source_max ?? operation.amount ?? '0')
+  );
+
+  const destAmount = String(
+    isSend
+      ? (operation.dest_amount ?? operation.dest_min ?? operation.destination_min ?? operation.amount ?? '0')
+      : (operation.dest_amount ?? operation.amount ?? '0')
+  );
+
+  const pathRaw = (operation.path as Array<any>) || [];
+  const pathAssets = pathRaw.map(p => formatAsset(p));
+
+  await client.query(
+    `INSERT INTO path_payments (
+       operation_id, transaction_hash, ledger, network, payment_type,
+       from_account, to_account, source_asset, source_amount, dest_asset, dest_amount,
+       path_assets, hop_count, created_at
+     ) VALUES (
+       $1, $2, $3, $4, $5, $6, $7, $8, $9::numeric, $10, $11::numeric, $12, $13, $14
+     ) ON CONFLICT (operation_id, network) DO NOTHING`,
+    [
+      operation.id,
+      operation.transaction_hash,
+      ledger,
+      network,
+      paymentType,
+      fromAccount,
+      toAccount,
+      sourceAsset,
+      sourceAmount,
+      destAsset,
+      destAmount,
+      pathAssets,
+      pathAssets.length,
+      operation.created_at,
+    ]
+  );
+
+  for (let idx = 0; idx < pathAssets.length; idx++) {
+    await client.query(
+      `INSERT INTO path_payment_hops (operation_id, hop_index, asset, network)
+       VALUES ($1, $2, $3, $4)
+       ON CONFLICT (operation_id, hop_index, network) DO NOTHING`,
+      [operation.id, idx, pathAssets[idx], network]
+    );
+  }
+}
+
+export async function getPathPayment(
+  pool: Pool,
+  network: string,
+  operationId: string
+): Promise<{
+  operation_id: string;
+  transaction_hash: string;
+  ledger: number;
+  payment_type: string;
+  from_account: string;
+  to_account: string;
+  source_asset: string;
+  source_amount: string;
+  dest_asset: string;
+  dest_amount: string;
+  path_assets: string[];
+  hop_count: number;
+  created_at: string;
+} | null> {
+  const { rows } = await pool.query(
+    `SELECT operation_id, transaction_hash, ledger, payment_type, from_account, to_account,
+            source_asset, source_amount, dest_asset, dest_amount, path_assets, hop_count, created_at
+     FROM path_payments
+     WHERE operation_id = $1 AND network = $2`,
+    [operationId, network]
+  );
+  if (!rows[0]) return null;
+  return {
+    ...rows[0],
+    ledger: Number(rows[0].ledger),
+    hop_count: Number(rows[0].hop_count),
+  };
+}
+
+export async function findPathPaymentsByAsset(
+  pool: Pool,
+  network: string,
+  asset: string,
+  limit = 50
+): Promise<Array<{
+  operation_id: string;
+  transaction_hash: string;
+  payment_type: string;
+  source_asset: string;
+  dest_asset: string;
+  path_assets: string[];
+  created_at: string;
+}>> {
+  const { rows } = await pool.query(
+    `SELECT operation_id, transaction_hash, payment_type, source_asset, dest_asset, path_assets, created_at
+     FROM path_payments
+     WHERE network = $1
+       AND (source_asset = $2 OR dest_asset = $2 OR $2 = ANY(path_assets))
+     ORDER BY created_at DESC
+     LIMIT $3`,
+    [network, asset, limit]
+  );
+  return rows;
+}
+
+// ─── Set Options (Issue #207) ─────────────────────────────────────────────────
+
+export async function processSetOptionsOperation(
+  client: PoolClient,
+  network: string,
+  ledger: number,
+  operation: HorizonOperation
+): Promise<void> {
+  if (operation.type !== 'set_options') {
+    return;
+  }
+
+  const account = operation.source_account;
+  const signerKey = (operation.signer_key as string) || (operation.signer as any)?.key;
+  const signerWeightRaw = operation.signer_weight != null ? operation.signer_weight : (operation.signer as any)?.weight;
+
+  if (signerKey) {
+    const weight = typeof signerWeightRaw === 'number' ? signerWeightRaw : parseInt(String(signerWeightRaw ?? '0'), 10);
+    const action = weight === 0 ? 'removed' : 'added';
+
+    await client.query(
+      `INSERT INTO account_signer_changes (
+         account, operation_id, transaction_hash, ledger, network, signer_key, weight, action, created_at
+       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+      [
+        account,
+        operation.id,
+        operation.transaction_hash,
+        ledger,
+        network,
+        signerKey,
+        weight,
+        action,
+        operation.created_at,
+      ]
+    );
+  }
+
+  const masterWeight = operation.master_key_weight != null ? Number(operation.master_key_weight) : null;
+  const lowThreshold = operation.low_threshold != null ? Number(operation.low_threshold) : null;
+  const medThreshold = operation.med_threshold != null ? Number(operation.med_threshold) : null;
+  const highThreshold = operation.high_threshold != null ? Number(operation.high_threshold) : null;
+  const homeDomain = (operation.home_domain as string) || null;
+  const setFlags = (operation.set_flags_s as string[]) || (operation.set_flags ? [String(operation.set_flags)] : null);
+  const clearFlags = (operation.clear_flags_s as string[]) || (operation.clear_flags ? [String(operation.clear_flags)] : null);
+
+  const hasThresholds =
+    masterWeight != null ||
+    lowThreshold != null ||
+    medThreshold != null ||
+    highThreshold != null ||
+    homeDomain != null ||
+    setFlags != null ||
+    clearFlags != null;
+
+  if (hasThresholds) {
+    await client.query(
+      `INSERT INTO account_threshold_changes (
+         account, operation_id, transaction_hash, ledger, network,
+         master_weight, low_threshold, med_threshold, high_threshold,
+         home_domain, set_flags, clear_flags, created_at
+       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)`,
+      [
+        account,
+        operation.id,
+        operation.transaction_hash,
+        ledger,
+        network,
+        masterWeight,
+        lowThreshold,
+        medThreshold,
+        highThreshold,
+        homeDomain,
+        setFlags,
+        clearFlags,
+        operation.created_at,
+      ]
+    );
+  }
+}
+
+export async function getSignerChangesForAccount(
+  pool: Pool,
+  network: string,
+  account: string
+): Promise<Array<{
+  id: string;
+  account: string;
+  operation_id: string;
+  signer_key: string;
+  weight: number;
+  action: string;
+  created_at: string;
+}>> {
+  const { rows } = await pool.query(
+    `SELECT id, account, operation_id, signer_key, weight, action, created_at
+     FROM account_signer_changes
+     WHERE account = $1 AND network = $2
+     ORDER BY created_at DESC`,
+    [account, network]
+  );
+  return rows.map(r => ({
+    ...r,
+    id: String(r.id),
+    weight: Number(r.weight),
+  }));
+}
+
+export async function getThresholdChangesForAccount(
+  pool: Pool,
+  network: string,
+  account: string
+): Promise<Array<{
+  id: string;
+  account: string;
+  operation_id: string;
+  master_weight: number | null;
+  low_threshold: number | null;
+  med_threshold: number | null;
+  high_threshold: number | null;
+  home_domain: string | null;
+  created_at: string;
+}>> {
+  const { rows } = await pool.query(
+    `SELECT id, account, operation_id, master_weight, low_threshold, med_threshold, high_threshold, home_domain, created_at
+     FROM account_threshold_changes
+     WHERE account = $1 AND network = $2
+     ORDER BY created_at DESC`,
+    [account, network]
+  );
+  return rows.map(r => ({
+    ...r,
+    id: String(r.id),
+  }));
+}
+
 
