@@ -445,6 +445,24 @@ CREATE TABLE IF NOT EXISTS ledger_retry_queue (
 CREATE INDEX IF NOT EXISTS idx_retry_queue_next_attempt ON ledger_retry_queue (next_attempt_at)
     WHERE NOT permanently_failed;
 
+-- ─── Backfill Progress ────────────────────────────────────────────────────────
+
+CREATE TABLE IF NOT EXISTS backfill_progress (
+    network             TEXT NOT NULL,
+    start_ledger        BIGINT NOT NULL,
+    end_ledger          BIGINT NOT NULL,
+    current_ledger      BIGINT NOT NULL,
+    completed_at        TIMESTAMPTZ,
+    updated_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (network, start_ledger, end_ledger),
+    CONSTRAINT backfill_progress_range_check CHECK (start_ledger <= end_ledger),
+    CONSTRAINT backfill_progress_current_check CHECK (current_ledger >= start_ledger - 1 AND current_ledger <= end_ledger)
+);
+
+CREATE INDEX IF NOT EXISTS idx_backfill_progress_network
+    ON backfill_progress (network)
+    WHERE completed_at IS NULL;
+
 -- Lower insert-triggered vacuum/analyze thresholds for the append-heavy tables.
 ALTER TABLE transactions SET (
     autovacuum_vacuum_insert_threshold = 5000,
