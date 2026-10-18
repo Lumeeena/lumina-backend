@@ -1,5 +1,5 @@
 import { Pool, PoolClient, type PoolConfig } from 'pg';
-import type { HorizonAccount, HorizonLedger, HorizonOperation, HorizonTransaction } from './horizon';
+import type { HorizonAccount, HorizonLedger, HorizonOperation, HorizonTransaction, HorizonTrade } from './horizon';
 import type { ContractEvent, ContractStorageEntry } from './soroban';
 import { notifyIndexed } from './notify';
 import { subsystem } from './logger';
@@ -90,6 +90,80 @@ export async function getLatestIndexedLedger(pool: Pool, network: string): Promi
     [network]
   );
   return rows[0]?.max ? Number(rows[0].max) : 0;
+}
+
+/**
+ * Lowest ledger indexed for one network.
+ */
+export async function getEarliestIndexedLedger(pool: Pool, network: string): Promise<number> {
+  const { rows } = await pool.query<{ min: string | null }>(
+    'SELECT MIN(sequence) AS min FROM ledgers WHERE network = $1',
+    [network]
+  );
+  return rows[0]?.min ? Number(rows[0].min) : 0;
+}
+
+export interface BackfillProgressRecord {
+  network: string;
+  startLedger: number;
+  endLedger: number;
+  currentLedger: number;
+  completedAt: string | null;
+}
+
+/**
+ * Gets or initializes backfill progress for a network and ledger range.
+ * If no progress row exists yet, inserts one starting at endLedger.
+ */
+export async function getOrInitBackfillProgress(
+  pool: Pool,
+  network: string,
+  startLedger: number,
+  endLedger: number
+): Promise<BackfillProgressRecord> {
+  const { rows } = await pool.query<{
+    network: string;
+    start_ledger: string;
+    end_ledger: string;
+    current_ledger: string;
+    completed_at: string | null;
+  }>(
+    `INSERT INTO backfill_progress (network, start_ledger, end_ledger, current_ledger)
+     VALUES ($1, $2, $3, $3)
+     ON CONFLICT (network, start_ledger, end_ledger) DO UPDATE SET updated_at = NOW()
+     RETURNING network, start_ledger, end_ledger, current_ledger, completed_at`,
+    [network, startLedger, endLedger]
+  );
+
+  const row = rows[0]!;
+  return {
+    network: row.network,
+    startLedger: Number(row.start_ledger),
+    endLedger: Number(row.end_ledger),
+    currentLedger: Number(row.current_ledger),
+    completedAt: row.completed_at,
+  };
+}
+
+/**
+ * Updates the current backfill ledger cursor, marking completed if it reaches startLedger - 1.
+ */
+export async function updateBackfillProgress(
+  pool: Pool,
+  network: string,
+  startLedger: number,
+  endLedger: number,
+  currentLedger: number
+): Promise<void> {
+  const completed = currentLedger < startLedger;
+  await pool.query(
+    `UPDATE backfill_progress
+     SET current_ledger = $4,
+         completed_at = CASE WHEN $5 THEN NOW() ELSE completed_at END,
+         updated_at = NOW()
+     WHERE network = $1 AND start_ledger = $2 AND end_ledger = $3`,
+    [network, startLedger, endLedger, currentLedger, completed]
+  );
 }
 
 /**
@@ -1120,3 +1194,85 @@ export async function processAssetOperation(
     }
   }
 }
+
+/**
+ * Inserts executed trades fetched from Horizon's /trades endpoint into the database.
+ * Deriving trades from operations is unreliable because a single path payment or offer operation
+ * can cross multiple orderbook offers and produce several trades.
+ */
+export async function insertTrades(
+  pool: Pool,
+  network: string,
+  trades: HorizonTrade[]
+): Promise<void> {
+  if (trades.length === 0) return;
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const query = `
+      INSERT INTO trades (
+        id, paging_token, ledger_close_time, trade_type,
+        base_account, base_amount, base_asset_type, base_asset_code, base_asset_issuer, base_offer_id,
+        counter_account, counter_amount, counter_asset_type, counter_asset_code, counter_asset_issuer, counter_offer_id,
+        base_is_seller, price_n, price_d, price, network
+      ) VALUES (
+        $1, $2, $3, $4,
+        $5, $6, $7, $8, $9, $10,
+        $11, $12, $13, $14, $15, $16,
+        $17, $18, $19, $20, $21
+      )
+      ON CONFLICT (id, network) DO NOTHING
+    `;
+    for (const trade of trades) {
+      const priceN = trade.price?.n != null ? BigInt(trade.price.n) : null;
+      const priceD = trade.price?.d != null ? BigInt(trade.price.d) : null;
+      const priceVal = priceN != null && priceD != null && priceD !== 0n
+        ? (Number(priceN) / Number(priceD))
+        : null;
+      await client.query(query, [
+        trade.id,
+        trade.paging_token,
+        trade.ledger_close_time,
+        trade.trade_type ?? 'orderbook',
+        trade.base_account,
+        trade.base_amount,
+        trade.base_asset_type,
+        trade.base_asset_code ?? null,
+        trade.base_asset_issuer ?? null,
+        trade.base_offer_id ?? null,
+        trade.counter_account ?? null,
+        trade.counter_amount,
+        trade.counter_asset_type,
+        trade.counter_asset_code ?? null,
+        trade.counter_asset_issuer ?? null,
+        trade.counter_offer_id ?? null,
+        trade.base_is_seller ?? null,
+        priceN?.toString() ?? null,
+        priceD?.toString() ?? null,
+        priceVal != null ? priceVal.toFixed(7) : null,
+        network,
+      ]);
+    }
+    await client.query('COMMIT');
+  } catch (err) {
+    await client.query('ROLLBACK');
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
+/**
+ * Returns the highest trade paging_token recorded for the given network.
+ */
+export async function getLatestTradePagingToken(
+  pool: Pool,
+  network: string
+): Promise<string | null> {
+  const { rows } = await pool.query<{ paging_token: string }>(
+    'SELECT paging_token FROM trades WHERE network = $1 ORDER BY paging_token DESC LIMIT 1',
+    [network]
+  );
+  return rows[0]?.paging_token ?? null;
+}
+

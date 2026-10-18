@@ -1,0 +1,98 @@
+{
+  "getAccounts_address_default": {
+    "sql": "SELECT * FROM accounts WHERE network = $1 ORDER BY address ASC LIMIT $2",
+    "paramCount": 2
+  },
+  "getAccounts_recentActivity_backward": {
+    "sql": "SELECT * FROM accounts WHERE network = $1 AND (last_modified_ledger, address) > ($2::bigint, $3::text) ORDER BY last_modified_ledger ASC, address DESC LIMIT $4",
+    "paramCount": 4
+  },
+  "getAccounts_recentActivity_default": {
+    "sql": "SELECT * FROM accounts WHERE network = $1 ORDER BY last_modified_ledger DESC, address ASC LIMIT $2",
+    "paramCount": 2
+  },
+  "getAccounts_recentActivity_forward": {
+    "sql": "SELECT * FROM accounts WHERE network = $1 AND (last_modified_ledger, address) < ($2::bigint, $3::text) ORDER BY last_modified_ledger DESC, address ASC LIMIT $4",
+    "paramCount": 4
+  },
+  "getContractStorageEntries_default": {
+    "sql": "SELECT * FROM contract_storage_entries WHERE contract_id = $1 AND network = $2 ORDER BY last_modified_ledger DESC, key DESC LIMIT $3",
+    "paramCount": 3
+  },
+  "getContractStorageEntries_filtered_forward": {
+    "sql": "SELECT * FROM contract_storage_entries WHERE contract_id = $1 AND network = $2 AND durability = $3 AND key LIKE $4 ESCAPE '\\' AND (last_modified_ledger, key) < (SELECT last_modified_ledger, key FROM contract_storage_entries WHERE key = $5 AND contract_id = $1 AND network = $2) ORDER BY last_modified_ledger DESC, key DESC LIMIT $6",
+    "paramCount": 6
+  },
+  "getEventsByContract_default": {
+    "sql": "SELECT * FROM contract_events WHERE contract_id = $1 AND network = $2 ORDER BY ledger DESC, id DESC LIMIT $3",
+    "paramCount": 3
+  },
+  "getEventsByContract_filtered_forward": {
+    "sql": "SELECT * FROM contract_events WHERE contract_id = $1 AND network = $2 AND $3 = ANY(topics) AND (ledger, id) < (SELECT ledger, id FROM contract_events WHERE id = $4 AND network = $2) ORDER BY ledger DESC, id DESC LIMIT $5",
+    "paramCount": 5
+  },
+  "getLedgers_backward": {
+    "sql": "SELECT * FROM ledgers WHERE network = $1 AND (sequence) > ($2::bigint) ORDER BY sequence ASC LIMIT $3",
+    "paramCount": 3
+  },
+  "getLedgers_default": {
+    "sql": "SELECT * FROM ledgers WHERE network = $1 ORDER BY sequence DESC LIMIT $2",
+    "paramCount": 2
+  },
+  "getLedgers_forward": {
+    "sql": "SELECT * FROM ledgers WHERE network = $1 AND (sequence) < ($2::bigint) ORDER BY sequence DESC LIMIT $3",
+    "paramCount": 3
+  },
+  "getOperationsByAsset_issued_forward": {
+    "sql": "SELECT * FROM operations WHERE network = $1 AND ((details->>'asset_code' = $2 AND details->>'asset_issuer' = $3) OR (details->>'selling_asset_code' = $2 AND details->>'selling_asset_issuer' = $3) OR (details->>'buying_asset_code' = $2 AND details->>'buying_asset_issuer' = $3)) AND (ledger, id) < (SELECT ledger, id FROM operations WHERE id = $4 AND network = $1) ORDER BY ledger DESC, id DESC LIMIT $5",
+    "paramCount": 5
+  },
+  "getOperationsByAsset_native_XLM": {
+    "sql": "SELECT * FROM operations WHERE network = $1 AND (details->>'asset_type' = $2 OR details->>'selling_asset_type' = $2 OR details->>'buying_asset_type' = $2) ORDER BY ledger DESC, id DESC LIMIT $3",
+    "paramCount": 3
+  },
+  "getOperations_backward": {
+    "sql": "SELECT * FROM operations WHERE network = $1 AND (ledger, id) > (SELECT ledger, id FROM operations WHERE id = $2 AND network = $1) ORDER BY ledger ASC, id ASC LIMIT $3",
+    "paramCount": 3
+  },
+  "getOperations_default": {
+    "sql": "SELECT * FROM operations WHERE network = $1 ORDER BY ledger DESC, id DESC LIMIT $2",
+    "paramCount": 2
+  },
+  "getOperations_filtered": {
+    "sql": "SELECT * FROM operations WHERE network = $1 AND source_account = $2 AND type = $3 ORDER BY ledger DESC, id DESC LIMIT $4",
+    "paramCount": 4
+  },
+  "getOperations_forward": {
+    "sql": "SELECT * FROM operations WHERE network = $1 AND (ledger, id) < (SELECT ledger, id FROM operations WHERE id = $2 AND network = $1) ORDER BY ledger DESC, id DESC LIMIT $3",
+    "paramCount": 3
+  },
+  "getTransactions_ascending": {
+    "sql": "SELECT * FROM transactions WHERE network = $1 AND (ledger, hash) > (SELECT ledger, hash FROM transactions WHERE hash = $2 AND network = $1) ORDER BY ledger ASC, hash ASC LIMIT $3",
+    "paramCount": 3
+  },
+  "getTransactions_backward": {
+    "sql": "SELECT * FROM transactions WHERE network = $1 AND (ledger, hash) > (SELECT ledger, hash FROM transactions WHERE hash = $2 AND network = $1) ORDER BY ledger ASC, hash ASC LIMIT $3",
+    "paramCount": 3
+  },
+  "getTransactions_default": {
+    "sql": "SELECT * FROM transactions WHERE network = $1 ORDER BY ledger DESC, hash DESC LIMIT $2",
+    "paramCount": 2
+  },
+  "getTransactions_filtered": {
+    "sql": "SELECT * FROM transactions WHERE network = $1 AND successful = $2 AND created_at >= $3::timestamptz AND created_at <= $4::timestamptz AND source_account = $5 ORDER BY ledger DESC, hash DESC LIMIT $6",
+    "paramCount": 6
+  },
+  "getTransactions_forward": {
+    "sql": "SELECT * FROM transactions WHERE network = $1 AND (ledger, hash) < (SELECT ledger, hash FROM transactions WHERE hash = $2 AND network = $1) ORDER BY ledger DESC, hash DESC LIMIT $3",
+    "paramCount": 3
+  },
+  "searchTransactions_backward": {
+    "sql": "SELECT *, GREATEST(similarity(memo, $1), CASE WHEN lower(memo) = lower($1) THEN 1 ELSE 0 END) AS rank FROM transactions WHERE network = $3 AND memo IS NOT NULL AND memo % $1 AND GREATEST(similarity(memo, $1), CASE WHEN lower(memo) = lower($1) THEN 1 ELSE 0 END) >= $2 AND (GREATEST(similarity(memo, $1), CASE WHEN lower(memo) = lower($1) THEN 1 ELSE 0 END), ledger, hash) > ($4::real, $5::bigint, $6::text) ORDER BY rank ASC, ledger ASC, hash ASC LIMIT $7",
+    "paramCount": 7
+  },
+  "searchTransactions_default": {
+    "sql": "SELECT *, GREATEST(similarity(memo, $1), CASE WHEN lower(memo) = lower($1) THEN 1 ELSE 0 END) AS rank FROM transactions WHERE network = $3 AND memo IS NOT NULL AND memo % $1 AND GREATEST(similarity(memo, $1), CASE WHEN lower(memo) = lower($1) THEN 1 ELSE 0 END) >= $2 ORDER BY rank DESC, ledger DESC, hash DESC LIMIT $4",
+    "paramCount": 4
+  }
+}

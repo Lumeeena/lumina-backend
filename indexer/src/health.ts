@@ -143,6 +143,8 @@ export interface DebugConfiguration {
     retentionWindows: RetentionWindows;
     retentionPruneIntervalMs: number;
     retentionPruneBatchSize: number;
+    backfillStartLedger: number | null;
+    backfillEndLedger: number | null;
   };
   networks: DebugNetworkConfiguration[];
 }
@@ -201,6 +203,8 @@ export function buildDebugConfiguration(
       retentionWindows: config.retentionWindows,
       retentionPruneIntervalMs: config.retentionPruneIntervalMs,
       retentionPruneBatchSize: config.retentionPruneBatchSize,
+      backfillStartLedger: config.backfillStartLedger ?? null,
+      backfillEndLedger: config.backfillEndLedger ?? null,
     },
     networks: networks.map(network => ({
       ...network,

@@ -23,6 +23,8 @@
  *   SOROBAN_RPC_URL       — Single-network deployments: Soroban RPC endpoint; unset disables contract event indexing
  *   DATABASE_URL          — PostgreSQL connection string
  *   START_LEDGER          — Ledger to begin indexing from if a network's DB is empty (default: that network's latest)
+ *   BACKFILL_START_LEDGER — Optional start of historical ledger range to backfill backwards
+ *   BACKFILL_END_LEDGER   — Optional end of historical ledger range (defaults to earliest indexed - 1)
  *   POLL_INTERVAL_MS      — How often to poll for new ledgers (default: 5000)
  *   LEDGER_RETRY_ATTEMPTS — Attempts per failing ledger before the cursor stops at it (default: 3)
  *   LEDGER_RETRY_BASE_MS  — Base retry delay in ms, doubled each attempt (default: 500)
@@ -87,7 +89,7 @@ import {
 } from './retention';
 import { initErrorTracking, captureException, shutdownErrorTracking } from './errorTracking';
 import { getRetentionInfo, getContractStorageEntries } from './soroban';
-import { getLatestLedgerSequence, getLedger, getLedgerOperations, getLedgerTransactions, initializeHorizonClient } from './horizon';
+import { getLatestLedgerSequence, getLedger, getLedgerOperations, getLedgerTransactions, getTrades, initializeHorizonClient } from './horizon';
 import type { RequestPurpose } from './throttle';
 import { getActiveContracts, resolveRegistryConfigs, type RegistryConfig } from './registry';
 import { getEvents, getLatestLedgerSequence as getLatestRpcLedgerSequence, type ContractEvent } from './soroban';
@@ -197,6 +199,7 @@ interface NetworkLoop {
   state: NetworkState;
   cursor: number;
   eventsCursor: number;
+  tradesCursor: string;
   loopTick: number;
   discoveredContractIds: string[];
   accountCache: Map<string, number>;
@@ -233,6 +236,7 @@ function createLoop(network: NetworkConfig, registries: Map<string, RegistryConf
     },
     cursor: 0,
     eventsCursor: 0,
+    tradesCursor: '',
     loopTick: 0,
     discoveredContractIds: [],
     accountCache: new Map<string, number>(),
@@ -260,11 +264,11 @@ function pruneAccountCache(cache: Map<string, number>, order: string[], now: num
   }
 }
 
-async function fetchAndIndexLedger(loop: NetworkLoop, sequence: number): Promise<void> {
+async function fetchAndIndexLedger(loop: NetworkLoop, sequence: number, isBackfillMode = false): Promise<void> {
   const name = loop.network.name;
-  log.debug({ network: name, ledger: sequence }, 'indexing ledger');
+  log.debug({ network: name, ledger: sequence, isBackfill: isBackfillMode }, 'indexing ledger');
   
-  const isBackfill = loop.state.latestHorizonLedger - sequence > 10;
+  const isBackfill = isBackfillMode || (loop.state.latestHorizonLedger - sequence > 10);
   const purpose: RequestPurpose = isBackfill ? 'backfill' : 'tip';
   
   const [ledger, transactions, operations] = await Promise.all([
@@ -298,13 +302,23 @@ async function fetchAndIndexLedger(loop: NetworkLoop, sequence: number): Promise
   accountCacheSize.set({ network: name }, loop.accountCache.size);
   scheduleAccountRefreshes(loop);
 
-  loop.state.latestIndexedLedger = sequence;
-  loop.state.lastIndexedAt = Date.now();
-  recordIndexedLedger(name, sequence, transactions.length, operations.length);
-  routine.success(
-    { network: name, ledger: sequence, transactions: transactions.length, operations: operations.length },
-    'ledger indexed'
-  );
+  if (isBackfillMode) {
+    recordBackfillLedger(name, sequence, transactions.length, operations.length);
+    routine.success(
+      { network: name, ledger: sequence, transactions: transactions.length, operations: operations.length, mode: 'backfill' },
+      'historical ledger backfilled'
+    );
+  } else {
+    if (sequence > loop.state.latestIndexedLedger) {
+      loop.state.latestIndexedLedger = sequence;
+    }
+    loop.state.lastIndexedAt = Date.now();
+    recordIndexedLedger(name, sequence, transactions.length, operations.length);
+    routine.success(
+      { network: name, ledger: sequence, transactions: transactions.length, operations: operations.length },
+      'ledger indexed'
+    );
+  }
 }
 
 /**
@@ -659,6 +673,37 @@ async function pollContractStorage(loop: NetworkLoop): Promise<void> {
   }
 }
 
+/**
+ * Ingests executed trades from Horizon's /trades endpoint.
+ * Trades are where price discovery happens and cannot be inferred reliably
+ * from operations alone because a single path payment or DEX operation
+ * can cross multiple offers and produce multiple trade records.
+ */
+export async function pollTrades(loop: NetworkLoop): Promise<void> {
+  const name = loop.network.name;
+  try {
+    if (!loop.tradesCursor) {
+      const dbCursor = await getLatestTradePagingToken(pool, name);
+      if (dbCursor) {
+        loop.tradesCursor = dbCursor;
+      }
+    }
+    const trades = await getTrades(loop.network.horizonUrl, {
+      cursor: loop.tradesCursor || undefined,
+      order: 'asc',
+      limit: 200,
+    });
+    if (trades.length > 0) {
+      await insertTrades(pool, name, trades);
+      loop.tradesCursor = trades[trades.length - 1].paging_token;
+      routine.success({ network: name, count: trades.length }, 'trades indexed');
+    }
+  } catch (err) {
+    indexingErrors.inc({ loop: 'trades' });
+    log.error({ network: name, err: message(err) }, 'trades polling failed');
+  }
+}
+
 /** Run one network's polling loop until the process shuts down. */
 async function runNetworkLoop(loop: NetworkLoop): Promise<void> {
   const name = loop.network.name;
@@ -686,6 +731,73 @@ async function runNetworkLoop(loop: NetworkLoop): Promise<void> {
   const indexOne = (sequence: number): Promise<boolean> =>
     fetchAndIndexLedgerWithRetry(name, sequence, seq => fetchAndIndexLedger(loop, seq));
 
+  const indexOneBackfill = (sequence: number): Promise<boolean> =>
+    fetchAndIndexLedgerWithRetry(name, sequence, seq => fetchAndIndexLedger(loop, seq, true));
+
+  // Backfill worker: walks historical ledgers backwards, independent of the forward cursor
+  const runBackfillWorker = async (): Promise<void> => {
+    const startLedger = config.backfillStartLedger;
+    if (startLedger === undefined) {
+      return;
+    }
+
+    // Wait until cursor has initialized so we know earliest indexed ledger if needed
+    while (!initialised && !isShuttingDown) {
+      await sleep(100);
+    }
+    if (isShuttingDown) return;
+
+    let endLedger = config.backfillEndLedger;
+    if (endLedger === undefined) {
+      const earliest = await getEarliestIndexedLedger(pool, name);
+      if (earliest === 0) {
+        log.warn({ network: name }, 'no indexed ledgers found to determine backfill end ledger; backfill skipped');
+        return;
+      }
+      endLedger = earliest - 1;
+    }
+
+    if (startLedger > endLedger) {
+      log.info({ network: name, startLedger, endLedger }, 'backfill start ledger is greater than end ledger; nothing to backfill');
+      return;
+    }
+
+    const progress = await getOrInitBackfillProgress(pool, name, startLedger, endLedger);
+    if (progress.completedAt) {
+      log.info({ network: name, startLedger, endLedger, completedAt: progress.completedAt }, 'backfill range already completed');
+      return;
+    }
+
+    log.info(
+      { network: name, startLedger, endLedger, currentLedger: progress.currentLedger },
+      'starting backfill historical walk backwards'
+    );
+
+    let curr = progress.currentLedger;
+    while (curr >= startLedger && !isShuttingDown) {
+      try {
+        const indexed = await indexOneBackfill(curr);
+        if (!indexed) {
+          log.warn({ network: name, ledger: curr }, 'backfill ledger failed, pausing before retry');
+          await sleep(POLL_INTERVAL_MS);
+          continue;
+        }
+
+        const nextLedger = curr - 1;
+        await updateBackfillProgress(pool, name, startLedger, endLedger, nextLedger);
+        curr = nextLedger;
+      } catch (err) {
+        indexingErrors.inc({ loop: 'backfill' });
+        log.error({ network: name, ledger: curr, err: message(err) }, 'error in backfill worker');
+        await sleep(POLL_INTERVAL_MS);
+      }
+    }
+
+    if (curr < startLedger) {
+      log.info({ network: name, startLedger, endLedger }, 'backfill historical range completed successfully');
+    }
+  };
+
   // Start the retry worker for this network
   loop.retryWorker = new RetryWorker({
     pool,
@@ -697,6 +809,12 @@ async function runNetworkLoop(loop: NetworkLoop): Promise<void> {
   // Run retry worker in background
   loop.retryWorker.start().catch(err => {
     log.error({ network: name, err: message(err) }, 'retry worker crashed');
+  });
+
+  // Run backfill worker in background
+  runBackfillWorker().catch(err => {
+    indexingErrors.inc({ loop: 'backfill' });
+    log.error({ network: name, err: message(err) }, 'backfill worker crashed');
   });
 
   while (!isShuttingDown) {
@@ -727,6 +845,7 @@ async function runNetworkLoop(loop: NetworkLoop): Promise<void> {
       if (isShuttingDown) break;
       await pollContractEvents(loop);
       await pollContractStorage(loop);
+      await pollTrades(loop);
     } catch (err) {
       indexingErrors.inc({ loop: 'main' });
       log.error({ network: name, err: message(err) }, 'indexer loop error');

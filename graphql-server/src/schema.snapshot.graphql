@@ -52,15 +52,21 @@ type Query {
     Network to read; defaults to the primary network configured for this deployment.
     """
     network: Network
-    """Maximum page size is 100. Larger limits are rejected."""
+    """
+    Maximum page size is 100. Larger limits are rejected.
+    """
     limit: Int = 20
     """Opaque cursor from a previous page's `pageInfo`; see `PageInfo`."""
     cursor: String
+    """Traversal direction from cursor; defaults to FORWARD."""
+    direction: PaginationDirection = FORWARD
     order: LedgerOrder = DESC
     successful: Boolean
     from: String
     to: String
     sourceAccount: String
+    """Opt-in request for total matching count."""
+    includeTotalCount: Boolean = false
   ): TransactionPage!
 
   """
@@ -132,6 +138,8 @@ type Query {
     limit: Int = 20
     """Opaque cursor from a previous page's `pageInfo`; see `PageInfo`."""
     cursor: String
+    """Opt-in request for total matching count."""
+    includeTotalCount: Boolean = false
   ): AccountPage!
 
   """
@@ -155,11 +163,17 @@ type Query {
     Filter to operations involving one asset: "CODE:ISSUER", or "XLM" for native.
     """
     asset: String
-    """Maximum page size is 100. Larger limits are rejected."""
+    """
+    Maximum page size is 100. Larger limits are rejected.
+    """
     limit: Int = 20
     """Opaque cursor from a previous page's `pageInfo`; see `PageInfo`."""
     cursor: String
+    """Traversal direction from cursor; defaults to FORWARD."""
+    direction: PaginationDirection = FORWARD
     order: LedgerOrder = DESC
+    """Opt-in request for total matching count."""
+    includeTotalCount: Boolean = false
   ): OperationPage!
 
   """
@@ -174,11 +188,18 @@ type Query {
   transactions land — see `PageInfo`.
   """
   search(
+    """Network to read; defaults to the primary network configured for this deployment."""
     network: Network
+    """Memo text to search for, up to 256 characters."""
     query: String!
-    """Maximum page size is 100. Larger limits are rejected."""
+    """
+    Maximum page size is 100. Larger limits are rejected.
+    """
     limit: Int = 20
+    """Opaque cursor from a previous page's `pageInfo`; see `PageInfo`."""
     cursor: String
+    """Traversal direction from cursor; defaults to FORWARD."""
+    direction: PaginationDirection = FORWARD
   ): TransactionPage!
 
   """
@@ -195,12 +216,43 @@ type Query {
     contractId: String!
     """Only events carrying this topic."""
     topic: String
+    """
+    Maximum page size is 100. Larger limits are rejected.
+    """
+    limit: Int = 20
+    """Opaque cursor from a previous page's `pageInfo`; see `PageInfo`."""
+    cursor: String
+    """Traversal direction from cursor; defaults to FORWARD."""
+    direction: PaginationDirection = FORWARD
+    order: LedgerOrder = DESC
+  ): ContractEventPage!
+
+  """
+  Fetch indexed Soroban contract storage entries for a contract, newest change
+  first. Optionally filtered by durability and by a key prefix.
+
+  `key` is the base64 XDR LedgerKey that addresses the entry, so it round-trips
+  back into a Soroban `getLedgerEntries` call; `keyPrefix` matches that string.
+
+  An entry whose TTL has expired is reported with `state: ARCHIVED` rather than
+  dropped, so a contract that has archived state is distinguishable from one
+  where the key was never set. Requires Soroban RPC indexing to be enabled.
+  """
+  contractStorageEntries(
+    """Network to read; defaults to the primary network configured for this deployment."""
+    network: Network
+    contractId: String!
+    """Only entries with this durability. Omit for both."""
+    durability: ContractStorageDurability
+    """Only entries whose base64 XDR key starts with this prefix."""
+    keyPrefix: String
     """Maximum page size is 100. Larger limits are rejected."""
     limit: Int = 20
     """Opaque cursor from a previous page's `pageInfo`; see `PageInfo`."""
     cursor: String
-    order: LedgerOrder = DESC
-  ): ContractEventPage!
+    """Traversal direction from cursor; defaults to FORWARD."""
+    direction: PaginationDirection = FORWARD
+  ): ContractStorageEntryPage!
 
   """
   Get a single ledger by sequence number.
@@ -226,15 +278,12 @@ type Query {
   ledgers(
     """Network to read; defaults to the primary network configured for this deployment."""
     network: Network
-    contractId: String!
-    """Only entries with this durability. Omit for both."""
-    durability: ContractStorageDurability
-    """Only entries whose base64 XDR key starts with this prefix."""
-    keyPrefix: String
-    """Maximum page size is 100. Larger limits are rejected."""
+    """Rows per page. Defaults to 20."""
     limit: Int = 20
     """Opaque cursor from a previous page's `pageInfo`; see `PageInfo`."""
     cursor: String
+    """Opt-in request for total matching count."""
+    includeTotalCount: Boolean = false
   ): LedgerPage!
 
   """
@@ -269,10 +318,14 @@ type Query {
     event: String!
     """Field filters, ANDed together."""
     where: [CustomEventFilter!]
-    """Maximum page size is 100. Larger limits are rejected."""
+    """
+    Maximum page size is 100. Larger limits are rejected.
+    """
     limit: Int = 20
     """Opaque cursor from a previous page's `pageInfo`; see `PageInfo`."""
     cursor: String
+    """Traversal direction from cursor; defaults to FORWARD."""
+    direction: PaginationDirection = FORWARD
     order: LedgerOrder = DESC
   ): CustomEventPage!
 
@@ -331,6 +384,27 @@ type Query {
     """Network to read; defaults to the primary network configured for this deployment."""
     network: Network
   ): IndexerStatus!
+
+  """
+  Query executed trades, populated from Horizon's /trades endpoint.
+  Optionally filtered by asset pair and by account.
+  """
+  trades(
+    """Network to read; defaults to the primary network configured for this deployment."""
+    network: Network
+    """Filter by base asset."""
+    baseAsset: TradeAssetInput
+    """Filter by counter asset."""
+    counterAsset: TradeAssetInput
+    """Filter by account address (matches base or counter account)."""
+    account: String
+    """Maximum page size is 100. Larger limits are rejected."""
+    limit: Int = 20
+    """Opaque cursor from a previous page's `pageInfo`; see `PageInfo`."""
+    cursor: String
+    """Opt-in request for total matching count."""
+    includeTotalCount: Boolean = false
+  ): TradePage!
 }
 
 """
@@ -424,6 +498,14 @@ type IndexerStatus {
 
 # ─── Pagination ──────────────────────────────────────────────────────────────
 
+"""Direction to walk from a cursor in bidirectional pagination."""
+enum PaginationDirection {
+  """Walk forwards towards older entries (or next page in sort order)."""
+  FORWARD
+  """Walk backwards towards newer entries (or previous page in sort order)."""
+  BACKWARD
+}
+
 """
 Where to resume, for every paginated query in this schema.
 
@@ -462,11 +544,44 @@ rows may still be the last one; one empty page confirms the end.
 type PageInfo {
   """True when the query returned a full page, so there may be more after it."""
   hasNextPage: Boolean!
+  """True when there is a preceding page in the current traversal direction."""
+  hasPreviousPage: Boolean!
+  """Cursor for the first item on this page, or null when this page is empty."""
+  startCursor: String
+  """Cursor for the last item on this page, or null when this page is empty."""
+  endCursor: String
   """
   Cursor for the next page, or null when this page is empty. Pass it back
   unchanged as the `cursor` argument.
   """
   cursor: String
+  """
+  Total count of matching records where affordable, or an estimate labelled as such.
+  Opt-in via includeTotalCount or field selection.
+  """
+  totalCount: TotalCount
+}
+
+"""
+Precision of a reported count.
+"""
+enum CountPrecision {
+  """Exact count derived from a table scan or index."""
+  EXACT
+  """Estimated count from Postgres statistics (pg_class reltuples) for expensive scans."""
+  ESTIMATE
+}
+
+"""
+Total count of matching records and its precision.
+"""
+type TotalCount {
+  """The total count value, exact or estimated."""
+  value: Int!
+  """Whether the count is an exact scan/index count or an estimate."""
+  precision: CountPrecision!
+  """Convenience boolean: true when precision is ESTIMATE."""
+  isEstimate: Boolean!
 }
 
 """A page of transactions, in the order its query returns them."""
@@ -514,6 +629,11 @@ type ContractEventPage {
 
 type ContractStorageEntryPage {
   items: [ContractStorageEntry!]!
+  pageInfo: PageInfo!
+}
+
+type AssetPage {
+  items: [Asset!]!
   pageInfo: PageInfo!
 }
 
@@ -613,9 +733,12 @@ type Account {
   flags: AccountFlags!
   """Signature weight thresholds."""
   thresholds: Thresholds!
-  """Related rows are optional so a lookup error does not erase the account."""
+  """
+  Recent transactions submitted by this account, newest first. Not paginated —
+  a fixed `limit`, for a sidebar.
+  """
   transactions(
-    """Maximum page size is 100. Larger limits are rejected."""
+    """How many to return. Defaults to 10."""
     limit: Int = 10
   ): [Transaction!]
   operations(
@@ -761,6 +884,66 @@ type ContractEvent {
   topics: [String!]!
   """Event payload, JSON-encoded as a string; null when the event had none."""
   value: String  # JSON-encoded value
+}
+
+"""
+How long a contract storage entry survives without being touched.
+
+Only PERSISTENT entries are archived: they survive a ledger's lifecycle and are
+moved to cold storage ("archived") when their TTL runs out. TEMPORARY entries
+are evicted outright and therefore never come back as ARCHIVED.
+"""
+enum ContractStorageDurability {
+  PERSISTENT
+  TEMPORARY
+}
+
+"""
+Whether an entry is currently readable, or has been archived.
+
+Soroban archives a persistent entry whose TTL has expired: the contract still
+owns the state, but it is inaccessible until restored. An ARCHIVED entry is
+reported here rather than removed, so this is how a client tells "the contract
+has state that is archived" apart from "this key was never set" (which has no
+entry at all).
+"""
+enum ContractStorageEntryState {
+  """Currently live and readable."""
+  ACTIVE
+
+  """TTL expired; retained for the contract, inaccessible until restored."""
+  ARCHIVED
+}
+
+"""
+One indexed Soroban contract storage entry.
+
+`value` is the decoded native value, JSON-encoded, or null when the entry is
+not currently live (an archived entry keeps the key and metadata but has no
+readable value). `valueXdr` is the raw base64 LedgerEntryData XDR, so a client
+that needs the exact wire form — or a value the decoder could not represent —
+still has it. `key` is the base64 XDR LedgerKey that addresses the entry and
+round-trips into a Soroban `getLedgerEntries` call.
+"""
+type ContractStorageEntry {
+  contractId: String!
+
+  """Base64 XDR LedgerKey addressing this entry."""
+  key: String!
+  durability: ContractStorageDurability!
+  state: ContractStorageEntryState!
+
+  """Decoded native value as a JSON string, or null when archived."""
+  value: String
+
+  """Raw base64 LedgerEntryData XDR, or null when archived."""
+  valueXdr: String
+
+  """Ledger in which this entry was last changed."""
+  lastModifiedLedger: Int!
+
+  """Ledger at which this entry's TTL expires, if the RPC reported one."""
+  liveUntilLedger: Int
 }
 
 # ─── Enums ───────────────────────────────────────────────────────────────────
@@ -957,6 +1140,32 @@ type ContractSchema {
 
 # ─── Asset analytics ─────────────────────────────────────────────────────────
 
+enum AssetSort {
+  """
+  Sort by holder count, descending.
+  """
+  HOLDERS
+  """
+  Sort by recent volume, descending.
+  """
+  VOLUME
+}
+
+"""
+A Stellar asset with holder count and volume statistics.
+"""
+type Asset {
+  code: String!
+  issuer: String!
+  holderCount: Int!
+  firstSeenLedger: Int!
+  lastActivityLedger: Int!
+  """
+  Recent volume (last 7 days) in the asset's base units.
+  """
+  recentVolume: String
+}
+
 """
 Everything an asset detail page needs: supply and holders from indexed
 balances plus a bucketed volume series from operations.
@@ -1039,3 +1248,50 @@ type BalanceSnapshot {
   """
   operationId: String!
 }
+
+# ─── Trades ───────────────────────────────────────────────────────────────────
+
+"""
+Asset input filter for querying trades.
+"""
+input TradeAssetInput {
+  assetType: String
+  assetCode: String
+  assetIssuer: String
+}
+
+"""
+An executed trade between two assets on the Stellar network.
+Populated from Horizon's /trades endpoint.
+"""
+type Trade {
+  id: String!
+  pagingToken: String!
+  ledgerCloseTime: String!
+  tradeType: String!
+  baseAccount: String!
+  baseAmount: String!
+  baseAssetType: String!
+  baseAssetCode: String
+  baseAssetIssuer: String
+  baseOfferId: String
+  counterAccount: String
+  counterAmount: String!
+  counterAssetType: String!
+  counterAssetCode: String
+  counterAssetIssuer: String
+  counterOfferId: String
+  baseIsSeller: Boolean
+  price: String
+  priceNumerator: String
+  priceDenominator: String
+}
+
+"""
+A page of trades, ordered by ledger close time descending.
+"""
+type TradePage {
+  items: [Trade!]!
+  pageInfo: PageInfo!
+}
+

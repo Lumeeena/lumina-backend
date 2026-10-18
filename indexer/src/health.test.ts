@@ -65,6 +65,8 @@ const debugConfig: Config = {
   },
   retentionPruneIntervalMs: 3_600_000,
   retentionPruneBatchSize: 10_000,
+  backfillStartLedger: undefined,
+  backfillEndLedger: undefined,
 };
 
 test('a caught-up indexer is healthy', async () => {

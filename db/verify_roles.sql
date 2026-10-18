@@ -20,9 +20,10 @@ DECLARE
   -- in indexer/src/db.ts require on top of SELECT.
   indexed_tables text[] := ARRAY[
     'ledgers', 'transactions', 'operations',
-    'accounts', 'account_refresh_queue', 'contract_events', 'contract_schemas', 'custom_events'
+    'accounts', 'account_refresh_queue', 'contract_events', 'contract_schemas', 'custom_events',
+    'backfill_progress'
   ];
-  update_tables  text[] := ARRAY['accounts', 'account_refresh_queue', 'contract_schemas', 'custom_events'];
+  update_tables  text[] := ARRAY['accounts', 'account_refresh_queue', 'contract_schemas', 'custom_events', 'backfill_progress'];
   delete_tables  text[] := ARRAY['account_refresh_queue', 'contract_schemas'];
 BEGIN
   -- ── The GraphQL server cannot write ───────────────────────────────────────

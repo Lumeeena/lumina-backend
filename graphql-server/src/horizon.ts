@@ -28,6 +28,9 @@ export type {
   HorizonBalance as Balance,
   HorizonLatestLedger,
   HorizonTransaction,
+  HorizonTrade,
+  HorizonTradePrice,
+  HorizonTradesFilter,
 } from '@lumina/shared';
 
 const HORIZON = process.env['HORIZON_URL'] ?? 'https://horizon.stellar.org';
@@ -70,4 +73,11 @@ export function getAccountTransactions(
 
 export function getLatestLedger(baseUrl?: string): Promise<HorizonLatestLedger | null> {
   return client.getLatestLedger(baseUrl);
+}
+
+export function getTrades(
+  params?: HorizonTradesFilter,
+  baseUrl?: string
+): Promise<HorizonTrade[]> {
+  return client.getTrades(params, baseUrl);
 }

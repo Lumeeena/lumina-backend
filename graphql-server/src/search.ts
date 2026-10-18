@@ -31,6 +31,7 @@ import {
   InvalidCursorError,
   KEYSETS,
   type CursorValue,
+  type PaginationDirection,
 } from './pagination';
 
 /**
@@ -86,6 +87,7 @@ export interface SearchOptions {
   query: string;
   limit: number;
   cursor?: string | null;
+  direction?: PaginationDirection;
 }
 
 interface RankedTransactionRow extends TransactionRow {
@@ -107,6 +109,11 @@ export async function searchTransactions(pool: Pool, options: SearchOptions) {
   if (query.length > MAX_QUERY_LENGTH) {
     throw new SearchError(`Search query cannot exceed ${MAX_QUERY_LENGTH} characters.`);
   }
+
+  const direction = options.direction ?? 'FORWARD';
+  const isForward = direction === 'FORWARD';
+  const queryOrder = isForward ? 'DESC' : 'ASC';
+  const cursorOperator = isForward ? '<' : '>';
 
   // An exact case-insensitive hit ranks above every fuzzy one: pasting a full
   // memo means looking for that transaction, not for things resembling it.
@@ -132,7 +139,7 @@ export async function searchTransactions(pool: Pool, options: SearchOptions) {
     // Keyset on the full ordering tuple, so the boundary is stable as new
     // ledgers land rather than shifting the way an OFFSET would.
     conditions.push(
-      `(${rankExpression}, ledger, hash) < ($${base}::real, $${base + 1}::bigint, $${base + 2}::text)`
+      `(${rankExpression}, ledger, hash) ${cursorOperator} ($${base}::real, $${base + 1}::bigint, $${base + 2}::text)`
     );
   }
 
@@ -142,16 +149,25 @@ export async function searchTransactions(pool: Pool, options: SearchOptions) {
     `SELECT *, ${rankExpression} AS rank
        FROM transactions
       WHERE ${conditions.join(' AND ')}
-      ORDER BY rank DESC, ledger DESC, hash DESC
+      ORDER BY rank ${queryOrder}, ledger ${queryOrder}, hash ${queryOrder}
       LIMIT $${params.length}`,
     params
   );
 
   const items = rows.map(mapTransaction);
-  const last = rows.at(-1);
+  const orderedItems = isForward ? items : items.reverse();
+  const orderedRows = isForward ? rows : rows.reverse();
+  const first = orderedRows.at(0);
+  const last = orderedRows.at(-1);
 
   return {
-    items,
+    items: orderedItems,
+    startCursor: first
+      ? encodeCursor({ rank: Number(first.rank), ledger: Number(first.ledger), hash: first.hash })
+      : null,
+    endCursor: last
+      ? encodeCursor({ rank: Number(last.rank), ledger: Number(last.ledger), hash: last.hash })
+      : null,
     nextCursor: last
       ? encodeCursor({ rank: Number(last.rank), ledger: Number(last.ledger), hash: last.hash })
       : null,
@@ -226,13 +242,17 @@ export interface AssetOperationsOptions {
   type?: string | null;
   limit: number;
   cursor?: string | null;
+  direction?: PaginationDirection;
   order?: 'ASC' | 'DESC' | null;
 }
 
 /** Operations involving one asset, newest first. */
 export async function getOperationsByAsset(pool: Pool, options: AssetOperationsOptions) {
-  const order = options.order ?? 'DESC';
-  const cursorOperator = order === 'ASC' ? '>' : '<';
+  const baseOrder = options.order ?? 'DESC';
+  const direction = options.direction ?? 'FORWARD';
+  const isForward = direction === 'FORWARD';
+  const queryOrder = isForward ? baseOrder : (baseOrder === 'DESC' ? 'ASC' : 'DESC');
+  const cursorOperator = baseOrder === 'ASC' ? (isForward ? '>' : '<') : (isForward ? '<' : '>');
   const parsed = parseAsset(options.asset);
   const params: unknown[] = [options.network];
   const conditions = ['network = $1', assetConditions(parsed, params)];
@@ -252,7 +272,7 @@ export async function getOperationsByAsset(pool: Pool, options: AssetOperationsO
     // compares the page against another chain's boundary, which silently
     // repeats a row or ends the results early.
     conditions.push(
-      `(ledger, id) < (SELECT ledger, id FROM operations WHERE id = $${params.length} AND network = $1)`
+      `(ledger, id) ${cursorOperator} (SELECT ledger, id FROM operations WHERE id = $${params.length} AND network = $1)`
     );
   }
 
@@ -261,10 +281,11 @@ export async function getOperationsByAsset(pool: Pool, options: AssetOperationsO
   const { rows } = await pool.query<OperationRow>(
     `SELECT * FROM operations
       WHERE ${conditions.join(' AND ')}
-      ORDER BY ledger ${order}, id ${order}
+      ORDER BY ledger ${queryOrder}, id ${queryOrder}
       LIMIT $${params.length}`,
     params
   );
 
-  return rows.map(mapOperation);
+  const items = rows.map(mapOperation);
+  return isForward ? items : items.reverse();
 }

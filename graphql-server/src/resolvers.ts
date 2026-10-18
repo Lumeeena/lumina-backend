@@ -14,10 +14,12 @@ import {
   getOperationsByTransactionHash,
   getTransactionByHash,
   getTransactions,
+  getTradesFromDb,
+  getTableCountEstimateOrExact,
   mapAccount,
   type AccountOrder,
 } from './db';
-import { DEFAULT_PAGE_LIMIT, KEYSETS, pageInfo } from './pagination';
+import { DEFAULT_PAGE_LIMIT, KEYSETS, pageInfo, getPageSize } from './pagination';
 import { createLoaders, type RequestLoaders } from './loaders';
 import { getAccount as getAccountFromHorizon, getLatestLedger as getLatestLedgerFromHorizon } from './horizon';
 import { createSubscriptionResolvers } from './subscriptions';
@@ -29,7 +31,7 @@ import { getNetworks, resolveNetworkArgument, type NetworkConfig, type NetworkRe
 import type { LedgerNotifier } from './pubsub';
 import { ANONYMOUS_CALLER, type ApiCaller } from './auth';
 import { computeBalanceHistory } from './balanceHistory';
-import { getPageSize } from './pagination';
+import { memoizeRequestQuery } from './requestMemo';
 
 export interface BaseContext {
   pool: Pool;
@@ -58,6 +60,10 @@ export interface BaseContext {
    * so they are always the anonymous caller until that path is built out.
    */
   caller?: ApiCaller;
+  /**
+   * Request-level query memoization cache, scoped strictly to this request context.
+   */
+  queryMemo?: Map<string, Promise<unknown>>;
 }
 
 export type Context = BaseContext;
@@ -74,6 +80,7 @@ export function createContext(
     registry: getNetworks(),
     loaders: loaderFactory(pool),
     caller: ANONYMOUS_CALLER,
+    queryMemo: new Map<string, Promise<unknown>>(),
     ...extra,
   };
 }
@@ -153,63 +160,84 @@ export const resolvers = {
         network?: string | null;
         limit?: number;
         cursor?: string | null;
+        direction?: PaginationDirection | null;
         order?: 'ASC' | 'DESC' | null;
         successful?: boolean | null;
         from?: string | null;
         to?: string | null;
         sourceAccount?: string | null;
+        includeTotalCount?: boolean | null;
       },
       ctx: Context
     ) {
-      const limit = getPageSize(args.limit);
-      const network = networkArgument(args, ctx);
-      const items = await getTransactions(ctx.pool, network.name, limit, args.cursor ?? null, {
-        order: args.order ?? 'DESC',
-        successful: args.successful,
-        from: args.from,
-        to: args.to,
-        sourceAccount: args.sourceAccount,
+      return memoizeRequestQuery(ctx.queryMemo, 'transactions', args, async () => {
+        const limit = getPageSize(args.limit);
+        const network = networkArgument(args, ctx);
+        const items = await getTransactions(ctx.pool, network.name, limit, args.cursor ?? null, {
+          order: args.order ?? 'DESC',
+          successful: args.successful,
+          from: args.from,
+          to: args.to,
+          sourceAccount: args.sourceAccount,
+        });
+        let totalCount = null;
+        if (args.includeTotalCount) {
+          totalCount = await getTableCountEstimateOrExact(ctx.pool, 'transactions', network.name);
+        }
+        return {
+          items,
+          pageInfo: pageInfo(
+            KEYSETS.transactions,
+            items,
+            limit,
+            tx => [tx.ledger, tx.hash],
+            totalCount
+          ),
+        };
       });
-      return {
-        items,
-        pageInfo: {
-          hasNextPage: items.length === limit,
-          cursor: items.at(-1)?.hash ?? null,
-        },
-      };
     },
 
     async transaction(_: unknown, args: { network?: string | null; hash: string }, ctx: Context) {
-      const network = networkArgument(args, ctx);
-      return getTransactionByHash(ctx.pool, network.name, args.hash);
+      return memoizeRequestQuery(ctx.queryMemo, 'transaction', args, async () => {
+        const network = networkArgument(args, ctx);
+        return getTransactionByHash(ctx.pool, network.name, args.hash);
+      });
     },
 
     async account(_: unknown, args: { network?: string | null; address: string }, ctx: Context) {
-      const network = networkArgument(args, ctx);
-      return resolveAccount(args.address, ctx, network);
+      return memoizeRequestQuery(ctx.queryMemo, 'account', args, async () => {
+        const network = networkArgument(args, ctx);
+        return resolveAccount(args.address, ctx, network);
+      });
     },
 
     async accounts(
       _: unknown,
-      args: { network?: string | null; orderBy?: string | null; limit?: number; cursor?: string | null },
+      args: { network?: string | null; orderBy?: string | null; limit?: number; cursor?: string | null; includeTotalCount?: boolean | null },
       ctx: Context
     ) {
-      const network = networkArgument(args, ctx);
-      const limit = args.limit ?? DEFAULT_PAGE_LIMIT;
-      // The enum cannot name an unknown value, and every declared order is in
-      // ACCOUNT_ORDERS, so the fallback is unreachable in practice — but a bad
-      // order must not reach SQL as an ORDER BY.
-      const orderBy = isAccountOrder(args.orderBy) ? args.orderBy : 'RECENT_ACTIVITY';
-      const items = await getAccounts(ctx.pool, {
-        network: network.name,
-        orderBy,
-        limit,
-        cursor: args.cursor ?? null,
+      return memoizeRequestQuery(ctx.queryMemo, 'accounts', args, async () => {
+        const network = networkArgument(args, ctx);
+        const limit = args.limit ?? DEFAULT_PAGE_LIMIT;
+        // The enum cannot name an unknown value, and every declared order is in
+        // ACCOUNT_ORDERS, so the fallback is unreachable in practice — but a bad
+        // order must not reach SQL as an ORDER BY.
+        const orderBy = isAccountOrder(args.orderBy) ? args.orderBy : 'RECENT_ACTIVITY';
+        const items = await getAccounts(ctx.pool, {
+          network: network.name,
+          orderBy,
+          limit,
+          cursor: args.cursor ?? null,
+        });
+        let totalCount = null;
+        if (args.includeTotalCount) {
+          totalCount = await getTableCountEstimateOrExact(ctx.pool, 'accounts', network.name);
+        }
+        return {
+          items,
+          pageInfo: pageInfo(ACCOUNT_ORDERS[orderBy].keyset, items, limit, account => ACCOUNT_ORDERS[orderBy].keyOf(account), totalCount),
+        };
       });
-      return {
-        items,
-        pageInfo: pageInfo(ACCOUNT_ORDERS[orderBy].keyset, items, limit, account => ACCOUNT_ORDERS[orderBy].keyOf(account)),
-      };
     },
 
     async operations(
@@ -221,76 +249,103 @@ export const resolvers = {
         asset?: string | null;
         limit?: number;
         cursor?: string | null;
+        direction?: PaginationDirection | null;
         order?: 'ASC' | 'DESC' | null;
+        includeTotalCount?: boolean | null;
       },
       ctx: Context
     ) {
-      const limit = getPageSize(args.limit);
-      const network = networkArgument(args, ctx);
+      return memoizeRequestQuery(ctx.queryMemo, 'operations', args, async () => {
+        const limit = getPageSize(args.limit);
+        const network = networkArgument(args, ctx);
 
-      // The asset filter needs its own query: an asset can appear as the
-      // payment asset or either side of an offer, which the generic operations
-      // query has no notion of.
-      const items = args.asset
-        ? await getOperationsByAsset(ctx.pool, {
-            network: network.name,
-            asset: args.asset,
-            account: args.account ?? null,
-            type: args.type ?? null,
-            limit,
-            cursor: args.cursor ?? null,
-            order: args.order ?? 'DESC',
-          })
-        : await getOperations(ctx.pool, {
-            network: network.name,
-            account: args.account ?? null,
-            type: args.type ?? null,
-            limit,
-            cursor: args.cursor ?? null,
-            order: args.order ?? 'DESC',
-          });
+        // The asset filter needs its own query: an asset can appear as the
+        // payment asset or either side of an offer, which the generic operations
+        // query has no notion of.
+        const items = args.asset
+          ? await getOperationsByAsset(ctx.pool, {
+              network: network.name,
+              asset: args.asset,
+              account: args.account ?? null,
+              type: args.type ?? null,
+              limit,
+              cursor: args.cursor ?? null,
+              order: args.order ?? 'DESC',
+            })
+          : await getOperations(ctx.pool, {
+              network: network.name,
+              account: args.account ?? null,
+              type: args.type ?? null,
+              limit,
+              cursor: args.cursor ?? null,
+              order: args.order ?? 'DESC',
+            });
 
-      return {
-        items,
-        // The asset filter keyset is the same ordering on the same table.
-        pageInfo: pageInfo(args.asset ? KEYSETS.assetOperations : KEYSETS.operations, items, limit, operation => [operation.ledger, operation.id]),
-      };
+        let totalCount = null;
+        if (args.includeTotalCount) {
+          totalCount = await getTableCountEstimateOrExact(ctx.pool, 'operations', network.name);
+        }
+
+        return {
+          items,
+          // The asset filter keyset is the same ordering on the same table.
+          pageInfo: pageInfo(
+            args.asset ? KEYSETS.assetOperations : KEYSETS.operations,
+            items,
+            limit,
+            operation => [operation.ledger, operation.id],
+            totalCount
+          ),
+        };
+      });
     },
 
     async search(
       _: unknown,
-      args: { network?: string | null; query: string; limit?: number; cursor?: string | null },
+      args: { network?: string | null; query: string; limit?: number; cursor?: string | null; direction?: PaginationDirection | null },
       ctx: Context
     ) {
-      const limit = getPageSize(args.limit);
-      const network = networkArgument(args, ctx);
-      const { items, nextCursor } = await searchTransactions(ctx.pool, {
-        network: network.name,
-        query: args.query,
-        limit,
-        cursor: args.cursor ?? null,
+      return memoizeRequestQuery(ctx.queryMemo, 'search', args, async () => {
+        const limit = getPageSize(args.limit);
+        const network = networkArgument(args, ctx);
+        const { items, nextCursor } = await searchTransactions(ctx.pool, {
+          network: network.name,
+          query: args.query,
+          limit,
+          cursor: args.cursor ?? null,
+        });
+        // Search already computed the cursor for the next page from the ranking
+        // tuple, so its own value is used rather than one rebuilt from the rows.
+        return { items, pageInfo: { hasNextPage: items.length === limit, cursor: nextCursor } };
       });
-      // Search already computed the cursor for the next page from the ranking
-      // tuple, so its own value is used rather than one rebuilt from the rows.
-      return { items, pageInfo: { hasNextPage: items.length === limit, cursor: nextCursor } };
     },
 
     async events(
       _: unknown,
-      args: { network?: string | null; contractId: string; topic?: string | null; limit?: number; cursor?: string | null; order?: 'ASC' | 'DESC' | null },
+      args: {
+        network?: string | null;
+        contractId: string;
+        topic?: string | null;
+        limit?: number;
+        cursor?: string | null;
+        direction?: PaginationDirection | null;
+        order?: 'ASC' | 'DESC' | null;
+      },
       ctx: Context
     ) {
-      const limit = getPageSize(args.limit);
-      const network = networkArgument(args, ctx);
-      const items = await getEventsByContract(ctx.pool, {
-        network: network.name,
-        contractId: args.contractId,
-        topic: args.topic ?? null,
-        limit,
-        cursor: args.cursor ?? null,
-        order: args.order ?? 'DESC',
+      return memoizeRequestQuery(ctx.queryMemo, 'events', args, async () => {
+        const limit = getPageSize(args.limit);
+        const network = networkArgument(args, ctx);
+        const items = await getEventsByContract(ctx.pool, {
+          network: network.name,
+          contractId: args.contractId,
+          topic: args.topic ?? null,
+          limit,
+          cursor: args.cursor ?? null,
+          order: args.order ?? 'DESC',
+        });
+        return { items, pageInfo: pageInfo(KEYSETS.events, items, limit, event => [event.ledger, event.id]) };
       });
-      return { items, pageInfo: pageInfo(KEYSETS.events, items, limit, event => [event.ledger, event.id]) };
     },
 
     async contractStorageEntries(
@@ -302,66 +357,79 @@ export const resolvers = {
         keyPrefix?: string | null;
         limit?: number;
         cursor?: string | null;
+        direction?: PaginationDirection | null;
       },
       ctx: Context
     ) {
-      const limit = getPageSize(args.limit);
-      const network = networkArgument(args, ctx);
-      const items = await getContractStorageEntries(ctx.pool, {
-        network: network.name,
-        contractId: args.contractId,
-        durability: args.durability ?? null,
-        keyPrefix: args.keyPrefix ?? null,
-        limit,
-        cursor: args.cursor ?? null,
+      return memoizeRequestQuery(ctx.queryMemo, 'contractStorageEntries', args, async () => {
+        const limit = getPageSize(args.limit);
+        const network = networkArgument(args, ctx);
+        const items = await getContractStorageEntries(ctx.pool, {
+          network: network.name,
+          contractId: args.contractId,
+          durability: args.durability ?? null,
+          keyPrefix: args.keyPrefix ?? null,
+          limit,
+          cursor: args.cursor ?? null,
+        });
+        return {
+          items,
+          pageInfo: {
+            hasNextPage: items.length === limit,
+            cursor: items.at(-1)?.key ?? null,
+          },
+        };
       });
-      return {
-        items,
-        pageInfo: {
-          hasNextPage: items.length === limit,
-          cursor: items.at(-1)?.key ?? null,
-        },
-      };
     },
 
     async latestLedger(_: unknown, args: { network?: string | null }, ctx: Context) {
-      const network = networkArgument(args, ctx);
-      const cached = latestLedgerCache.get(network.name);
-      if (cached && Date.now() - cached.cachedAt < latestLedgerCacheTtlMs) return cached.value;
+      return memoizeRequestQuery(ctx.queryMemo, 'latestLedger', args, async () => {
+        const network = networkArgument(args, ctx);
+        const cached = latestLedgerCache.get(network.name);
+        if (cached && Date.now() - cached.cachedAt < latestLedgerCacheTtlMs) return cached.value;
 
-      const fromDb = await getLatestLedgerFromDb(ctx.pool, network.name);
-      if (fromDb) {
-        latestLedgerCache.set(network.name, { value: fromDb, cachedAt: Date.now() });
-        return fromDb;
-      }
+        const fromDb = await getLatestLedgerFromDb(ctx.pool, network.name);
+        if (fromDb) {
+          latestLedgerCache.set(network.name, { value: fromDb, cachedAt: Date.now() });
+          return fromDb;
+        }
 
-      const horizonLedger = await getLatestLedgerFromHorizon(network.horizonUrl);
-      if (!horizonLedger) return null;
-      return {
-        network: network.name,
-        sequence: horizonLedger.sequence,
-        closedAt: horizonLedger.closed_at,
-        transactionCount: horizonLedger.successful_transaction_count + horizonLedger.failed_transaction_count,
-        operationCount: horizonLedger.operation_count,
-        baseFee: 100,
-        baseReserve: 5000000,
-      };
+        const horizonLedger = await getLatestLedgerFromHorizon(network.horizonUrl);
+        if (!horizonLedger) return null;
+        return {
+          network: network.name,
+          sequence: horizonLedger.sequence,
+          closedAt: horizonLedger.closed_at,
+          transactionCount: horizonLedger.successful_transaction_count + horizonLedger.failed_transaction_count,
+          operationCount: horizonLedger.operation_count,
+          baseFee: 100,
+          baseReserve: 5000000,
+        };
+      });
     },
 
     async ledger(_: unknown, args: { network?: string | null; sequence: number }, ctx: Context) {
-      const network = networkArgument(args, ctx);
-      return getLedgerBySequence(ctx.pool, network.name, args.sequence);
+      return memoizeRequestQuery(ctx.queryMemo, 'ledger', args, async () => {
+        const network = networkArgument(args, ctx);
+        return getLedgerBySequence(ctx.pool, network.name, args.sequence);
+      });
     },
 
     async ledgers(
       _: unknown,
-      args: { network?: string | null; limit?: number; cursor?: string | null },
+      args: { network?: string | null; limit?: number; cursor?: string | null; includeTotalCount?: boolean | null },
       ctx: Context
     ) {
-      const network = networkArgument(args, ctx);
-      const limit = args.limit ?? DEFAULT_PAGE_LIMIT;
-      const items = await getLedgers(ctx.pool, network.name, limit, args.cursor ?? null);
-      return { items, pageInfo: pageInfo(KEYSETS.ledgers, items, limit, ledger => ledger.sequence) };
+      return memoizeRequestQuery(ctx.queryMemo, 'ledgers', args, async () => {
+        const network = networkArgument(args, ctx);
+        const limit = args.limit ?? DEFAULT_PAGE_LIMIT;
+        const items = await getLedgers(ctx.pool, network.name, limit, args.cursor ?? null);
+        let totalCount = null;
+        if (args.includeTotalCount) {
+          totalCount = await getTableCountEstimateOrExact(ctx.pool, 'ledgers', network.name);
+        }
+        return { items, pageInfo: pageInfo(KEYSETS.ledgers, items, limit, ledger => ledger.sequence, totalCount) };
+      });
     },
 
     async customEvents(
@@ -373,24 +441,27 @@ export const resolvers = {
         where?: CustomEventFilter[] | null;
         limit?: number;
         cursor?: string | null;
+        direction?: PaginationDirection | null;
         order?: 'ASC' | 'DESC' | null;
       },
       ctx: Context
     ) {
-      const limit = getPageSize(args.limit);
-      const network = networkArgument(args, ctx);
-      const items = await getCustomEvents(ctx.pool, {
-        network: network.name,
-        contractId: args.contractId,
-        event: args.event,
-        where: args.where ?? null,
-        limit,
-        cursor: args.cursor ?? null,
-        order: args.order ?? 'DESC',
+      return memoizeRequestQuery(ctx.queryMemo, 'customEvents', args, async () => {
+        const limit = getPageSize(args.limit);
+        const network = networkArgument(args, ctx);
+        const items = await getCustomEvents(ctx.pool, {
+          network: network.name,
+          contractId: args.contractId,
+          event: args.event,
+          where: args.where ?? null,
+          limit,
+          cursor: args.cursor ?? null,
+          order: args.order ?? 'DESC',
+        });
+        // The sort key is (ledger, eventId): the id alone is not unique within a
+        // ledger, so keysetting on it would skip and repeat rows.
+        return { items, pageInfo: pageInfo(KEYSETS.customEvents, items, limit, event => [event.ledger, event.eventId]) };
       });
-      // The sort key is (ledger, eventId): the id alone is not unique within a
-      // ledger, so keysetting on it would skip and repeat rows.
-      return { items, pageInfo: pageInfo(KEYSETS.customEvents, items, limit, event => [event.ledger, event.eventId]) };
     },
 
     async contractSchema(
@@ -398,16 +469,58 @@ export const resolvers = {
       args: { network?: string | null; contractId: string },
       ctx: Context
     ) {
-      const network = networkArgument(args, ctx);
-      const schema = await getContractSchema(ctx.pool, network.name, args.contractId);
-      if (!schema) return null;
-      return {
-        ...schema,
-        events: schema.events.map(event => ({
-          ...event,
-          fields: event.fields.map(field => ({ ...field, optional: field.optional ?? false })),
-        })),
-      };
+      return memoizeRequestQuery(ctx.queryMemo, 'contractSchema', args, async () => {
+        const network = networkArgument(args, ctx);
+        const schema = await getContractSchema(ctx.pool, network.name, args.contractId);
+        if (!schema) return null;
+        return {
+          ...schema,
+          events: schema.events.map(event => ({
+            ...event,
+            fields: event.fields.map(field => ({ ...field, optional: field.optional ?? false })),
+          })),
+        };
+      });
+    },
+
+    async trades(
+      _: unknown,
+      args: {
+        network?: string | null;
+        baseAsset?: { assetType?: string | null; assetCode?: string | null; assetIssuer?: string | null } | null;
+        counterAsset?: { assetType?: string | null; assetCode?: string | null; assetIssuer?: string | null } | null;
+        account?: string | null;
+        limit?: number;
+        cursor?: string | null;
+        includeTotalCount?: boolean | null;
+      },
+      ctx: Context
+    ) {
+      return memoizeRequestQuery(ctx.queryMemo, 'trades', args, async () => {
+        const limit = getPageSize(args.limit);
+        const network = networkArgument(args, ctx);
+        const items = await getTradesFromDb(ctx.pool, network.name, {
+          baseAsset: args.baseAsset ?? undefined,
+          counterAsset: args.counterAsset ?? undefined,
+          account: args.account ?? undefined,
+          limit,
+          cursor: args.cursor ?? null,
+        });
+        let totalCount = null;
+        if (args.includeTotalCount) {
+          totalCount = await getTableCountEstimateOrExact(ctx.pool, 'trades', network.name);
+        }
+        return {
+          items,
+          pageInfo: pageInfo(
+            KEYSETS.trades,
+            items,
+            limit,
+            trade => [trade.ledgerCloseTime, trade.id],
+            totalCount
+          ),
+        };
+      });
     },
 
     async asset(
@@ -421,13 +534,15 @@ export const resolvers = {
       },
       ctx: Context
     ) {
-      const network = networkArgument(args, ctx);
-      return getAssetDetail(ctx.pool, {
-        network: network.name,
-        asset: args.asset,
-        from: args.from ?? null,
-        to: args.to ?? null,
-        bucketSeconds: args.bucketSeconds ?? null,
+      return memoizeRequestQuery(ctx.queryMemo, 'asset', args, async () => {
+        const network = networkArgument(args, ctx);
+        return getAssetDetail(ctx.pool, {
+          network: network.name,
+          asset: args.asset,
+          from: args.from ?? null,
+          to: args.to ?? null,
+          bucketSeconds: args.bucketSeconds ?? null,
+        });
       });
     },
 
@@ -442,14 +557,16 @@ export const resolvers = {
       },
       ctx: Context
     ) {
-      const network = networkArgument(args, ctx);
-      const { getAssets } = await import('./assets');
-      return getAssets(ctx.pool, {
-        network: network.name,
-        sortBy: args.sortBy ?? 'HOLDERS',
-        search: args.search ?? null,
-        limit: args.limit ?? 20,
-        cursor: args.cursor ?? null,
+      return memoizeRequestQuery(ctx.queryMemo, 'assets', args, async () => {
+        const network = networkArgument(args, ctx);
+        const { getAssets } = await import('./assets');
+        return getAssets(ctx.pool, {
+          network: network.name,
+          sortBy: args.sortBy ?? 'HOLDERS',
+          search: args.search ?? null,
+          limit: args.limit ?? 20,
+          cursor: args.cursor ?? null,
+        });
       });
     },
 
@@ -462,9 +579,11 @@ export const resolvers = {
       },
       ctx: Context
     ) {
-      const network = networkArgument(args, ctx);
-      const { getAssetByKey } = await import('./assets');
-      return getAssetByKey(ctx.pool, network.name, args.code, args.issuer);
+      return memoizeRequestQuery(ctx.queryMemo, 'assetByKey', args, async () => {
+        const network = networkArgument(args, ctx);
+        const { getAssetByKey } = await import('./assets');
+        return getAssetByKey(ctx.pool, network.name, args.code, args.issuer);
+      });
     },
 
     async accountBalanceHistory(
@@ -478,20 +597,24 @@ export const resolvers = {
       },
       ctx: Context
     ) {
-      const network = networkArgument(args, ctx);
-      return computeBalanceHistory(
-        ctx.pool,
-        network.name,
-        args.address,
-        args.asset ?? 'XLM',
-        args.from,
-        args.to
-      );
+      return memoizeRequestQuery(ctx.queryMemo, 'accountBalanceHistory', args, async () => {
+        const network = networkArgument(args, ctx);
+        return computeBalanceHistory(
+          ctx.pool,
+          network.name,
+          args.address,
+          args.asset ?? 'XLM',
+          args.from,
+          args.to
+        );
+      });
     },
 
     async indexerStatus(_: unknown, args: { network?: string | null }, ctx: Context) {
-      const network = networkArgument(args, ctx);
-      return getIndexerStatus(ctx.pool, network);
+      return memoizeRequestQuery(ctx.queryMemo, 'indexerStatus', args, async () => {
+        const network = networkArgument(args, ctx);
+        return getIndexerStatus(ctx.pool, network);
+      });
     },
   },
 

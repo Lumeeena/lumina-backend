@@ -63,3 +63,101 @@ async function applyMigration(client: PoolClient, migration: Migration): Promise
   try { await client.query(migration.sql); await client.query('COMMIT'); }
   catch (error) { await client.query('ROLLBACK'); throw error; }
 }
+
+/** Migrations that restructure underlying tables, partitions, or primary keys and cannot be reverted in-place. */
+export const IRREVERSIBLE_MIGRATIONS = [
+  '001_init',
+  '006_partition_operations',
+  '007_networks',
+] as const;
+
+export function isMigrationIrreversible(version: string): boolean {
+  return (IRREVERSIBLE_MIGRATIONS as readonly string[]).includes(version);
+}
+
+/**
+ * Load all `.down.sql` migrations from the migrations directory.
+ * Keyed by the migration version string (e.g. `002_account_event_columns`).
+ */
+export function loadDownMigrations(directory?: string): Map<string, Migration> {
+  directory ??= [resolve(__dirname, '../../db/migrations'), resolve(__dirname, '../db/migrations')].find(existsSync)
+    ?? resolve(process.cwd(), 'db/migrations');
+  const downMigrations = new Map<string, Migration>();
+  for (const name of readdirSync(directory)) {
+    if (!/^\d+_[a-z0-9_-]+\.down\.sql$/i.test(name)) continue;
+    const version = name.replace(/\.down\.sql$/, '');
+    let sql = readFileSync(join(directory, name), 'utf8');
+    sql = sql.replace(/^\\echo.*$/gm, '');
+    downMigrations.set(version, { version, sql });
+  }
+  return downMigrations;
+}
+
+/**
+ * Rollback a specific migration by executing its down script and removing it from `schema_migrations`.
+ */
+export async function rollbackMigration(pool: Pool, targetVersion: string, directory?: string): Promise<void> {
+  if (isMigrationIrreversible(targetVersion)) {
+    throw new Error(`Migration ${targetVersion} is irreversible and cannot be rolled back.`);
+  }
+
+  const downMigrations = loadDownMigrations(directory);
+  const downMigration = downMigrations.get(targetVersion);
+  if (!downMigration) {
+    throw new Error(`No down migration found for version: ${targetVersion}`);
+  }
+
+  const client = await pool.connect();
+  try {
+    await client.query('SELECT pg_advisory_lock($1)', [74192061]);
+
+    const result = await client.query<{ version: string }>(
+      'SELECT version FROM schema_migrations WHERE version = $1',
+      [targetVersion]
+    );
+    if (result.rows.length === 0) {
+      throw new Error(`Migration ${targetVersion} has not been applied.`);
+    }
+
+    await client.query('BEGIN');
+    try {
+      await client.query(downMigration.sql);
+      await client.query('DELETE FROM schema_migrations WHERE version = $1', [targetVersion]);
+      await client.query('COMMIT');
+    } catch (err) {
+      await client.query('ROLLBACK');
+      throw err;
+    }
+  } finally {
+    try {
+      await client.query('SELECT pg_advisory_unlock($1)', [74192061]);
+    } finally {
+      client.release();
+    }
+  }
+}
+
+/**
+ * Rollback the most recently applied migration.
+ */
+export async function rollbackLastMigration(pool: Pool, directory?: string): Promise<string | null> {
+  const client = await pool.connect();
+  let lastApplied: string | null = null;
+  try {
+    await client.query('SELECT pg_advisory_lock($1)', [74192061]);
+    const result = await client.query<{ version: string }>(
+      'SELECT version FROM schema_migrations ORDER BY applied_at DESC, version DESC LIMIT 1'
+    );
+    lastApplied = result.rows[0]?.version ?? null;
+  } finally {
+    try {
+      await client.query('SELECT pg_advisory_unlock($1)', [74192061]);
+    } finally {
+      client.release();
+    }
+  }
+
+  if (!lastApplied) return null;
+  await rollbackMigration(pool, lastApplied, directory);
+  return lastApplied;
+}
