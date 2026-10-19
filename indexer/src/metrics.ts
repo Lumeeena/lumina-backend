@@ -295,10 +295,12 @@ export function recordLedgerGaps(network: string, count: number): void {
   ledgerGapsCount.set({ network }, count);
 }
 
+/** Returns the Prometheus content-type string for HTTP response headers. */
 export function metricsContentType(): string {
   return registry.contentType;
 }
 
+/** Renders all registered metrics in Prometheus text exposition format. */
 export function renderMetrics(): Promise<string> {
   return registry.metrics();
 }

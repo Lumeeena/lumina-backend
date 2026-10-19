@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { getLatestLedgerSequence, getLedger, getLedgerTransactions, getAccount, PAGE_LIMIT, initializeHorizonClient } from './horizon';
+import { getLatestLedgerSequence, getLedger, getLedgerTransactions, getLedgerOperations, getAccount, getTrades, PAGE_LIMIT, initializeHorizonClient } from './horizon';
 // @ts-expect-error - JSON file imports are enabled at runtime for this test fixture.
 import fixtures from './__fixtures__/horizon.json' assert { type: 'json' };
 
@@ -106,4 +106,54 @@ test('getAccount throws on transient HTTP failures so queued refreshes can retry
     () => getAccount('https://horizon.example.com', 'G-rate-limited'),
     /status 429/
   );
+});
+
+test('getLedgerOperations parses recorded Horizon response shape', async () => {
+  mockFetchSequence([{ ok: true, body: fixtures.operationPage }]);
+  const ops = await getLedgerOperations('https://horizon.example.com', 52481234);
+  assert.equal(ops.length, 1);
+  assert.equal(ops[0].id, '223456789504897');
+  assert.equal(ops[0].type, 'payment');
+  assert.equal(ops[0].source_account, fixtures.operation.source_account);
+});
+
+test('getLedgerOperations follows pagination when a page is full', async () => {
+  const fullPage = Array.from({ length: PAGE_LIMIT }, (_, i) => ({
+    ...fixtures.operation,
+    id: `op-${i}`,
+  }));
+  mockFetchSequence([
+    { ok: true, body: { _embedded: { records: fullPage }, _links: { next: { href: 'page2' } } } },
+    { ok: true, body: { _embedded: { records: [fixtures.operation] }, _links: {} } },
+  ]);
+  const ops = await getLedgerOperations('https://horizon.example.com', 52481234);
+  assert.equal(ops.length, PAGE_LIMIT + 1);
+  assert.equal(ops[0].id, 'op-0');
+  assert.equal(ops.at(-1)?.id, fixtures.operation.id);
+});
+
+test('getLedgerOperations stops after a single short page', async () => {
+  mockFetchSequence([
+    { ok: true, body: { _embedded: { records: [fixtures.operation] }, _links: {} } },
+  ]);
+  const ops = await getLedgerOperations('https://horizon.example.com', 52481234);
+  assert.equal(ops.length, 1);
+});
+
+test('getTrades parses recorded Horizon response shape', async () => {
+  mockFetchSequence([{ ok: true, body: fixtures.tradesPage }]);
+  const trades = await getTrades('https://horizon.example.com');
+  assert.equal(trades.length, 1);
+  assert.equal(trades[0].id, '1234567890123456789');
+  assert.equal(trades[0].base_account, fixtures.trade.base_account);
+  assert.equal(trades[0].base_asset_type, 'native');
+});
+
+test('getTrades returns an empty array when no trades match the filter', async () => {
+  mockFetchSequence([{ ok: true, body: { _embedded: { records: [] } } }]);
+  const trades = await getTrades('https://horizon.example.com', {
+    base_asset_type: 'native',
+    limit: 10,
+  });
+  assert.equal(trades.length, 0);
 });

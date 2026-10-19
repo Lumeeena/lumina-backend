@@ -43,8 +43,19 @@ interface ContractEntry {
   registered_at: number;
 }
 
+/**
+ * Page size for each `get_active_contracts` call. Kept moderate to stay within
+ * Soroban's transaction size limits while minimising round-trips.
+ */
 const PAGE_LIMIT = 50;
-const MAX_PAGES = 20; // safety cap: 1000 contracts
+
+/**
+ * Safety cap on the number of pages fetched. At `PAGE_LIMIT` (50) records per
+ * page, this bounds discovery at 1,000 contracts total — enough for any
+ * realistic deployment while preventing an unbounded loop if the registry's
+ * pagination contract is broken.
+ */
+const MAX_PAGES = 20;
 
 /**
  * A network's registry, or absent when that network does not discover.
@@ -127,6 +138,7 @@ export function resolveRegistryConfigs(
   return configs;
 }
 
+/** Thrown when registry configuration is incomplete or inconsistent at startup. */
 export class RegistryConfigError extends Error {
   constructor(message: string) {
     super(message);
@@ -134,7 +146,22 @@ export class RegistryConfigError extends Error {
   }
 }
 
-/** Paginates through get_active_contracts and returns the contract IDs of every active entry. */
+/**
+ * Paginates through `get_active_contracts` on the registry contract and returns
+ * the contract IDs of every active entry.
+ *
+ * Each page calls `get_active_contracts(offset, limit)` via a simulated
+ * transaction — a read-only call, so no signing is required and the read
+ * account only needs to exist on the network. Pagination stops when a page
+ * returns fewer than `PAGE_LIMIT` entries (the last page) or when `MAX_PAGES`
+ * is reached (the safety cap, currently 1,000 contracts).
+ *
+ * Throws if the simulation returns an error, so the caller (`pollRegistry`) can
+ * catch it and keep the previously discovered list rather than silently
+ * dropping back to the static contract list.
+ *
+ * @returns an array of contract ID strings (e.g. `["CA…", "CB…"]`)
+ */
 export async function getActiveContracts(
   rpcUrl: string,
   registryContractId: string,

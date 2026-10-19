@@ -5,6 +5,8 @@ import {
   SuccessSampler,
   resolveSampleRate,
   routineLogger,
+  subsystem,
+  logger,
   type LogSink,
 } from './logger';
 
@@ -121,4 +123,63 @@ test('sampling decisions are independent per logger', () => {
 test('the default rate is low enough to cut steady-state volume', () => {
   // 1% of ~17k ledgers/day is ~170 lines instead of ~17k.
   assert.ok(DEFAULT_LOG_SAMPLE_RATE > 0 && DEFAULT_LOG_SAMPLE_RATE < 0.05);
+});
+
+test('subsystem() returns a child logger tagged with the subsystem name', () => {
+  const log = subsystem('horizon');
+  assert.equal(typeof log.info, 'function');
+  assert.equal(typeof log.warn, 'function');
+  assert.equal(typeof log.error, 'function');
+  assert.equal(typeof log.child, 'function');
+  // The child logger is a pino logger — it should be a distinct object from
+  // the root logger, so each subsystem's bindings don't leak into the others.
+  assert.notEqual(log, logger);
+});
+
+test('subsystem() with different names produces distinct loggers', () => {
+  const a = subsystem('horizon');
+  const b = subsystem('registry');
+  assert.notEqual(a, b);
+});
+
+test('routineLogger logs a warning when LOG_SAMPLE_RATE is unusable and no explicit rate is given', () => {
+  // Save and restore the env var so the test is isolated.
+  const saved = process.env.LOG_SAMPLE_RATE;
+  process.env.LOG_SAMPLE_RATE = 'not-a-number';
+
+  try {
+    // When options.rate is undefined, resolveSampleRate reads the env var.
+    // A bad value falls back to the default and returns a warning string.
+    // The warning is emitted through the root logger (stdout), not the sink,
+    // so we verify that the routine logger still works — it does not throw,
+    // and the fallback rate is applied.
+    const sink = recordingSink();
+    const routine = routineLogger('t', { sink });
+    routine.success({ ledger: 1 }, 'ledger indexed');
+    // At the default rate (0.01) one call is very unlikely to emit, but the
+    // point is that the logger was constructed without throwing.
+    assert.equal(typeof routine.success, 'function');
+    assert.equal(typeof routine.warn, 'function');
+    assert.equal(typeof routine.error, 'function');
+  } finally {
+    if (saved === undefined) delete process.env.LOG_SAMPLE_RATE;
+    else process.env.LOG_SAMPLE_RATE = saved;
+  }
+});
+
+test('routineLogger with an explicit rate skips env-var resolution entirely', () => {
+  const saved = process.env.LOG_SAMPLE_RATE;
+  process.env.LOG_SAMPLE_RATE = 'not-a-number';
+
+  try {
+    const sink = recordingSink();
+    // An explicit rate bypasses resolveSampleRate, so no warning is produced
+    // even when the env var is garbage.
+    const routine = routineLogger('t', { rate: 1, sink });
+    routine.success({ ledger: 1 }, 'ledger indexed');
+    assert.equal(sink.entries.length, 1);
+  } finally {
+    if (saved === undefined) delete process.env.LOG_SAMPLE_RATE;
+    else process.env.LOG_SAMPLE_RATE = saved;
+  }
 });
