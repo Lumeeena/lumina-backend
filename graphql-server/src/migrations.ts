@@ -52,11 +52,35 @@ export async function runMigrations(pool: Pool, migrations: Migration[], apply =
   }
 }
 
+/** Migrations that build or drop indexes CONCURRENTLY, which cannot run inside a transaction. */
+const CONCURRENT_MIGRATIONS = new Set([
+  '004_search_indexes',
+  '008_accounts_listing_index',
+  '010_transaction_filters',
+  '015_transactions_listing_covering_index',
+]);
+
+/**
+ * One statement per element, comments dropped.
+ *
+ * Postgres runs a multi-statement query string as one implicit transaction, so
+ * sending a concurrent migration whole fails exactly as BEGIN would. The split
+ * is on a `;` that ends a line, which is safe for these files because none of
+ * them contains a function body.
+ */
+export function splitStatements(sql: string): string[] {
+  return sql
+    .replace(/^\s*--.*$/gm, '')
+    .split(/;\s*$/m)
+    .map(statement => statement.trim())
+    .filter(statement => statement.length > 0);
+}
+
 async function applyMigration(client: PoolClient, migration: Migration): Promise<void> {
-  // Concurrent index builds cannot run inside a transaction. These migrations
-  // are idempotent and write their history row last.
-  if (migration.version === '004_search_indexes' || migration.version === '010_transaction_filters') {
-    await client.query(migration.sql);
+  // These migrations are idempotent and write their history row last, so a
+  // failure part-way is safe to re-run.
+  if (CONCURRENT_MIGRATIONS.has(migration.version)) {
+    for (const statement of splitStatements(migration.sql)) await client.query(statement);
     return;
   }
   await client.query('BEGIN');

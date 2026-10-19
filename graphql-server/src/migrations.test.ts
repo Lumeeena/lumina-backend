@@ -16,7 +16,9 @@ test('loads migrations in order and expands initial schema include', () => {
     '008_account_refresh_queue', '008_accounts_listing_index', '008_data_constraints',
     '008_retry_queue', '009_contract_storage_entries', '010_contract_storage_history',
     '010_retention_prune_indexes', '010_transaction_filters', '010_trustlines',
-    '011_assets', '012_asset_volume_buckets',
+    '011_assets', '012_asset_volume_buckets', '013_backfill_progress', '013_export_jobs',
+    '013_failed_ledgers', '013_trades', '013_trustline_changes', '014_pools_claims_paths_signers',
+    '015_transactions_listing_covering_index',
   ]);
   assert.match(migrations[0].sql, /CREATE TABLE IF NOT EXISTS ledgers/);
   assert.match(migrations[0].sql, /PRIMARY KEY \(id, network\)/);
@@ -27,6 +29,22 @@ test('loads migrations in order and expands initial schema include', () => {
   assert.match(networks?.sql, /ALTER TABLE operations ADD PRIMARY KEY \(id, network\)/);
   assert.doesNotMatch(networks?.sql, /ADD PRIMARY KEY \(id, ledger, network\)/);
   assert.match(networks?.sql, /FOREIGN KEY \(transaction_hash, network\) REFERENCES transactions \(hash, network\)/);
+});
+
+test('concurrent migrations are sent one statement at a time', () => {
+  // A multi-statement query string runs as one implicit transaction, which
+  // CREATE INDEX CONCURRENTLY rejects just as it rejects BEGIN.
+  const { splitStatements } = require('./migrations');
+  const migration = loadMigrations().find(m => m.version === '015_transactions_listing_covering_index');
+  assert.ok(migration);
+  const statements: string[] = splitStatements(migration.sql);
+  assert.deepEqual(statements.map(s => s.split(/\s+/).slice(0, 3).join(' ')), [
+    'CREATE INDEX CONCURRENTLY',
+    'DROP INDEX CONCURRENTLY',
+    'ALTER TABLE transactions',
+    'INSERT INTO schema_migrations',
+  ]);
+  assert.ok(statements.every(s => !s.includes(';')));
 });
 
 test('migration status refuses a later migration when an earlier one is pending', async () => {

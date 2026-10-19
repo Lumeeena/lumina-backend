@@ -55,6 +55,13 @@ CREATE INDEX idx_transactions_ledger     ON transactions (ledger DESC);
 CREATE INDEX idx_transactions_source     ON transactions (source_account);
 CREATE INDEX idx_transactions_created_at ON transactions (created_at DESC);
 
+-- Serves the `transactions` listing as an Index Only Scan: the key is the
+-- keyset order, and INCLUDE carries every column the listing selects. See
+-- db/migrations/015_transactions_listing_covering_index.sql.
+CREATE INDEX idx_transactions_network_ledger_hash_covering
+    ON transactions (network, ledger DESC, hash DESC)
+    INCLUDE (created_at, source_account, fee_charged, operation_count, successful, memo_type, memo);
+
 -- ─── Operations ───────────────────────────────────────────────────────────────
 --
 -- A plain table, not partitioned. It was range-partitioned by ledger for a
@@ -601,9 +608,11 @@ CREATE INDEX IF NOT EXISTS idx_threshold_changes_op
 
 
 -- Lower insert-triggered vacuum/analyze thresholds for the append-heavy tables.
+-- transactions vacuums on a fixed row count so the visibility map keeps up with
+-- the newest pages, which the covering listing index needs to skip the heap.
 ALTER TABLE transactions SET (
-    autovacuum_vacuum_insert_threshold = 5000,
-    autovacuum_vacuum_insert_scale_factor = 0.05,
+    autovacuum_vacuum_insert_threshold = 50000,
+    autovacuum_vacuum_insert_scale_factor = 0,
     autovacuum_analyze_threshold = 5000,
     autovacuum_analyze_scale_factor = 0.02
 );
