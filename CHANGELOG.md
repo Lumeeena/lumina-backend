@@ -19,6 +19,10 @@ Breaking changes are rare and advance the major version. Deprecation notices app
 ## [Unreleased]
 
 ### Added
+- `account(address:, asOfLedger:)`: the account as the indexer last recorded it at or before a ledger. Served from stored snapshots, with no Horizon fallback, and bounded by `RETENTION_ACCOUNT_STATE_HISTORY_DAYS`. Answers are lower bounds on the account's history, because changes between two refreshes are not visible. See `docs/ACCOUNT_STATE_HISTORY.md` (#238)
+- Single-writer guard for the indexer: a Postgres advisory lock held on a dedicated connection, so a second replica waits as a standby and takes over when the leader exits or crashes. A lost lock stops the process with status 1. `INDEXER_LEADER_LOCK=false` disables it. See `docs/INDEXER_CONTROL_FLOW.md` section 5 (#239)
+- Boundary validation for Horizon responses in the indexer: a missing or mistyped field fails with an error naming it, and the raw response is kept on the error and in a `warn` log line, truncated to 4 KB. A malformed account throws rather than reading as not found (#244)
+- `docs/LOG_SHIPPING.md` and a Fluent Bit template in `docker/observability/log-shipping/`: ship the existing stdout JSON to an aggregator with no application change, with the fields to index and the pino level mapping (#249)
 - `accounts(network, orderBy, limit, cursor)` query: the indexed accounts the indexer has seen, paginated and ordered `RECENT_ACTIVITY` (last-modified ledger first) or `ADDRESS`. An address the indexer has never seen is absent by design, and that caveat is stated in the schema rather than left to be discovered (#48)
 - `ledgers(network, limit, cursor)` query: indexed ledgers newest first, paginated on the sequence, for the ledger-throughput-over-time series that `ledger(sequence:)` and `latestLedger` could not answer. Rows are mapped exactly as `ledger(sequence:)` returns them, so a chart and a detail page cannot disagree (#47)
 - Incremental bulk export: `since_ledger` parameter on bulk exports with max exported ledger checkpoint tracking for downstream syncs (#94)

@@ -171,3 +171,54 @@ eventsCursor with Safety Lag:  105 - 3 + 1 = Ledger 103
 3. **Decoupled Recovery (`RetryWorker` & `repairLedgerGaps`)**:
    - `RetryWorker` runs in a background timer every 30 seconds, picking up failed ledgers from `ledger_retry_queue` with exponential backoff up to 10 attempts.
    - `repairLedgerGaps()` runs every 30 seconds, detecting sequence gaps in `ledgers` (`sequence + 1 < next_sequence`) and repairing them out of band.
+
+## 5. Single Writer and Response Validation
+
+### One writer per database
+
+The indexer is single-writer by design. Each network's loop reads a cursor,
+calls Horizon, and writes the ledgers that follow it. Two processes on the same
+database would both walk the same cursors. `ON CONFLICT DO NOTHING` keeps the
+rows from doubling, but the Horizon requests double, and the cursors fight.
+
+The process takes a Postgres advisory lock (`LEADER_LOCK_KEY` in
+`indexer/src/leaderLock.ts`) on a dedicated connection before any loop starts:
+
+- The first process to start holds the lock and indexes. Others wait as
+  standbys, retrying every `INDEXER_LEADER_RETRY_MS` (default 5000) and doing no
+  indexing.
+- A clean shutdown releases the lock explicitly.
+- A crash releases it too. The lock belongs to the session, and Postgres ends the
+  session when the connection drops. TCP keepalive bounds how long a silently
+  dead peer can hold it.
+- If the connection drops while a process is leading, the lock is already gone,
+  so that process logs `leader lock lost` and exits with status 1. A supervisor
+  restarts it into standby, and no second writer runs.
+
+A standby's `/health` reports no indexing progress and answers 503. That is
+expected: the standby is healthy and waiting, and its health check cannot tell
+the difference from a stalled leader. Use the leader's `/health` and
+`pg_stat_activity` (application name `lumina-indexer-leader`) to see which
+process leads.
+
+`INDEXER_LEADER_LOCK=false` turns the lock off. Nothing in this repository
+supports running two writers on purpose.
+
+### Horizon responses are checked before they are written
+
+Horizon's response types are compile-time interfaces only. The indexer checks
+the fields it reads at the boundary (`shared/src/validate.ts`), so a malformed
+response fails with the path of the field that does not match:
+
+```
+Horizon response from https://…/ledgers/52481234 is malformed: response.operation_count expected number, got string
+```
+
+The error carries the response body, truncated to 4 KB, as `raw`, and the same
+body is logged at `warn` with the failing `field`. A malformed response is never
+retried, because the same request returns the same body. It also never reads as
+"not found": a malformed account throws, so the refresh queue keeps the work
+pending rather than marking it done.
+
+Only the indexer turns checks on. The GraphQL server reads a few fields and
+falls back to `null`, so it leaves the option off.

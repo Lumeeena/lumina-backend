@@ -407,6 +407,8 @@ npm run dev
 | Variable                         | Default                                                       |
 | -------------------------------- | ------------------------------------------------------------- |
 | `HEALTH_PORT`                    | `9090` — port serving `/health`, `/ready` and `/metrics`      |
+| `INDEXER_LEADER_LOCK`            | `true` — single-writer guard; a second indexer on the same database waits as standby. `false` disables it. See `docs/INDEXER_CONTROL_FLOW.md` §5 |
+| `INDEXER_LEADER_RETRY_MS`        | `5000` — how often a standby retries the leader lock          |
 | `HEALTH_MAX_SECONDS_SINCE_INDEX` | `60` — stall threshold before `/health` reports 503           |
 | `HEALTH_MAX_LAG_LEDGERS`         | `20` — lag threshold before `/health` reports 503             |
 | `LOG_LEVEL`                      | `info`                                                        |
