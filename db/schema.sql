@@ -599,6 +599,19 @@ CREATE INDEX IF NOT EXISTS idx_threshold_changes_account
 CREATE INDEX IF NOT EXISTS idx_threshold_changes_op
     ON account_threshold_changes (operation_id, network);
 
+-- ─── Admin Operations ─────────────────────────────────────────────────────────
+
+CREATE TABLE IF NOT EXISTS admin_operations (
+    id              BIGSERIAL PRIMARY KEY,
+    network         TEXT NOT NULL,
+    command         TEXT NOT NULL,
+    arguments       JSONB NOT NULL,
+    success         BOOLEAN NOT NULL,
+    details         TEXT,
+    executed_at     TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_admin_operations_network ON admin_operations (network, executed_at DESC);
 
 -- Lower insert-triggered vacuum/analyze thresholds for the append-heavy tables.
 ALTER TABLE transactions SET (
