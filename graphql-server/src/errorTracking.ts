@@ -3,12 +3,12 @@
  *
  * Opt-in by design: with `SENTRY_DSN` unset the SDK is never initialized and
  * every export degrades to a no-op, so local runs and tests stay inert. Once a
- * DSN is present, `beforeSend` scrubs each event before it leaves the process:
- * credential-bearing request headers become `[REDACTED]`, and
- * `password`/`api_key`/`token`/`secret` values inside SQL statements and stack
- * context lines are masked, so API credentials and user data never reach
- * Sentry. Captured exceptions are tagged with the service name and release so
- * issues can be routed per deployment.
+ * DSN is present, `beforeSend` and `beforeSendTransaction` scrub each event
+ * before it leaves the process: credential-bearing request headers become
+ * `[REDACTED]`, and `password`/`api_key`/`token`/`secret` values inside SQL
+ * statements and stack context lines are masked, so API credentials and user
+ * data never reach Sentry. Captured exceptions are tagged with the service
+ * name and release so issues can be routed per deployment.
  */
 import * as Sentry from '@sentry/node';
 import { subsystem } from './logger';
@@ -23,8 +23,9 @@ const SENTRY_RELEASE = process.env.SENTRY_RELEASE ?? '0.1.0';
 const SERVICE_NAME = 'lumina-graphql';
 
 /**
- * Request headers that carry credentials. Their values are replaced with
- * `[REDACTED]` before an event is transmitted.
+ * Request headers that carry credentials, matched case-insensitively because
+ * header casing is not guaranteed across the paths that populate an event.
+ * Their values are replaced with `[REDACTED]` before an event is transmitted.
  */
 const SENSITIVE_HEADERS = ['authorization', 'cookie', 'x-api-key', 'x-token'];
 
@@ -47,7 +48,12 @@ export function initErrorTracking(): void {
     // Sentry useful for diagnosing slow queries and subscriptions. Lower this
     // if transaction volume or cost grows.
     tracesSampleRate: 1.0,
+    // Never attach default PII (IP addresses, request bodies); the scrubbing
+    // hooks below are defense in depth for anything that still reaches an
+    // event.
+    sendDefaultPii: false,
     beforeSend,
+    beforeSendTransaction,
   });
 
   log.info({ environment: SENTRY_ENVIRONMENT, release: SENTRY_RELEASE }, 'Sentry initialized');
@@ -58,6 +64,20 @@ export function initErrorTracking(): void {
  * stack context lines from error events before they are transmitted.
  */
 export function beforeSend(event: Sentry.ErrorEvent): Sentry.ErrorEvent {
+  return scrubSensitiveData(event);
+}
+
+/**
+ * Sentry `beforeSendTransaction` hook: the same scrubbing as `beforeSend`, for
+ * transaction (performance) events — which carry their own request and
+ * database context — before they are transmitted.
+ *
+ * `@sentry/node` does not re-export `TransactionEvent`, so the parameter is
+ * described structurally: the base event with its `type` discriminant.
+ */
+export function beforeSendTransaction(
+  event: Sentry.Event & { type: 'transaction' }
+): Sentry.Event & { type: 'transaction' } {
   return scrubSensitiveData(event);
 }
 
@@ -93,13 +113,13 @@ export function setUserContext(userId?: string, email?: string): void {
   }
 }
 
-function scrubSensitiveData(event: Sentry.ErrorEvent): Sentry.ErrorEvent {
+function scrubSensitiveData<T extends Sentry.Event>(event: T): T {
   if (event.request) {
     const headers = event.request.headers || {};
     const scrubbed = { ...headers };
-    for (const header of SENSITIVE_HEADERS) {
-      if (header in scrubbed) {
-        scrubbed[header] = '[REDACTED]';
+    for (const key of Object.keys(scrubbed)) {
+      if (SENSITIVE_HEADERS.includes(key.toLowerCase())) {
+        scrubbed[key] = '[REDACTED]';
       }
     }
     event.request.headers = scrubbed;

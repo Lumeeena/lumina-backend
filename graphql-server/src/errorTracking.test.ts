@@ -1,10 +1,17 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import type { ErrorEvent } from '@sentry/node';
-import { beforeSend } from './errorTracking';
+import { beforeSend, beforeSendTransaction } from './errorTracking';
+
+// TransactionEvent is not re-exported by @sentry/node; derive it from the hook.
+type TransactionEvent = Parameters<typeof beforeSendTransaction>[0];
 
 function errorEvent(overrides: Partial<ErrorEvent> = {}): ErrorEvent {
   return { ...overrides } as ErrorEvent;
+}
+
+function transactionEvent(overrides: Partial<TransactionEvent> = {}): TransactionEvent {
+  return { type: 'transaction', ...overrides } as TransactionEvent;
 }
 
 test('beforeSend redacts credential-bearing request headers', () => {
@@ -72,4 +79,36 @@ test('beforeSend leaves ordinary SQL untouched', () => {
   const event = errorEvent({ contexts: { db: { statement: sql } } });
 
   assert.equal(beforeSend(event).contexts?.db?.statement, sql);
+});
+
+test('beforeSend redacts sensitive headers regardless of casing', () => {
+  const event = errorEvent({
+    request: {
+      headers: {
+        Authorization: 'Bearer top-secret',
+        cookie: 'session=abc',
+        'X-Api-Key': 'key-123',
+        'X-Token': 'token-456',
+      },
+    },
+  });
+
+  const headers = beforeSend(event).request?.headers;
+
+  assert.equal(headers?.['Authorization'], '[REDACTED]');
+  assert.equal(headers?.['cookie'], '[REDACTED]');
+  assert.equal(headers?.['X-Api-Key'], '[REDACTED]');
+  assert.equal(headers?.['X-Token'], '[REDACTED]');
+});
+
+test('beforeSendTransaction applies the same scrubbing to transaction events', () => {
+  const event = transactionEvent({
+    request: { headers: { cookie: 'session=abc' } },
+    contexts: { db: { statement: "SELECT * FROM api_keys WHERE token = 'abc123'" } },
+  });
+
+  const scrubbed = beforeSendTransaction(event);
+
+  assert.equal(scrubbed.request?.headers?.['cookie'], '[REDACTED]');
+  assert.match(String(scrubbed.contexts?.db?.statement), /token=\*\*\*/);
 });
