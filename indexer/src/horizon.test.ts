@@ -157,3 +157,64 @@ test('getTrades returns an empty array when no trades match the filter', async (
   });
   assert.equal(trades.length, 0);
 });
+
+test('getLedger names the field when a required value has the wrong type', async () => {
+  mockFetchSequence([{ ok: true, body: { ...fixtures.ledger, operation_count: '25' } }]);
+  await assert.rejects(
+    () => getLedger('https://horizon.example.com', 52481234),
+    (err: Error) => {
+      assert.equal(err.name, 'HorizonResponseError');
+      assert.match(err.message, /response\.operation_count expected number, got string/);
+      return true;
+    }
+  );
+});
+
+test('getLedgerTransactions reports the index of the malformed record in a page', async () => {
+  mockFetchSequence([
+    {
+      ok: true,
+      body: {
+        _embedded: { records: [fixtures.transaction, { ...fixtures.transaction, memo: undefined }, { ...fixtures.transaction, hash: 42 }] },
+        _links: {},
+      },
+    },
+  ]);
+  await assert.rejects(
+    () => getLedgerTransactions('https://horizon.example.com', 100),
+    (err: Error) => {
+      assert.match(err.message, /records\[2\]\.hash expected string, got number/);
+      return true;
+    }
+  );
+});
+
+test('a record missing only fields the indexer does not read still passes', async () => {
+  mockFetchSequence([
+    { ok: true, body: { _embedded: { records: [{ ...fixtures.operation, to: undefined }] }, _links: {} } },
+  ]);
+  const ops = await getLedgerOperations('https://horizon.example.com', 52481234);
+  assert.equal(ops.length, 1);
+});
+
+test('a malformed account throws rather than reading as not found', async () => {
+  mockFetchSequence([{ ok: true, body: { ...fixtures.account, balances: 'none' } }]);
+  await assert.rejects(
+    () => getAccount('https://horizon.example.com', 'G-malformed'),
+    /response\.balances expected array, got string/
+  );
+});
+
+test('a malformed response keeps the raw body on the error, truncated', async () => {
+  const huge = 'x'.repeat(10_000);
+  mockFetchSequence([{ ok: true, body: { ...fixtures.ledger, sequence: undefined, note: huge } }]);
+  await assert.rejects(
+    () => getLedger('https://horizon.example.com', 52481234),
+    (err: Error & { raw?: string; field?: string }) => {
+      assert.equal(err.field, 'response.sequence');
+      assert.ok(err.raw?.includes('"note"'));
+      assert.ok((err.raw?.length ?? 0) <= 4097);
+      return true;
+    }
+  );
+});

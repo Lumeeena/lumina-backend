@@ -9,6 +9,9 @@ indexer and the GraphQL server alike. It holds:
   with the types both services read.
 - `src/throttle.ts` — the request pacer the Horizon client and the indexer's
   Soroban RPC calls share.
+- `src/validate.ts` — field-level checks for Horizon responses, run at the
+  boundary when the client's `validateResponses` option is set. A failure throws
+  `HorizonResponseError`, which names the field and keeps the raw body.
 
 It imports nothing from either service: configuration, the logger and the
 metrics registry are injected by the caller, which is what keeps the dependency

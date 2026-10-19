@@ -20,6 +20,19 @@
  * without either service depending on the other.
  */
 import { createThrottle, type ThrottleMetrics } from './throttle';
+import {
+  ACCOUNT_SPEC,
+  HorizonResponseError,
+  LEDGER_SPEC,
+  OPERATION_SPEC,
+  RAW_RESPONSE_LIMIT,
+  ShapeProblem,
+  TRADE_SPEC,
+  TRANSACTION_SPEC,
+  checkPage,
+  checkRecord,
+  type RecordSpec,
+} from './validate';
 
 /**
  * Horizon's page size, and the signal that another page exists.
@@ -161,6 +174,14 @@ export interface HorizonClientOptions {
   requestTimeoutMs?: number;
   metrics?: ThrottleMetrics;
   logger?: HorizonLogSink;
+  /**
+   * Check each response against the field list the caller reads, before any
+   * record reaches the caller. Off by default so the GraphQL server, which
+   * reads a handful of fields and falls back to `null`, pays nothing for it.
+   * The indexer turns it on: a malformed response there must stop the write,
+   * not surface as an `undefined` inside an INSERT.
+   */
+  validateResponses?: boolean;
   /** Injectable for tests; defaults to `globalThis.fetch` resolved at call time. */
   fetchImpl?: typeof fetch;
   /** Injectable for tests; defaults to `setTimeout`. */
@@ -190,6 +211,26 @@ export interface HorizonClient {
   getTrades(params?: HorizonTradesFilter, baseUrl?: string): Promise<HorizonTrade[]>;
 }
 
+/** Checks a decoded body; throws `ShapeProblem` when it does not match. */
+type BodyCheck = (body: unknown) => void;
+
+/** Runs a check and reports the first problem as data rather than throwing it. */
+function runCheck(check: BodyCheck, body: unknown): ShapeProblem | null {
+  try {
+    check(body);
+    return null;
+  } catch (err) {
+    if (err instanceof ShapeProblem) return err;
+    throw err;
+  }
+}
+
+/** The body as text, cut to `RAW_RESPONSE_LIMIT` so one bad page cannot flood a log line. */
+function rawBody(body: unknown): string {
+  const text = JSON.stringify(body) ?? String(body);
+  return text.length > RAW_RESPONSE_LIMIT ? `${text.slice(0, RAW_RESPONSE_LIMIT)}…` : text;
+}
+
 const DEFAULT_MIN_INTERVAL_MS = 100;
 const DEFAULT_MAX_RETRIES = 3;
 const DEFAULT_BASE_BACKOFF_MS = 300;
@@ -202,6 +243,7 @@ export function createHorizonClient(options: HorizonClientOptions = {}): Horizon
   const maxRetries = Math.max(1, options.maxRetries ?? DEFAULT_MAX_RETRIES);
   const baseBackoffMs = options.baseBackoffMs ?? DEFAULT_BASE_BACKOFF_MS;
   const requestTimeoutMs = options.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
+  const validateResponses = options.validateResponses ?? false;
   const metrics = options.metrics;
   const log = options.logger;
   const sleep =
@@ -233,9 +275,13 @@ export function createHorizonClient(options: HorizonClientOptions = {}): Horizon
    * query. A 404 is a statement about the ledger or account, not a failure, so
    * neither style retries it.
    */
-  async function request<T>(target: string, mode: 'throw'): Promise<T>;
-  async function request<T>(target: string, mode: 'null'): Promise<T | null>;
-  async function request<T>(target: string, mode: 'throw' | 'null'): Promise<T | null> {
+  async function request<T>(target: string, mode: 'throw', check?: BodyCheck): Promise<T>;
+  async function request<T>(target: string, mode: 'null', check?: BodyCheck): Promise<T | null>;
+  async function request<T>(
+    target: string,
+    mode: 'throw' | 'null',
+    check?: BodyCheck
+  ): Promise<T | null> {
     for (let attempt = 1; attempt <= maxRetries; attempt += 1) {
       await throttle();
 
@@ -263,7 +309,21 @@ export function createHorizonClient(options: HorizonClientOptions = {}): Horizon
       stopTimer?.();
       metrics?.requestsTotal.inc({ status: String(res.status) });
 
-      if (res.ok) return (await res.json()) as T;
+      if (res.ok) {
+        const body: unknown = await res.json();
+        if (check && validateResponses) {
+          const problem = runCheck(check, body);
+          if (problem) {
+            const raw = rawBody(body);
+            log?.warn({ url: target, field: problem.field, raw }, `${name} response failed validation`);
+            // Always a throw, whatever the mode: `null` means "not found", and a
+            // malformed body is not that. A caller that treated it as absent
+            // would mark the work done and drop the data.
+            throw new HorizonResponseError(target, problem.field, problem.problem, raw);
+          }
+        }
+        return body as T;
+      }
 
       if (res.status === 404 && mode === 'null') return null;
 
@@ -291,13 +351,14 @@ export function createHorizonClient(options: HorizonClientOptions = {}): Horizon
     return null;
   }
 
-  async function fetchAllPages<T>(target: string): Promise<T[]> {
+  async function fetchAllPages<T>(target: string, spec: RecordSpec): Promise<T[]> {
     const records: T[] = [];
     let next: string | undefined = target;
+    const check: BodyCheck = body => checkPage(body, spec);
     while (next) {
       // Annotated rather than inferred: `next` is reassigned from `page` below,
       // and the two would otherwise be circular.
-      const page: HorizonPage<T> = await request<HorizonPage<T>>(next, 'throw');
+      const page: HorizonPage<T> = await request<HorizonPage<T>>(next, 'throw', check);
       records.push(...page._embedded.records);
       next = page._embedded.records.length === PAGE_LIMIT ? page._links.next?.href : undefined;
     }
@@ -308,30 +369,37 @@ export function createHorizonClient(options: HorizonClientOptions = {}): Horizon
     async getLatestLedgerSequence(baseUrl?: string): Promise<number> {
       const page = await request<HorizonPage<HorizonLedger>>(
         url('/ledgers?order=desc&limit=1', baseUrl),
-        'throw'
+        'throw',
+        body => checkPage(body, LEDGER_SPEC)
       );
       return page._embedded.records[0]?.sequence ?? 0;
     },
 
     getLedger(sequence: number, baseUrl?: string): Promise<HorizonLedger> {
-      return request<HorizonLedger>(url(`/ledgers/${sequence}`, baseUrl), 'throw');
+      return request<HorizonLedger>(url(`/ledgers/${sequence}`, baseUrl), 'throw', body =>
+        checkRecord(body, LEDGER_SPEC, 'response')
+      );
     },
 
     getLedgerTransactions(sequence: number, baseUrl?: string): Promise<HorizonTransaction[]> {
       return fetchAllPages<HorizonTransaction>(
-        url(`/ledgers/${sequence}/transactions?order=asc&limit=${PAGE_LIMIT}`, baseUrl)
+        url(`/ledgers/${sequence}/transactions?order=asc&limit=${PAGE_LIMIT}`, baseUrl),
+        TRANSACTION_SPEC
       );
     },
 
     getLedgerOperations(sequence: number, baseUrl?: string): Promise<HorizonOperation[]> {
       return fetchAllPages<HorizonOperation>(
-        url(`/ledgers/${sequence}/operations?order=asc&limit=${PAGE_LIMIT}`, baseUrl)
+        url(`/ledgers/${sequence}/operations?order=asc&limit=${PAGE_LIMIT}`, baseUrl),
+        OPERATION_SPEC
       );
     },
 
     /** `null` rather than an exception for accounts that don't exist or were merged away. */
     getAccount(address: string, baseUrl?: string): Promise<HorizonAccount | null> {
-      return request<HorizonAccount>(url(`/accounts/${address}`, baseUrl), 'null');
+      return request<HorizonAccount>(url(`/accounts/${address}`, baseUrl), 'null', body =>
+        checkRecord(body, ACCOUNT_SPEC, 'response')
+      );
     },
 
     async getRecentTransactions(limit = 20, baseUrl?: string): Promise<HorizonTransaction[]> {
@@ -376,7 +444,9 @@ export function createHorizonClient(options: HorizonClientOptions = {}): Horizon
       if (params.offer_id) q.set('offer_id', params.offer_id);
       const qs = q.toString();
       const path = `/trades${qs ? `?${qs}` : ''}`;
-      const page = await request<HorizonPage<HorizonTrade>>(url(path, baseUrl), 'null');
+      const page = await request<HorizonPage<HorizonTrade>>(url(path, baseUrl), 'null', body =>
+        checkPage(body, TRADE_SPEC)
+      );
       return page?._embedded?.records ?? [];
     },
   };

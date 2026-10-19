@@ -135,6 +135,10 @@ export function initializeHorizonClient(config: HorizonClientConfig): void {
     name: 'horizon',
     minIntervalMs: config.minIntervalMs,
     requestTimeoutMs: REQUEST_TIMEOUT_MS,
+    // The indexer writes what Horizon returns, so a response that does not
+    // match the fields it reads must fail here, naming the field, and not
+    // reach an INSERT. See shared/src/validate.ts.
+    validateResponses: true,
     metrics: {
       requestsTotal: horizonRequests,
       requestDuration: horizonRequestDuration,
