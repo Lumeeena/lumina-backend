@@ -36,6 +36,9 @@ policy with that archive's operator.
 The archive is used only for historical backfill, not for the live tip: a
 checkpoint is published periodically and may not yet contain the newest
 ledgers. Forward indexing and ordinary catch-up continue to use Horizon.
+Archive backfills do not enqueue account refreshes, because the account
+snapshots available from Horizon are current state rather than historical
+ledger state.
 
 Example for a single-network mainnet deployment:
 

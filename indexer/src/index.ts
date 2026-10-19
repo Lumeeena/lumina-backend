@@ -288,30 +288,35 @@ async function fetchAndIndexLedger(loop: NetworkLoop, sequence: number, isBackfi
       getLedgerOperations(loop.network.horizonUrl, sequence, purpose),
     ]);
 
-  const addresses = new Set<string>();
-  for (const tx of transactions) addresses.add(tx.source_account);
-  for (const op of operations) addresses.add(op.source_account);
-
+  let expiredAddresses: string[] = [];
+  let addressesToFetch: string[] = [];
   const now = Date.now();
-  pruneAccountCache(loop.accountCache, loop.accountCacheOrder, now);
-  const expiredAddresses = [...addresses].filter(address => {
-    const fetchedAt = loop.accountCache.get(address);
-    return fetchedAt === undefined || now - fetchedAt > ACCOUNT_CACHE_TTL_MS;
-  });
-  const addressesToFetch = await getAccountsNeedingRefresh(pool, name, expiredAddresses, sequence);
+  if (!archived) {
+    const addresses = new Set<string>();
+    for (const tx of transactions) addresses.add(tx.source_account);
+    for (const op of operations) addresses.add(op.source_account);
+
+    pruneAccountCache(loop.accountCache, loop.accountCacheOrder, now);
+    expiredAddresses = [...addresses].filter(address => {
+      const fetchedAt = loop.accountCache.get(address);
+      return fetchedAt === undefined || now - fetchedAt > ACCOUNT_CACHE_TTL_MS;
+    });
+    addressesToFetch = await getAccountsNeedingRefresh(pool, name, expiredAddresses, sequence);
+  }
   const stopTimer = ledgerIndexDuration.startTimer();
   await indexLedger(pool, name, ledger, transactions, operations, addressesToFetch);
   stopTimer();
 
-  for (const address of expiredAddresses) {
-    loop.accountCache.set(address, now);
-    // Update LRU order: remove if exists, then add to end (most recent)
-    const idx = loop.accountCacheOrder.indexOf(address);
-    if (idx !== -1) loop.accountCacheOrder.splice(idx, 1);
-    loop.accountCacheOrder.push(address);
+  if (!archived) {
+    for (const address of expiredAddresses) {
+      loop.accountCache.set(address, now);
+      const idx = loop.accountCacheOrder.indexOf(address);
+      if (idx !== -1) loop.accountCacheOrder.splice(idx, 1);
+      loop.accountCacheOrder.push(address);
+    }
+    accountCacheSize.set({ network: name }, loop.accountCache.size);
+    scheduleAccountRefreshes(loop);
   }
-  accountCacheSize.set({ network: name }, loop.accountCache.size);
-  scheduleAccountRefreshes(loop);
 
   if (isBackfillMode) {
     recordBackfillLedger(name, sequence, transactions.length, operations.length);
