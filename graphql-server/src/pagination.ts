@@ -15,6 +15,8 @@ export const DEFAULT_PAGE_LIMIT = 20;
 /** Maximum allowable page size across all paginated queries. */
 export const MAX_PAGE_SIZE = 100;
 
+export type PaginationDirection = 'FORWARD' | 'BACKWARD';
+
 export function getPageSize(limit: number | null | undefined, defaultLimit = DEFAULT_PAGE_LIMIT): number {
   const pageSize = limit ?? defaultLimit;
   if (!Number.isSafeInteger(pageSize) || pageSize < 1) {
@@ -225,12 +227,17 @@ export function pageInfo<T>(
 export function cursorCondition(
   params: unknown[],
   keyset: Keyset,
-  cursor?: string | null
+  cursor?: string | null,
+  direction: PaginationDirection = 'FORWARD',
+  baseOrder: 'ASC' | 'DESC' = 'DESC'
 ): string | null {
   if (!cursor) return null;
   const values = decodeCursor(cursor, keyset.query, keyset.columns.length);
   const first = params.length + 1;
   const bound = keyset.columns.map((_, index) => `$${first + index}::${keyset.types[index]}`);
   params.push(...values);
-  return `(${keyset.columns.join(', ')}) < (${bound.join(', ')})`;
+  const operator = baseOrder === 'ASC'
+    ? (direction === 'FORWARD' ? '>' : '<')
+    : (direction === 'FORWARD' ? '<' : '>');
+  return `(${keyset.columns.join(', ')}) ${operator} (${bound.join(', ')})`;
 }

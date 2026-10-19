@@ -154,6 +154,8 @@ test('getTransactions maps rows and passes limit/cursor params', async () => {
   const items = await getTransactions(pool, 'mainnet', 20, encodeCursor('transactions', [500, 'cursor-hash']));
   assert.equal(items.length, 1);
   assert.equal(items[0]?.hash, 'a');
+  assert.match(queries[0]?.sql ?? '', /^SELECT hash, network, ledger, created_at, source_account, fee_charged, operation_count, successful, memo_type, memo FROM transactions/);
+  assert.doesNotMatch(queries[0]?.sql ?? '', /indexed_at|\*/);
   // The network is bound first and repeated in the cursor subquery: the same
   // hash exists on every network, so the keyset has to know which one.
   assert.deepEqual(queries[0]?.params, ['mainnet', 'cursor-hash', 20]);
@@ -195,6 +197,8 @@ test('getOperations builds WHERE clause only for provided filters', async () => 
   const { pool, queries } = fakePool([]);
   await getOperations(pool, { network: 'mainnet', account: 'GABC', limit: 10 });
   assert.match(queries[0]?.sql ?? '', /WHERE network = \$1 AND source_account = \$2/);
+  assert.match(queries[0]?.sql ?? '', /jsonb_build_object\(/);
+  assert.doesNotMatch(queries[0]?.sql ?? '', /SELECT \*|details,\s*indexed_at/);
   assert.deepEqual(queries[0]?.params, ['mainnet', 'GABC', 10]);
 });
 

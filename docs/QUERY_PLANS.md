@@ -37,6 +37,29 @@ Two consequences worth the indirection:
   all, and a hand-written cursor would be a claim about the server rather than a
   measurement of it.
 
+## Selected columns and index-only scans
+
+GraphQL list and lookup queries in `graphql-server/src/db.ts` select the columns
+their row mappers consume rather than using `SELECT *`. This avoids returning
+`indexed_at` and unused table fields, and operations queries construct a JSONB
+object from the detail keys exposed by the mapper instead of returning the
+unmapped keys.
+
+Projection size can be measured on the same representative page by comparing
+the serialized row payload before and after the projection. For example, use
+the rows from a 20-transaction page and compare the byte totals from
+`octet_length(row_to_json(row)::text)` for the full rows and the projected
+columns. Record table, filter, row count, and database version alongside the
+result; JSON serialization is an estimate of payload size, not a measurement of
+PostgreSQL protocol bytes.
+
+A narrower `SELECT` does not by itself make a query index-only. PostgreSQL must
+find every selected column in the index and the visibility map must permit
+skipping the heap. Adding every selected column to `INCLUDE` can create a large
+index with substantial write amplification, especially for JSONB. Check the
+actual plan and index size first; a small transfer reduction is not sufficient
+reason to make a write-heavy index wider.
+
 Each entry is captured twice: a warm-up pass whose plans are discarded, then the
 recorded pass, so the plan reflects a warm cache. `EXPLAIN ANALYZE` executes the
 statement, so every catalog entry is read-only and the harness refuses to
