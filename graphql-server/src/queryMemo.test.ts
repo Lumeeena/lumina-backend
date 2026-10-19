@@ -55,10 +55,10 @@ function createMockPool() {
   const pool = {
     query: async (sql: string, params: unknown[] = []) => {
       calls.push({ sql, params });
-      if (/FROM transactions WHERE network = \$1/.test(sql)) {
+      if (/FROM transactions\s+WHERE network = \$1/.test(sql)) {
         return { rows: [sampleTx('tx_1'), sampleTx('tx_2')] };
       }
-      if (/FROM trades WHERE network = \$1/.test(sql)) {
+      if (/FROM trades\s+WHERE network = \$1/.test(sql)) {
         return { rows: [sampleTrade('trade_1'), sampleTrade('trade_2')] };
       }
       if (/FROM pg_class WHERE relname = \$1/.test(sql)) {

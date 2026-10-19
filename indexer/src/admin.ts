@@ -148,9 +148,9 @@ async function main(): Promise<void> {
         let skipped = 0;
         for (let seq = startLedger; seq <= endLedger; seq++) {
           try {
-            const ledger = await getLedger(horizonUrl, seq, 'backfill');
-            const transactions = await getLedgerTransactions(horizonUrl, seq, 'backfill');
-            const operations = await getLedgerOperations(horizonUrl, seq, 'backfill');
+            const ledger = await getLedger(horizonUrl, seq);
+            const transactions = await getLedgerTransactions(horizonUrl, seq);
+            const operations = await getLedgerOperations(horizonUrl, seq);
 
             // Re-index (ON CONFLICT DO NOTHING handles duplicates)
             await indexLedger(pool, network, ledger, transactions, operations, []);

@@ -110,72 +110,20 @@ type Query {
   ): Account
 
   """
-  Query asset statistics (Issue #7).
-  """
-  asset(
-    """Network to read; defaults to the primary network configured for this deployment."""
-    network: Network
-    code: String!
-    issuer: String!
-  ): AssetStats
-
-  """
-  List all indexed assets with holder counts and volume (Issue #7).
+  Browse indexed assets, ordered by holder count or recent volume.
   """
   assets(
     """Network to read; defaults to the primary network configured for this deployment."""
     network: Network
+    """Ordering; defaults to HOLDERS."""
+    sortBy: AssetSort = HOLDERS
+    """Case-insensitive substring match on the asset code."""
+    search: String
+    """Maximum page size is 100. Larger limits are rejected."""
     limit: Int = 20
+    """Opaque cursor from a previous page's `pageInfo`; see `PageInfo`."""
     cursor: String
-    sortBy: AssetSortField = HOLDERS
-  ): AssetStatsPage!
-
-  """
-  Get trustline change history for an asset (Issue #7).
-  """
-  trustlineHistory(
-    """Network to read; defaults to the primary network configured for this deployment."""
-    network: Network
-    code: String!
-    issuer: String!
-    limit: Int = 20
-    cursor: String
-  ): [TrustlineChange!]!
-
-  """
-  Query contract storage state (Issue #9).
-  """
-  contractStorage(
-    """Network to read; defaults to the primary network configured for this deployment."""
-    network: Network
-    contractId: String!
-    key: JSON!
-  ): ContractStorageEntry
-
-  """
-  List all storage entries for a contract (Issue #9).
-  """
-  contractStorageEntries(
-    """Network to read; defaults to the primary network configured for this deployment."""
-    network: Network
-    contractId: String!
-    limit: Int = 100
-    cursor: String
-  ): ContractStorageEntryPage!
-
-  """
-  Get export job status (Issue #10).
-  """
-  exportJob(
-    """Network to read; defaults to the primary network configured for this deployment."""
-    network: Network
-    id: String!
-  ): ExportJob
-
-  """
-  Get API usage stats for the authenticated key (Issue #8).
-  """
-  myUsage(hours: Int = 24): UsageStats!
+  ): AssetPage!
 
   """
   List indexed accounts, most recently active first.
@@ -469,6 +417,21 @@ type Query {
     """
     bucketSeconds: Int = 86400
   ): AssetDetail!
+
+  """
+  Fetch one indexed asset by code and issuer.
+
+  Returns `null` when the asset has never been indexed. Use `asset(asset:)`
+  for supply plus a volume series, or `assets` to browse.
+  """
+  assetByKey(
+    """Network to read; defaults to the primary network configured for this deployment."""
+    network: Network
+    """Asset code, e.g. `USDC`."""
+    code: String!
+    """Issuing account address."""
+    issuer: String!
+  ): Asset
 
   """
   How far behind the chain this API data is, for one network.

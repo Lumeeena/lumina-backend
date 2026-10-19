@@ -17,6 +17,8 @@ import {
   createHorizonClient,
   type HorizonAccount,
   type HorizonLatestLedger,
+  type HorizonTrade,
+  type HorizonTradesFilter,
   type HorizonTransaction,
 } from '@lumina/shared';
 import { horizonRequestDuration, horizonRequests } from './metrics';

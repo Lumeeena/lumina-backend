@@ -699,7 +699,7 @@ test('transactions paging resolves the cursor within the requested network', { s
   const first = await resolvers.Query.transactions(undefined, { network: TESTNET, limit: 1 }, ctx);
   assert.deepEqual(first.items.map(tx => tx.hash), [TX_TAIL]);
 
-  const second = await resolvers.Query.transactions(undefined, { network: TESTNET, limit: 1, cursor: TX_TAIL }, ctx);
+  const second = await resolvers.Query.transactions(undefined, { network: TESTNET, limit: 1, cursor: first.pageInfo.cursor }, ctx);
   assert.deepEqual(second.items.map(tx => tx.hash), [TX_HASH]);
   assert.equal(second.items[0]?.network, 'testnet');
 });
@@ -708,15 +708,14 @@ test('operations paging resolves the cursor within the requested network', { ski
   const ctx = context();
 
   // Both networks hold an operation with the id OP_HEAD, at their own tips
-  // (mainnet 990_050, testnet 990_020). The cursor is resolved by a subquery
-  // rather than a filter, so a subquery that omits the network predicate
-  // compares page two against mainnet's row: testnet's own OP_HEAD then falls
-  // inside the boundary and is returned a second time.
+  // (mainnet 990_050, testnet 990_020). The cursor carries the sort key in its
+  // own network's sequence, so page two cannot be compared against mainnet's
+  // row and repeat testnet's OP_HEAD.
   const first = await resolvers.Query.operations(undefined, { network: TESTNET, limit: 1 }, ctx);
   assert.deepEqual(first.items.map(op => op.id), [OP_HEAD]);
   assert.equal(first.items[0]?.network, 'testnet');
 
-  const second = await resolvers.Query.operations(undefined, { network: TESTNET, limit: 1, cursor: OP_HEAD }, ctx);
+  const second = await resolvers.Query.operations(undefined, { network: TESTNET, limit: 1, cursor: first.pageInfo.cursor }, ctx);
   assert.deepEqual(second.items.map(op => op.id), [OP_TAIL], 'the page after the cursor must not repeat the cursor row');
   assert.equal(second.items[0]?.network, 'testnet');
   assert.equal(second.items[0]?.amount, TESTNET_SEED.nativeAmount);
@@ -732,13 +731,13 @@ test('asset-filtered operations paging resolves the cursor within the requested 
   const mainnet = await resolvers.Query.operations(undefined, { network: MAINNET, asset: ASSET, limit: 10 }, ctx);
   assert.deepEqual(mainnet.items.map(op => op.id), [OP_HEAD]);
 
-  const mainnetSecond = await resolvers.Query.operations(undefined, { network: MAINNET, asset: ASSET, limit: 10, cursor: OP_HEAD }, ctx);
+  const mainnetSecond = await resolvers.Query.operations(undefined, { network: MAINNET, asset: ASSET, limit: 10, cursor: mainnet.pageInfo.cursor }, ctx);
   assert.deepEqual(mainnetSecond.items, [], 'the row after the last one is empty, not a repeat');
 
   const testnet = await resolvers.Query.operations(undefined, { network: TESTNET, asset: ASSET, limit: 10 }, ctx);
   assert.deepEqual(testnet.items.map(op => op.id), [OP_HEAD]);
 
-  const testnetSecond = await resolvers.Query.operations(undefined, { network: TESTNET, asset: ASSET, limit: 10, cursor: OP_HEAD }, ctx);
+  const testnetSecond = await resolvers.Query.operations(undefined, { network: TESTNET, asset: ASSET, limit: 10, cursor: testnet.pageInfo.cursor }, ctx);
   assert.deepEqual(testnetSecond.items, [], 'a cursor must not page into the other network');
 });
 
@@ -748,7 +747,7 @@ test('contract event paging resolves the cursor within the requested network', {
   const first = await resolvers.Query.events(undefined, { network: TESTNET, contractId: CONTRACT, limit: 1 }, ctx);
   assert.equal(first.items.length, 1);
 
-  const second = await resolvers.Query.events(undefined, { network: TESTNET, contractId: CONTRACT, limit: 1, cursor: EVENT_ID }, ctx);
+  const second = await resolvers.Query.events(undefined, { network: TESTNET, contractId: CONTRACT, limit: 1, cursor: first.pageInfo.cursor }, ctx);
   assert.deepEqual(second.items, []);
 });
 
@@ -769,7 +768,7 @@ test('custom event paging resolves the cursor within the requested network', { s
   const first = await resolvers.Query.customEvents(undefined, { network: TESTNET, ...args }, ctx);
   assert.equal(first.items.length, 1);
 
-  const second = await resolvers.Query.customEvents(undefined, { network: TESTNET, ...args, cursor: CUSTOM_EVENT_ID }, ctx);
+  const second = await resolvers.Query.customEvents(undefined, { network: TESTNET, ...args, cursor: first.pageInfo.cursor }, ctx);
   assert.deepEqual(second.items, []);
 });
 

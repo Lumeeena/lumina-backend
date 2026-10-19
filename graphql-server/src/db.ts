@@ -321,7 +321,6 @@ export async function getTransactions(
   const direction = options.direction ?? 'FORWARD';
   const isForward = direction === 'FORWARD';
   const queryOrder = isForward ? baseOrder : (baseOrder === 'DESC' ? 'ASC' : 'DESC');
-  const cursorOperator = baseOrder === 'ASC' ? (isForward ? '>' : '<') : (isForward ? '<' : '>');
   const conditions = ['network = $1'];
   const params: unknown[] = [network];
 
@@ -342,10 +341,8 @@ export async function getTransactions(
     conditions.push(`source_account = $${params.length}`);
   }
   if (cursor) {
-    params.push(cursor);
-    conditions.push(
-      `(ledger, hash) ${cursorOperator} (SELECT ledger, hash FROM transactions WHERE hash = $${params.length} AND network = $1)`
-    );
+    const condition = cursorCondition(params, KEYSETS.transactions, cursor, direction, baseOrder);
+    if (condition) conditions.push(condition);
   }
   params.push(limit);
 
@@ -393,7 +390,6 @@ export async function getOperations(
   const direction = opts.direction ?? 'FORWARD';
   const isForward = direction === 'FORWARD';
   const queryOrder = isForward ? baseOrder : (baseOrder === 'DESC' ? 'ASC' : 'DESC');
-  const cursorOperator = baseOrder === 'ASC' ? (isForward ? '>' : '<') : (isForward ? '<' : '>');
   const conditions: string[] = [];
   const params: unknown[] = [];
 
@@ -409,12 +405,8 @@ export async function getOperations(
     conditions.push(`type = $${params.length}`);
   }
   if (opts.cursor) {
-    params.push(opts.cursor);
-    // The cursor's own row is looked up inside the same network: an operation
-    // id repeats across networks now that the key is composite.
-    conditions.push(
-      `(ledger, id) ${cursorOperator} (SELECT ledger, id FROM operations WHERE id = $${params.length} AND network = $1)`
-    );
+    const condition = cursorCondition(params, KEYSETS.operations, opts.cursor, direction, baseOrder);
+    if (condition) conditions.push(condition);
   }
   const where = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
   params.push(opts.limit);
@@ -721,7 +713,6 @@ export async function getEventsByContract(
   const direction = opts.direction ?? 'FORWARD';
   const isForward = direction === 'FORWARD';
   const queryOrder = isForward ? baseOrder : (baseOrder === 'DESC' ? 'ASC' : 'DESC');
-  const cursorOperator = baseOrder === 'ASC' ? (isForward ? '>' : '<') : (isForward ? '<' : '>');
   const conditions = ['contract_id = $1'];
   const params: unknown[] = [opts.contractId];
 
@@ -733,10 +724,8 @@ export async function getEventsByContract(
     conditions.push(`$${params.length} = ANY(topics)`);
   }
   if (opts.cursor) {
-    params.push(opts.cursor);
-    conditions.push(
-      `(ledger, id) ${cursorOperator} (SELECT ledger, id FROM contract_events WHERE id = $${params.length} AND network = $2)`
-    );
+    const condition = cursorCondition(params, KEYSETS.events, opts.cursor, direction, baseOrder);
+    if (condition) conditions.push(condition);
   }
 
   params.push(opts.limit);
@@ -1062,18 +1051,19 @@ export async function getSponsoredAccounts(
   pool: Pool,
   network: string,
   sponsorAddress: string
-): Promise<NormalizedAccount[]> {
+): Promise<ReturnType<typeof mapAccount>[]> {
   const { rows } = await pool.query(
     `SELECT a.address, a.network, a.sequence, a.subentry_count, a.last_modified_ledger,
             a.num_sponsored, a.num_sponsoring, a.balances, a.flags, a.thresholds
      FROM accounts a
      JOIN sponsorships s ON s.sponsored_id = a.address AND s.network = a.network
-     WHERE s.sponsoring_id = $1 AND s.network = $2
+     WHERE s.sponsor = $1 AND s.network = $2
      ORDER BY a.address ASC`,
     [network, sponsorAddress]
   );
   return rows.map((row) =>
     mapAccount({
+      network: row.network,
       address: row.address,
       sequence: row.sequence,
       subentry_count: row.subentry_count,
@@ -1170,7 +1160,6 @@ export async function getNetworkStats(
   endTime: string,
   granularity: string
 ): Promise<NetworkStatsBucketRow[]> {
-  const interval = granularity === 'day' ? '1 day' : '1 hour';
   const { rows } = await pool.query<NetworkStatsBucketRow>(
     `SELECT
        bucket_start,

@@ -58,6 +58,9 @@ test('lifecycle GraphQL schema slice exposes fields, cursors, and page-size vali
   const names = new Set(['Query', 'Operation', 'OperationPage', 'PageInfo', 'TotalCount', 'CountPrecision', 'OperationType', 'Network']);
   const schema = buildASTSchema({ ...document, definitions: document.definitions
     .filter(def => 'name' in def && def.name && names.has(def.name.value))
+    // New Query fields are added through `extend type Query`; an unfiltered
+    // extension would pull in every type outside this slice.
+    .filter(def => !(def.kind === Kind.OBJECT_TYPE_EXTENSION && 'name' in def && def.name?.value === 'Query'))
     .map(def => {
       if (def.kind !== Kind.OBJECT_TYPE_DEFINITION) return def;
       if (def.name.value === 'Query') return { ...def, fields: def.fields?.filter(field => field.name.value === 'accountLifecycle') };

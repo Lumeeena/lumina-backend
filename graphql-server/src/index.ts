@@ -45,6 +45,7 @@ import {
   requestTimeoutMiddleware,
 } from './security';
 import { createErrorMasker, shouldMaskErrors } from './errorMasking';
+import { ERROR_CODES, errorWithStableCode, withStableErrorCode } from './errorCodes';
 import { loadSlowOperationThresholdMs, slowOperationPlugin } from './slowOperations';
 import { scheduledExportOptions, startScheduledExports } from './scheduledExport';
 import { loadMigrations, runMigrations } from './migrations';
@@ -150,6 +151,16 @@ async function main() {
         for (const error of errors) {
           log.error({ err: error.message }, 'subscription error');
         }
+        // graphql-ws serialises these itself, so they never reach Apollo's
+        // formatError; give each one a stable code before it goes on the wire.
+        return errors.filter((error): error is GraphQLError => error instanceof GraphQLError).map(errorWithStableCode);
+      },
+      // Execution errors (a resolver failing while the subscription is set up)
+      // arrive as a `next` payload rather than through onError, so they are
+      // coded here as well.
+      onNext: (_ctx, _message, _args, result) => {
+        if (!result.errors?.length) return undefined;
+        return { ...result, errors: result.errors.map(errorWithStableCode) };
       },
       // A subscription refused for being over the cap should close cleanly with
       // a reason, not surface as an unhandled server error.
@@ -164,7 +175,9 @@ async function main() {
           // Returned as a GraphQLError so graphql-ws sends the client a proper
           // `error` message and closes the operation, rather than the
           // subscription failing later as an unhandled server error.
-          return [new GraphQLError(new SubscriberLimitError(MAX_SUBSCRIPTIONS).message)];
+          return [new GraphQLError(new SubscriberLimitError(MAX_SUBSCRIPTIONS).message, {
+            extensions: { code: ERROR_CODES.RATE_LIMITED },
+          })];
         }
         return undefined;
       },
@@ -178,9 +191,10 @@ async function main() {
     // production unless GRAPHQL_INTROSPECTION=true.
     introspection: security.introspection,
     // Database timeouts are reported as a coded, actionable message rather
-    // than a generic internal error.
+    // than a generic internal error; deliberate errors get their own code;
     // then anything unexpected is masked behind a correlation id in production.
-    formatError: (formatted, error) => maskError(formatTimeoutError(formatted, error), error),
+    formatError: (formatted, error) =>
+      maskError(withStableErrorCode(formatTimeoutError(formatted, error), error), error),
     persistedQueries,
     plugins: [
       queryLimitsPlugin(security),

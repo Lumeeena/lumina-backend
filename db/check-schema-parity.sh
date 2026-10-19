@@ -41,6 +41,11 @@ MIGRATED_URL="${BASE_URL%/postgres}/$MIGRATED_DB"
 psql -v ON_ERROR_STOP=1 -d "$SCHEMA_URL" -f db/schema.sql > /dev/null
 
 for migration in db/migrations/*.sql; do
+  # The directory holds both directions; only the forward migration builds
+  # the migrated database. Applying a .down.sql here would undo earlier files.
+  case "$migration" in
+    *.down.sql) continue ;;
+  esac
   echo "Applying $migration..."
   psql -v ON_ERROR_STOP=1 -d "$MIGRATED_URL" -f "$migration" > /dev/null
 done

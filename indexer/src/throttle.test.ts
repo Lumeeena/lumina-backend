@@ -111,7 +111,10 @@ test('a 429 with a Retry-After header honours that value rather than doubling', 
     waitTime: { observe: () => {} },
   };
 
-  mockFetch([{ status: 429, body: {}, headers: { 'Retry-After': '2' } }]);
+  mockFetch([
+    { status: 429, body: {}, headers: { 'Retry-After': '1' } },
+    { status: 200, body: { ok: true } },
+  ]);
 
   const { fetchJson } = createThrottle({
     name: 'test',
@@ -120,13 +123,15 @@ test('a 429 with a Retry-After header honours that value rather than doubling', 
     metrics,
   });
 
-  await assert.rejects(() => fetchJson('https://example.com/a'));
+  // The client waits out Retry-After and retries once; the second response
+  // succeeds, so this call resolves rather than failing.
+  assert.deepEqual(await fetchJson('https://example.com/a'), { ok: true });
 
-  // The recorded interval should reflect the Retry-After value (2s = 2000 ms),
+  // The recorded interval should reflect the Retry-After value (1s = 1000 ms),
   // not a doubling of the 10 ms minimum.
   assert.ok(
-    recordedIntervals.some(v => v >= 2000),
-    `expected interval >= 2000 ms from Retry-After: 2, got: ${JSON.stringify(recordedIntervals)}`
+    recordedIntervals.some(v => v >= 1000),
+    `expected interval >= 1000 ms from Retry-After: 1, got: ${JSON.stringify(recordedIntervals)}`
   );
 });
 

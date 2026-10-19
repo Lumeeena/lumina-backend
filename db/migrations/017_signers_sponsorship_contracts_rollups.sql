@@ -13,23 +13,14 @@ CREATE TABLE IF NOT EXISTS account_signers (
   PRIMARY KEY (network, account_address, key)
 );
 
-CREATE INDEX idx_account_signers_lookup
+CREATE INDEX IF NOT EXISTS idx_account_signers_lookup
   ON account_signers (network, account_address);
 
 -- ─── #226: Sponsorships ────────────────────────────────────────────────────
 
-CREATE TABLE IF NOT EXISTS sponsorships (
-  network text NOT NULL,
-  sponsoring_id text NOT NULL,
-  sponsored_id text NOT NULL,
-  last_modified_ledger integer NOT NULL,
-  PRIMARY KEY (network, sponsoring_id, sponsored_id)
-);
-
-CREATE INDEX idx_sponsorships_by_sponsor
-  ON sponsorships (network, sponsoring_id);
-
-CREATE INDEX idx_sponsorships_by_sponsored
+-- The table is created by 015_operation_decoding; this adds the lookup the
+-- sponsored-accounts query needs without changing its shape.
+CREATE INDEX IF NOT EXISTS idx_sponsorships_by_sponsored
   ON sponsorships (network, sponsored_id);
 
 -- ─── #227: Contract deployments ────────────────────────────────────────────
@@ -44,13 +35,13 @@ CREATE TABLE IF NOT EXISTS contract_deployments (
   PRIMARY KEY (network, contract_id)
 );
 
-CREATE INDEX idx_contract_deployments_by_wasm
+CREATE INDEX IF NOT EXISTS idx_contract_deployments_by_wasm
   ON contract_deployments (network, wasm_hash);
 
-CREATE INDEX idx_contract_deployments_by_ledger
+CREATE INDEX IF NOT EXISTS idx_contract_deployments_by_ledger
   ON contract_deployments (network, deployed_ledger DESC);
 
-CREATE INDEX idx_contract_deployments_by_deployer
+CREATE INDEX IF NOT EXISTS idx_contract_deployments_by_deployer
   ON contract_deployments (network, deployer);
 
 -- ─── #228, #229: Activity rollups ──────────────────────────────────────────
@@ -67,7 +58,7 @@ CREATE TABLE IF NOT EXISTS activity_rollups (
   PRIMARY KEY (network, granularity, bucket_start)
 );
 
-CREATE INDEX idx_activity_rollups_range
+CREATE INDEX IF NOT EXISTS idx_activity_rollups_range
   ON activity_rollups (network, granularity, bucket_start);
 
 COMMENT ON TABLE activity_rollups IS

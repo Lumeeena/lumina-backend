@@ -18,6 +18,7 @@
  *    starve ordinary queries of memory or file descriptors.
  */
 import { Client } from 'pg';
+import { RateLimitedError } from './errorCodes';
 import { INDEXED_CHANNEL, parseNotification, type IndexedNotification } from './notifications';
 
 export interface NotifierOptions {
@@ -51,7 +52,8 @@ export interface ListenClient {
   on(event: 'end', handler: () => void): void;
 }
 
-export class SubscriberLimitError extends Error {
+/** Refused because the server is at its concurrent-subscription ceiling; a capacity limit, hence `RATE_LIMITED`. */
+export class SubscriberLimitError extends RateLimitedError {
   constructor(limit: number) {
     super(`Subscription rejected: server is at its limit of ${limit} concurrent subscriptions.`);
     this.name = 'SubscriberLimitError';

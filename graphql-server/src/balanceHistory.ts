@@ -7,6 +7,7 @@
 
 import type { Pool } from 'pg';
 import { StellarAmount } from './amount';
+import { InvalidInputError } from './errorCodes';
 
 const MAX_DAYS = 90;
 const DEFAULT_DAYS = 30;
@@ -52,10 +53,10 @@ export async function computeBalanceHistory(
   // Validate time range
   const daysDiff = (toDate.getTime() - fromDate.getTime()) / (24 * 60 * 60 * 1000);
   if (daysDiff > MAX_DAYS) {
-    throw new Error(`Time range exceeds maximum of ${MAX_DAYS} days`);
+    throw new InvalidInputError(`Time range exceeds maximum of ${MAX_DAYS} days`);
   }
   if (fromDate >= toDate) {
-    throw new Error('from must be before to');
+    throw new InvalidInputError('from must be before to');
   }
 
   const { code, issuer } = parseAsset(asset);
@@ -162,7 +163,7 @@ function parseAsset(asset: string): { code: string | null; issuer: string | null
   }
   const parts = asset.split(':');
   if (parts.length !== 2) {
-    throw new Error(`Invalid asset format: ${asset}. Expected CODE:ISSUER or XLM`);
+    throw new InvalidInputError(`Invalid asset format: ${asset}. Expected CODE:ISSUER or XLM`);
   }
   return { code: parts[0], issuer: parts[1] };
 }

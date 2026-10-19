@@ -33,9 +33,11 @@
  *   no per-operation success flag.
  */
 import type { Pool } from 'pg';
+import { InvalidInputError } from './errorCodes';
 import { assetConditions, parseAsset, type ParsedAsset } from './search';
 
-export class AssetError extends Error {
+/** An asset-detail request the server cannot serve: bad bucket size, range, timestamp or cursor. */
+export class AssetError extends InvalidInputError {
   constructor(message: string) {
     super(message);
     this.name = 'AssetError';
@@ -361,7 +363,7 @@ export async function getAssets(pool: Pool, query: AssetsQuery): Promise<AssetPa
   const limit = query.limit ?? 20;
   const sortBy = query.sortBy ?? 'HOLDERS';
   const params: unknown[] = [query.network, limit + 1]; // Fetch one extra to check hasNextPage
-  let whereClauses: string[] = ['a.network = $1'];
+  const whereClauses: string[] = ['a.network = $1'];
   let orderClause: string;
   let cursorClause = '';
 

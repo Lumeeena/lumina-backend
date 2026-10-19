@@ -42,6 +42,7 @@
  */
 
 import { GraphQLError } from 'graphql';
+import { ERROR_CODES } from './errorCodes';
 
 /** Networks the GraphQL schema's `Network` enum carries. */
 export const KNOWN_NETWORKS = ['mainnet', 'testnet', 'futurenet'] as const;
@@ -270,7 +271,7 @@ export function resolveNetworkArgument(
     throw new GraphQLError(
       `Network "${requested}" is not configured on this deployment. ` +
         `Configured networks: ${registry.networks.map(network => networkEnumValue(network.name)).join(', ')}.`,
-      { extensions: { code: 'BAD_USER_INPUT' } }
+      { extensions: { code: ERROR_CODES.BAD_USER_INPUT } }
     );
   }
   return match;

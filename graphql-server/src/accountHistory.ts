@@ -8,12 +8,13 @@
  * exact as of its own ledger, but changes between two stored copies are not
  * visible, so the answer is a lower bound on how often the account changed.
  */
+import { InvalidInputError } from './errorCodes';
 
 /**
- * A caller-facing error for a bad `asOfLedger`. Listed with the other deliberate
- * errors in errorMasking.ts so its message reaches the caller in production.
+ * A caller-facing error for a bad `asOfLedger`. Extends `InvalidInputError`
+ * so it carries `BAD_USER_INPUT` and reaches the caller in production.
  */
-export class AccountHistoryError extends Error {
+export class AccountHistoryError extends InvalidInputError {
   constructor(message: string) {
     super(message);
     this.name = 'AccountHistoryError';

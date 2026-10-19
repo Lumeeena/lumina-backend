@@ -200,7 +200,15 @@ export interface HorizonClient {
   getLedger(sequence: number, baseUrl?: string): Promise<HorizonLedger>;
   getLedgerTransactions(sequence: number, baseUrl?: string): Promise<HorizonTransaction[]>;
   getLedgerOperations(sequence: number, baseUrl?: string): Promise<HorizonOperation[]>;
-  getAccount(address: string, baseUrl?: string): Promise<HorizonAccount | null>;
+  getAccount(
+    address: string,
+    baseUrl?: string,
+    /**
+     * `null` (default) treats every failure as "no account"; `null-404` treats
+     * only a missing account that way and surfaces transient failures.
+     */
+    mode?: 'throw' | 'null' | 'null-404'
+  ): Promise<HorizonAccount | null>;
   getRecentTransactions(limit?: number, baseUrl?: string): Promise<HorizonTransaction[]>;
   getAccountTransactions(
     address: string,
@@ -276,10 +284,15 @@ export function createHorizonClient(options: HorizonClientOptions = {}): Horizon
    * neither style retries it.
    */
   async function request<T>(target: string, mode: 'throw', check?: BodyCheck): Promise<T>;
-  async function request<T>(target: string, mode: 'null', check?: BodyCheck): Promise<T | null>;
+  async function request<T>(target: string, mode: 'null' | 'null-404', check?: BodyCheck): Promise<T | null>;
   async function request<T>(
     target: string,
-    mode: 'throw' | 'null',
+    mode: 'throw' | 'null' | 'null-404',
+    check?: BodyCheck
+  ): Promise<T | null>;
+  async function request<T>(
+    target: string,
+    mode: 'throw' | 'null' | 'null-404',
     check?: BodyCheck
   ): Promise<T | null> {
     for (let attempt = 1; attempt <= maxRetries; attempt += 1) {
@@ -302,7 +315,7 @@ export function createHorizonClient(options: HorizonClientOptions = {}): Horizon
           continue;
         }
         log?.warn({ url: target, attempts: attempt }, `${name} request failed to connect`);
-        if (mode === 'throw') throw err;
+        if (mode !== 'null') throw err;
         return null;
       }
       clearTimeout(timeout);
@@ -325,7 +338,7 @@ export function createHorizonClient(options: HorizonClientOptions = {}): Horizon
         return body as T;
       }
 
-      if (res.status === 404 && mode === 'null') return null;
+      if (res.status === 404 && mode !== 'throw') return null;
 
       if (res.status === 429 && attempt < maxRetries) {
         const retryAfter = res.headers?.get?.('Retry-After') ?? null;
@@ -339,7 +352,7 @@ export function createHorizonClient(options: HorizonClientOptions = {}): Horizon
         continue;
       }
 
-      if (mode === 'throw') {
+      if (mode !== 'null') {
         throw new Error(`${name} request failed (${res.status}): ${target}`);
       }
       log?.warn({ url: target, status: res.status }, `${name} request failed`);
@@ -395,9 +408,17 @@ export function createHorizonClient(options: HorizonClientOptions = {}): Horizon
       );
     },
 
-    /** `null` rather than an exception for accounts that don't exist or were merged away. */
-    getAccount(address: string, baseUrl?: string): Promise<HorizonAccount | null> {
-      return request<HorizonAccount>(url(`/accounts/${address}`, baseUrl), 'null', body =>
+    /**
+     * `null` rather than an exception for accounts that don't exist or were
+     * merged away. Callers that must distinguish that from a transient Horizon
+     * failure pass `'null-404'`.
+     */
+    getAccount(
+      address: string,
+      baseUrl?: string,
+      mode: 'throw' | 'null' | 'null-404' = 'null'
+    ): Promise<HorizonAccount | null> {
+      return request<HorizonAccount>(url(`/accounts/${address}`, baseUrl), mode, body =>
         checkRecord(body, ACCOUNT_SPEC, 'response')
       );
     },

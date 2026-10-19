@@ -20,9 +20,8 @@
  * - `REQUEST_TIMEOUT_MS` (10 s, overridable via `HORIZON_REQUEST_TIMEOUT_MS`) —
  *   generous by default because a 200-record ledger page is not a small response.
  *   An indexer that hangs on a wedged Horizon is worse than one that retries.
- * - `ACCOUNT_REQUEST_TIMEOUT_MS` (10 s) — reserved for account-fetch paths that
- *   may need a longer window; the shared client's own timeout applies today.
- */
+
+*/
 import {
   createHorizonClient,
   type HorizonAccount,
@@ -47,52 +46,7 @@ import { subsystem } from './logger';
  * Re-exported from the shared client so the indexer and tests reference one
  * constant.
  */
-export const PAGE_LIMIT = 200;
-
-/** Reserved timeout for account-fetch paths (10 s). */
-const ACCOUNT_REQUEST_TIMEOUT_MS = 10_000;
-
-export interface HorizonLedger {
-  sequence: number;
-  closed_at: string;
-  successful_transaction_count: number;
-  failed_transaction_count: number;
-  operation_count: number;
-  base_fee_in_stroops: number;
-  base_reserve_in_stroops: number;
-}
-
-export interface HorizonTransaction {
-  hash: string;
-  ledger: number;
-  created_at: string;
-  source_account: string;
-  fee_charged: string;
-  operation_count: number;
-  successful: boolean;
-  memo_type: string;
-  memo?: string;
-}
-
-export interface HorizonOperation {
-  id: string;
-  type: string;
-  transaction_hash: string;
-  created_at: string;
-  source_account: string;
-  [key: string]: unknown;
-}
-
-export interface HorizonBalance {
-  asset_type: string;
-  asset_code?: string;
-  asset_issuer?: string;
-  balance: string;
-  limit?: string;
-  buying_liabilities?: string;
-  selling_liabilities?: string;
-}
-
+export { PAGE_LIMIT } from '@lumina/shared';
 export type {
   HorizonAccount,
   HorizonBalance,
@@ -100,7 +54,6 @@ export type {
   HorizonOperation,
   HorizonTransaction,
 } from '@lumina/shared';
-export { PAGE_LIMIT } from '@lumina/shared';
 
 /**
  * Configuration the indexer passes to the shared Horizon client at startup.
@@ -206,7 +159,10 @@ export function getLedgerOperations(
  * error. Transient failures (429, 5xx) throw so queued refreshes can retry.
  */
 export function getAccount(horizonUrl: string, address: string): Promise<HorizonAccount | null> {
-  return client.getAccount(address, horizonUrl);
+  // Unlike the GraphQL fallback, the indexer must be able to tell a missing
+  // account from a transient failure: the former is finished, the latter is
+  // retried from the durable refresh queue.
+  return client.getAccount(address, horizonUrl, 'null-404');
 }
 
 /**

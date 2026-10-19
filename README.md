@@ -10,6 +10,8 @@ Part of the Lumina project, split across three repos:
 
 API consumers: start with [docs/API_GUIDE.md](docs/API_GUIDE.md), and see
 [docs/AUTHENTICATION.md](docs/AUTHENTICATION.md) for API keys and rate limits.
+Every error carries a stable `extensions.code`; the taxonomy is in
+[docs/ERROR_CODES.md](docs/ERROR_CODES.md).
 Bulk-export consumers: [docs/EXPORT_FORMATS.md](docs/EXPORT_FORMATS.md)
 documents every exported column and its unit, with a worked example.
 

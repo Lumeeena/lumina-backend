@@ -288,7 +288,8 @@ Rejected keys get HTTP `401` and a GraphQL error body:
 For security, the message doesn't say which of these it was.
 
 Handle errors by checking `extensions.code`, not the HTTP status or the
-message text. These codes join the ones listed in
+message text. These codes join the ones listed in the full taxonomy,
+[`ERROR_CODES.md`](ERROR_CODES.md), and summarized in
 [`API_GUIDE.md`](API_GUIDE.md#common-error-codes):
 
 | Code | HTTP status | Meaning |

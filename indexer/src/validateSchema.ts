@@ -20,6 +20,8 @@
  *   0 - Schema matches expected
  *   1 - Schema mismatch detected (or with --fail-on-mismatch)
  */
+import { readFileSync } from 'fs';
+import { join } from 'path';
 import { Pool } from 'pg';
 import { createPool } from './db';
 
@@ -41,10 +43,8 @@ function parseExpectedSchema(): {
   tables: Map<string, Set<string>>;
   indexes: Set<string>;
 } {
-  const fs = require('fs');
-  const path = require('path');
-  const schemaPath = path.join(__dirname, '../../db/schema.sql');
-  const schema = fs.readFileSync(schemaPath, 'utf-8');
+  const schemaPath = join(__dirname, '../../db/schema.sql');
+  const schema = readFileSync(schemaPath, 'utf-8');
 
   const tables = new Map<string, Set<string>>();
   const indexes = new Set<string>();
@@ -232,7 +232,9 @@ async function main(): Promise<void> {
   }
 }
 
-main().catch(err => {
-  console.error(err instanceof Error ? err.message : err);
-  process.exit(1);
-});
+if (require.main === module) {
+  main().catch(err => {
+    console.error(err instanceof Error ? err.message : err);
+    process.exit(1);
+  });
+}

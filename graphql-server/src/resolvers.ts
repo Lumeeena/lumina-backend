@@ -18,10 +18,18 @@ import {
   getTransactions,
   getTradesFromDb,
   getTableCountEstimateOrExact,
+  getContractStorageEntries,
+  getAccountSigners,
+  getSponsoredAccounts,
+  getContractDeployment,
+  getContracts,
+  getNetworkStats,
+  getActivityRollups,
+  getSharedWasmContracts,
   mapAccount,
   type AccountOrder,
 } from './db';
-import { DEFAULT_PAGE_LIMIT, KEYSETS, pageInfo, getPageSize } from './pagination';
+import { DEFAULT_PAGE_LIMIT, KEYSETS, pageInfo, getPageSize, type PaginationDirection } from './pagination';
 import { createLoaders, type RequestLoaders } from './loaders';
 import { getAccount as getAccountFromHorizon, getLatestLedger as getLatestLedgerFromHorizon } from './horizon';
 import { createSubscriptionResolvers } from './subscriptions';
@@ -194,6 +202,8 @@ export const resolvers = {
             items,
             limit,
             tx => [tx.ledger, tx.hash],
+            args.direction ?? 'FORWARD',
+            Boolean(args.cursor),
             totalCount
           ),
         };
@@ -248,7 +258,15 @@ export const resolvers = {
         }
         return {
           items,
-          pageInfo: pageInfo(ACCOUNT_ORDERS[orderBy].keyset, items, limit, account => ACCOUNT_ORDERS[orderBy].keyOf(account), totalCount),
+          pageInfo: pageInfo(
+            ACCOUNT_ORDERS[orderBy].keyset,
+            items,
+            limit,
+            account => ACCOUNT_ORDERS[orderBy].keyOf(account),
+            'FORWARD',
+            Boolean(args.cursor),
+            totalCount
+          ),
         };
       });
     },
@@ -264,7 +282,7 @@ export const resolvers = {
         const items = await getAccountLifecycle(ctx.pool, network.name, args.address, limit, args.cursor);
         return {
           items,
-          pageInfo: pageInfo(KEYSETS.accountLifecycle, items, limit, operation => [operation.ledger, operation.id]),
+          pageInfo: pageInfo(KEYSETS.accountLifecycle, items, limit, operation => [operation.ledger, operation.id], 'FORWARD', Boolean(args.cursor)),
         };
       });
     },
@@ -323,6 +341,8 @@ export const resolvers = {
             items,
             limit,
             operation => [operation.ledger, operation.id],
+            args.direction ?? 'FORWARD',
+            Boolean(args.cursor),
             totalCount
           ),
         };
@@ -337,15 +357,25 @@ export const resolvers = {
       return memoizeRequestQuery(ctx.queryMemo, 'search', args, async () => {
         const limit = getPageSize(args.limit);
         const network = networkArgument(args, ctx);
-        const { items, nextCursor } = await searchTransactions(ctx.pool, {
+        const { items, startCursor, endCursor, nextCursor } = await searchTransactions(ctx.pool, {
           network: network.name,
           query: args.query,
           limit,
           cursor: args.cursor ?? null,
         });
-        // Search already computed the cursor for the next page from the ranking
-        // tuple, so its own value is used rather than one rebuilt from the rows.
-        return { items, pageInfo: { hasNextPage: items.length === limit, cursor: nextCursor } };
+        // Search already computed the cursors from the ranking tuple, so its
+        // own values are used rather than ones rebuilt from the rows.
+        return {
+          items,
+          pageInfo: {
+            hasNextPage: items.length === limit,
+            hasPreviousPage: Boolean(args.cursor),
+            startCursor,
+            endCursor,
+            cursor: nextCursor,
+            totalCount: null,
+          },
+        };
       });
     },
 
@@ -373,7 +403,17 @@ export const resolvers = {
           cursor: args.cursor ?? null,
           order: args.order ?? 'DESC',
         });
-        return { items, pageInfo: pageInfo(KEYSETS.events, items, limit, event => [event.ledger, event.id]) };
+        return {
+          items,
+          pageInfo: pageInfo(
+            KEYSETS.events,
+            items,
+            limit,
+            event => [event.ledger, event.id],
+            args.direction ?? 'FORWARD',
+            Boolean(args.cursor)
+          ),
+        };
       });
     },
 
@@ -405,6 +445,9 @@ export const resolvers = {
           items,
           pageInfo: {
             hasNextPage: items.length === limit,
+            hasPreviousPage: Boolean(args.cursor),
+            startCursor: items.at(0)?.key ?? null,
+            endCursor: items.at(-1)?.key ?? null,
             cursor: items.at(-1)?.key ?? null,
           },
         };
@@ -457,7 +500,18 @@ export const resolvers = {
         if (args.includeTotalCount) {
           totalCount = await getTableCountEstimateOrExact(ctx.pool, 'ledgers', network.name);
         }
-        return { items, pageInfo: pageInfo(KEYSETS.ledgers, items, limit, ledger => ledger.sequence, totalCount) };
+        return {
+          items,
+          pageInfo: pageInfo(
+            KEYSETS.ledgers,
+            items,
+            limit,
+            ledger => ledger.sequence,
+            'FORWARD',
+            Boolean(args.cursor),
+            totalCount
+          ),
+        };
       });
     },
 
@@ -489,7 +543,17 @@ export const resolvers = {
         });
         // The sort key is (ledger, eventId): the id alone is not unique within a
         // ledger, so keysetting on it would skip and repeat rows.
-        return { items, pageInfo: pageInfo(KEYSETS.customEvents, items, limit, event => [event.ledger, event.eventId]) };
+        return {
+          items,
+          pageInfo: pageInfo(
+            KEYSETS.customEvents,
+            items,
+            limit,
+            event => [event.ledger, event.eventId],
+            args.direction ?? 'FORWARD',
+            Boolean(args.cursor)
+          ),
+        };
       });
     },
 
@@ -546,6 +610,8 @@ export const resolvers = {
             items,
             limit,
             trade => [trade.ledgerCloseTime, trade.id],
+            'FORWARD',
+            Boolean(args.cursor),
             totalCount
           ),
         };

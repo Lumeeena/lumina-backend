@@ -3,7 +3,7 @@ import { test } from 'node:test';
 import { readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import type { Pool } from 'pg';
-import { loadMigrations, migrationStatus } from './migrations';
+import { isMigrationIrreversible, loadDownMigrations, loadMigrations, migrationStatus, rollbackMigration, splitStatements } from './migrations';
 
 const MIGRATIONS_DIR = join(__dirname, '..', '..', 'db', 'migrations');
 
@@ -21,6 +21,7 @@ test('loads migrations in order and expands initial schema include', () => {
     '015_admin_operations', '015_asset_issuer_metadata', '015_drop_unused_trustline_indexes',
     '015_operation_decoding', '015_retry_queue_network_index', '015_transactions_listing_covering_index',
     '016_assets_index_review', '016_event_transaction_context', '017_account_state_history',
+    '017_signers_sponsorship_contracts_rollups',
   ]);
   assert.match(migrations[0].sql, /CREATE TABLE IF NOT EXISTS ledgers/);
   assert.match(migrations[0].sql, /PRIMARY KEY \(id, network\)/);
@@ -36,7 +37,6 @@ test('loads migrations in order and expands initial schema include', () => {
 test('concurrent migrations are sent one statement at a time', () => {
   // A multi-statement query string runs as one implicit transaction, which
   // CREATE INDEX CONCURRENTLY rejects just as it rejects BEGIN.
-  const { splitStatements } = require('./migrations');
   const migration = loadMigrations().find(m => m.version === '015_transactions_listing_covering_index');
   assert.ok(migration);
   const statements: string[] = splitStatements(migration.sql);
@@ -67,7 +67,6 @@ test('migration status refuses a later migration when an earlier one is pending'
 });
 
 test('loadDownMigrations loads all down migration scripts', () => {
-  const { loadDownMigrations } = require('./migrations');
   const downMigrations = loadDownMigrations();
   assert.ok(downMigrations.size > 0);
   assert.ok(downMigrations.has('002_account_event_columns'));
@@ -79,7 +78,6 @@ test('loadDownMigrations loads all down migration scripts', () => {
 });
 
 test('isMigrationIrreversible identifies irreversible migrations', () => {
-  const { isMigrationIrreversible } = require('./migrations');
   assert.equal(isMigrationIrreversible('001_init'), true);
   assert.equal(isMigrationIrreversible('006_partition_operations'), true);
   assert.equal(isMigrationIrreversible('007_networks'), true);
@@ -88,7 +86,6 @@ test('isMigrationIrreversible identifies irreversible migrations', () => {
 });
 
 test('rollbackMigration rejects irreversible migrations', async () => {
-  const { rollbackMigration } = require('./migrations');
   const fakePool = {} as unknown as Pool;
   await assert.rejects(
     () => rollbackMigration(fakePool, '001_init'),
