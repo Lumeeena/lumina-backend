@@ -2,6 +2,7 @@ import type { Pool } from 'pg';
 import {
   ACCOUNT_ORDER_NAMES,
   ACCOUNT_ORDERS,
+  getAccountAsOfLedgerFromDb,
   getAccountFromDb,
   getAccountLifecycle,
   getAccountOperations,
@@ -32,6 +33,7 @@ import { getNetworks, resolveNetworkArgument, type NetworkConfig, type NetworkRe
 import type { LedgerNotifier } from './pubsub';
 import { ANONYMOUS_CALLER, type ApiCaller } from './auth';
 import { computeBalanceHistory } from './balanceHistory';
+import { parseAsOfLedger } from './accountHistory';
 import { memoizeRequestQuery } from './requestMemo';
 
 export interface BaseContext {
@@ -205,9 +207,19 @@ export const resolvers = {
       });
     },
 
-    async account(_: unknown, args: { network?: string | null; address: string }, ctx: Context) {
+    async account(
+      _: unknown,
+      args: { network?: string | null; address: string; asOfLedger?: number | null },
+      ctx: Context
+    ) {
       return memoizeRequestQuery(ctx.queryMemo, 'account', args, async () => {
         const network = networkArgument(args, ctx);
+        if (args.asOfLedger != null) {
+          // Stored history only. Horizon holds the current state, so falling
+          // back to it here would answer a past question with today's balances.
+          const ledger = parseAsOfLedger(args.asOfLedger);
+          return getAccountAsOfLedgerFromDb(ctx.pool, network.name, args.address, ledger);
+        }
         return resolveAccount(args.address, ctx, network);
       });
     },

@@ -10,6 +10,7 @@
 import { randomUUID } from 'crypto';
 import { unwrapResolverError } from '@apollo/server/errors';
 import type { GraphQLFormattedError } from 'graphql';
+import { AccountHistoryError } from './accountHistory';
 import { AssetError } from './assets';
 import { ApiKeyError } from './auth';
 import { CustomQueryError } from './customEvents';
@@ -22,6 +23,7 @@ export const MASKED_ERROR_MESSAGE = 'Internal server error';
 
 /** Errors raised on purpose, with messages meant for the caller. */
 const DELIBERATE_ERRORS: Array<new (...args: never[]) => Error> = [
+  AccountHistoryError,
   CustomQueryError,
   SearchError,
   AssetError,

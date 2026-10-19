@@ -19,13 +19,19 @@
  *     "absent" (no row at all). Pruning them would collapse that distinction.
  *   - `accounts`, `contract_schemas`, `api_keys` and `exports` are current state
  *     or configuration, not a log.
+ *   - `account_state_history` is a log, so it is prunable. It is the one table
+ *     keyed on wall-clock time: see "Chain time" below.
  *   - `account_refresh_queue` and `ledger_retry_queue` are work queues that drain
  *     themselves; a retention window would only delete pending work.
  *
  * ## Chain time, not index time
  *
  * Cutoffs compare against each table's chain-time column (`created_at`, and
- * `closed_at` for `ledgers`) rather than `indexed_at`. An indexer that fell
+ * `closed_at` for `ledgers`) rather than `indexed_at`. The exception is
+ * `account_state_history`, whose rows describe a point in chain time only through
+ * a ledger number, not a timestamp, so it is pruned on `recorded_at`, the time
+ * the copy was stored. Its window is therefore "how long the indexer keeps a
+ * copy", not "how far back `asOfLedger` reaches" in chain time. An indexer that fell
  * behind for a day and caught up would have written a week of chain history in
  * a single `indexed_at` window, and a policy expressed in "days indexed" would
  * delete it immediately. "Keep 30 days" has to mean 30 days of the chain.
@@ -114,7 +120,8 @@ export type RetentionTable =
   | 'transactions'
   | 'contract_events'
   | 'custom_events'
-  | 'ledgers';
+  | 'ledgers'
+  | 'account_state_history';
 
 /** How to prune one table: its name and the chain-time column the cutoff applies to. */
 export interface RetentionSpec {
@@ -135,6 +142,9 @@ export const RETENTION_SPECS: readonly RetentionSpec[] = [
   { table: 'contract_events', timeColumn: 'created_at' },
   { table: 'custom_events', timeColumn: 'created_at' },
   { table: 'ledgers', timeColumn: 'closed_at' },
+  // No foreign keys reference or leave it, so its place in the order is free.
+  // Wall-clock: see the module comment on chain time.
+  { table: 'account_state_history', timeColumn: 'recorded_at' },
 ];
 
 /** Prunable table names, in prune order (derived from `RETENTION_SPECS`). */
@@ -176,6 +186,7 @@ export function unlimitedRetentionWindows(): RetentionWindows {
     contract_events: 0,
     custom_events: 0,
     ledgers: 0,
+    account_state_history: 0,
   };
 }
 

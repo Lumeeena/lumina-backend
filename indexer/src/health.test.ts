@@ -62,6 +62,7 @@ const debugConfig: Config = {
   sorobanRetentionWindowLedgers: 300000,
   retentionWindows: {
     ledgers: 0, transactions: 0, operations: 0, contract_events: 0, custom_events: 0,
+    account_state_history: 0,
   },
   retentionPruneIntervalMs: 3_600_000,
   retentionPruneBatchSize: 10_000,

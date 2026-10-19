@@ -50,6 +50,7 @@ This document is the authoritative data dictionary for the Lumina PostgreSQL dat
 22. [path_payment_hops](#22-path_payment_hops)
 23. [account_signer_changes](#23-account_signer_changes)
 24. [account_threshold_changes](#24-account_threshold_changes)
+25. [account_state_history](#25-account_state_history)
 
 ---
 
@@ -446,3 +447,20 @@ Audit trail of threshold and home domain adjustments (`set_options` operations).
 | `set_flags` | `TEXT[]` | Yes | None | Text array | Horizon (`set_flags_s`) | Account flags enabled. |
 | `clear_flags` | `TEXT[]` | Yes | None | Text array | Horizon (`clear_flags_s`)| Account flags disabled. |
 | `created_at` | `TIMESTAMPTZ` | No | None | ISO 8601 UTC | Horizon (`created_at`) | Timestamp of change. |
+
+### 25. `account_state_history`
+Stored copies of an account, one per observed last-modified ledger. Written by the indexer on each account refresh and read by `account(asOfLedger:)`. Pruned by the retention window `RETENTION_ACCOUNT_STATE_HISTORY_DAYS`. See [ACCOUNT_STATE_HISTORY.md](ACCOUNT_STATE_HISTORY.md) for what a copy captures and what it does not.
+
+| Column | Type | Nullable | Default | Units / Format | Source | Description |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| `address` | `TEXT` | No (PK) | None | Stellar address (`G...`) | Horizon (`account_id`) | Account the copy describes. |
+| `network` | `TEXT` | No (PK) | `'mainnet'` | Text name | Internal | Network identifier. |
+| `last_modified_ledger` | `BIGINT` | No (PK) | None | Ledger sequence | Horizon (`last_modified_ledger`) | Ledger in which this state was last modified. Copies are looked up by this value. |
+| `sequence` | `TEXT` | No | None | String Integer | Horizon (`sequence`) | Account transaction sequence number at that state. |
+| `subentry_count` | `INTEGER` | No | `0` | Integer count | Horizon (`subentry_count`) | Subentries (trustlines, offers, signers) at that state. |
+| `num_sponsored` | `INTEGER` | No | `0` | Integer count | Horizon (`num_sponsored`) | Subentries sponsored at that state. |
+| `num_sponsoring` | `INTEGER` | No | `0` | Integer count | Horizon (`num_sponsoring`) | Sponsors at that state. |
+| `balances` | `JSONB` | No | `'[]'` | JSONB Array | Horizon (`balances`) | Asset balances at that state (amounts as decimal strings). |
+| `flags` | `JSONB` | No | `'{}'` | JSONB Object | Horizon (`flags`) | Authorization flags at that state. |
+| `thresholds` | `JSONB` | No | `'{}'` | JSONB Object | Horizon (`thresholds`) | Signing thresholds at that state. |
+| `recorded_at` | `TIMESTAMPTZ` | No | `NOW()` | ISO 8601 UTC | Internal | Wall-clock time the copy was stored. Retention prunes on this column. |

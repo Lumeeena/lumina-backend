@@ -53,7 +53,7 @@ function windows(overrides: Partial<RetentionWindows> = {}): RetentionWindows {
 test('every table defaults to an unlimited window', () => {
   const defaults = unlimitedRetentionWindows();
   assert.deepEqual(Object.keys(defaults).sort(), [
-    'contract_events', 'custom_events', 'ledgers', 'operations', 'transactions',
+    'account_state_history', 'contract_events', 'custom_events', 'ledgers', 'operations', 'transactions',
   ]);
   for (const days of Object.values(defaults)) assert.equal(days, 0);
   // "Default to unlimited" is an acceptance criterion, so it is asserted
@@ -159,7 +159,7 @@ test('tables with no window are left completely alone', async () => {
   const operations = reports.find(r => r.table === 'operations');
   assert.equal(operations?.skipped, false);
   const skipped = reports.filter(r => r.skipped).map(r => r.table);
-  assert.deepEqual(skipped, ['transactions', 'contract_events', 'custom_events', 'ledgers']);
+  assert.deepEqual(skipped, ['transactions', 'contract_events', 'custom_events', 'ledgers', 'account_state_history']);
 
   const touched = queries.filter(q => /DELETE/.test(q.sql));
   assert.ok(touched.every(q => /operations/.test(q.sql)), 'no unconfigured table is touched');

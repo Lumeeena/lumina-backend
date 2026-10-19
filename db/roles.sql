@@ -227,7 +227,11 @@ BEGIN
       ('account_signer_changes', 'SELECT'),
       ('account_signer_changes', 'INSERT'),
       ('account_threshold_changes', 'SELECT'),
-      ('account_threshold_changes', 'INSERT')
+      ('account_threshold_changes', 'INSERT'),
+      -- Account history, written beside each accounts upsert (Issue #238).
+      -- ON CONFLICT (address, network, last_modified_ledger) DO NOTHING
+      ('account_state_history', 'SELECT'),
+      ('account_state_history', 'INSERT')
     ) AS grants(tbl, priv)
   LOOP
     -- Tolerate schema versions where a table does not exist yet.

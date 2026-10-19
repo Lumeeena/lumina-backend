@@ -189,6 +189,32 @@ CREATE INDEX idx_account_refresh_queue_pending
 -- without a deterministic tiebreaker a keyset walk repeats the same page.
 CREATE INDEX idx_accounts_last_modified ON accounts (network, last_modified_ledger DESC, address);
 
+-- Stored copies of an account, one per observed last-modified ledger. Written by
+-- the indexer on each account refresh; read by account(asOfLedger:). See
+-- docs/ACCOUNT_STATE_HISTORY.md for what a copy does and does not capture.
+CREATE TABLE IF NOT EXISTS account_state_history (
+    address              TEXT NOT NULL,
+    network              TEXT NOT NULL DEFAULT 'mainnet',
+    last_modified_ledger BIGINT NOT NULL,
+    sequence             TEXT NOT NULL,
+    subentry_count       INTEGER NOT NULL DEFAULT 0,
+    num_sponsored        INTEGER NOT NULL DEFAULT 0,
+    num_sponsoring       INTEGER NOT NULL DEFAULT 0,
+    balances             JSONB NOT NULL DEFAULT '[]',
+    flags                JSONB NOT NULL DEFAULT '{}',
+    thresholds           JSONB NOT NULL DEFAULT '{}',
+    recorded_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (address, network, last_modified_ledger),
+    CONSTRAINT account_state_history_address_check         CHECK (address <> ''),
+    CONSTRAINT account_state_history_sequence_check        CHECK (sequence <> ''),
+    CONSTRAINT account_state_history_last_modified_check   CHECK (last_modified_ledger > 0),
+    CONSTRAINT account_state_history_subentry_count_check  CHECK (subentry_count >= 0),
+    CONSTRAINT account_state_history_num_sponsored_check   CHECK (num_sponsored >= 0),
+    CONSTRAINT account_state_history_num_sponsoring_check  CHECK (num_sponsoring >= 0)
+);
+
+CREATE INDEX idx_account_state_history_recorded_at ON account_state_history (recorded_at);
+
 -- ─── Contract Events (Soroban) ────────────────────────────────────────────────
 
 CREATE TABLE IF NOT EXISTS contract_events (

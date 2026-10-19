@@ -114,6 +114,7 @@ test('retention defaults to unlimited for every table', () => {
     operations: 0,
     contract_events: 0,
     custom_events: 0,
+    account_state_history: 0,
   });
   assert.equal(isRetentionEnabled(cfg.retentionWindows), false);
   assert.equal(cfg.retentionPruneIntervalMs, 3_600_000);

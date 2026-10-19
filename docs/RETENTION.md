@@ -25,6 +25,7 @@ default for every one of them is `0`, which means keep everything.
 | `RETENTION_OPERATIONS_DAYS`    | `operations`       | `0` (unlimited)  |
 | `RETENTION_CONTRACT_EVENTS_DAYS` | `contract_events` | `0` (unlimited)  |
 | `RETENTION_CUSTOM_EVENTS_DAYS` | `custom_events`    | `0` (unlimited)  |
+| `RETENTION_ACCOUNT_STATE_HISTORY_DAYS` | `account_state_history` | `0` (unlimited) |
 
 Two settings control the job itself:
 
@@ -102,6 +103,7 @@ pruning code:
 | `operations`                 | yes      | The fastest-growing table in the schema                     |
 | `contract_events`            | yes      |                                                              |
 | `custom_events`              | yes      |                                                              |
+| `account_state_history`      | yes      | Pruned on `recorded_at` (when the copy was stored), not chain time. The window bounds how far back `account(asOfLedger:)` can answer, once pruning runs. See the caveat on pruning status in [ACCOUNT_STATE_HISTORY.md](ACCOUNT_STATE_HISTORY.md#window-how-far-back-it-reaches). |
 | `contract_storage_entries`   | **no**   | Archived entries are kept as rows with `state = 'archived'` precisely so a client can tell "archived" from "absent" (no row at all). Pruning them collapses that distinction into "gone", which is the one thing the schema was designed to avoid. |
 | `accounts`                   | **no**   | Current state, not a log. Pruning an account row loses the cached balance, flags and thresholds with nothing to rebuild them from. |
 | `trustlines`                 | **no**   | Current state: one row per live (account, asset) pair. A time window would delete trustlines whose last payment happened to be old. See [TRUSTLINES_INDEX_REVIEW.md](TRUSTLINES_INDEX_REVIEW.md#growth). |

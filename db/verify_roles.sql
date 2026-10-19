@@ -21,7 +21,7 @@ DECLARE
   indexed_tables text[] := ARRAY[
     'ledgers', 'transactions', 'operations',
     'accounts', 'account_refresh_queue', 'contract_events', 'contract_schemas', 'custom_events',
-    'backfill_progress', 'failed_ledgers', 'ledger_retry_queue'
+    'backfill_progress', 'failed_ledgers', 'ledger_retry_queue', 'account_state_history'
   ];
   update_tables  text[] := ARRAY['accounts', 'account_refresh_queue', 'contract_schemas', 'custom_events', 'backfill_progress',
                                  'failed_ledgers', 'ledger_retry_queue'];

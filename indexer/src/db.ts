@@ -250,7 +250,10 @@ export async function completeAccountRefreshes(
   try {
     await client.query('BEGIN');
     for (const { account } of completed) {
-      if (account) await upsertAccount(client, network, account);
+      if (account) {
+        await upsertAccount(client, network, account);
+        await insertAccountStateHistory(client, network, account);
+      }
     }
 
     await client.query(
@@ -505,6 +508,38 @@ export async function upsertAccount(
       JSON.stringify(account.flags),
       JSON.stringify(account.thresholds),
       network,
+    ],
+  });
+}
+
+/**
+ * Stores one observed state of an account in `account_state_history`, so that
+ * `account(asOfLedger:)` can answer for a past ledger (docs/ACCOUNT_STATE_HISTORY.md).
+ *
+ * Keyed by the state's own last-modified ledger, so seeing the same state twice
+ * stores it once. Called inside the same transaction as the `accounts` upsert,
+ * so a rollback removes both.
+ */
+export async function insertAccountStateHistory(
+  client: PoolClient,
+  network: string,
+  account: HorizonAccount
+): Promise<void> {
+  await client.query({
+    text: `INSERT INTO account_state_history (address, network, last_modified_ledger, sequence, subentry_count, num_sponsored, num_sponsoring, balances, flags, thresholds)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+           ON CONFLICT (address, network, last_modified_ledger) DO NOTHING`,
+    values: [
+      account.account_id,
+      network,
+      account.last_modified_ledger,
+      account.sequence,
+      account.subentry_count,
+      account.num_sponsored,
+      account.num_sponsoring,
+      JSON.stringify(account.balances),
+      JSON.stringify(account.flags),
+      JSON.stringify(account.thresholds),
     ],
   });
 }

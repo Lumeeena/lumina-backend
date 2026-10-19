@@ -89,12 +89,24 @@ type Query {
   **Falls back to Horizon** when the indexer has no row for the address, which is
   the common case for an account that exists but has not transacted in the range
   this deployment has indexed. Returns `null` only when neither source has it.
+
+  With `asOfLedger`, returns the account as the indexer last recorded it at or
+  before that ledger. There is **no Horizon fallback** for a historical query: it
+  returns `null` when no recorded state exists at or before that ledger, which
+  covers both "not yet observed" and "history pruned". See
+  docs/ACCOUNT_STATE_HISTORY.md for the resolution and retention limits.
   """
   account(
     """Network to read; defaults to the primary network configured for this deployment."""
     network: Network
     """Stellar account address, e.g. `GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN`."""
     address: String!
+    """
+    Read the account as of this ledger sequence instead of its current state. The
+    answer is the latest recorded state at or before the ledger; its
+    `lastModifiedLedger` says which recorded state it is.
+    """
+    asOfLedger: Int
   ): Account
 
   """

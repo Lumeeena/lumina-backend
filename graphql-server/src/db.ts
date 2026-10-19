@@ -560,6 +560,31 @@ export async function getAccountFromDb(pool: Pool, network: string, address: str
   return accountFromRow(rows[0]);
 }
 
+/**
+ * The most recent stored state of an account at or before `ledger`.
+ *
+ * Reads `account_state_history`, which the indexer fills on each account
+ * refresh (see docs/ACCOUNT_STATE_HISTORY.md). `null` means no stored state
+ * exists at or before that ledger: the account was not yet observed, or its
+ * history has been pruned. It does not mean the account did not exist.
+ */
+export async function getAccountAsOfLedgerFromDb(
+  pool: Pool,
+  network: string,
+  address: string,
+  ledger: number
+) {
+  const { rows } = await pool.query<AccountRow>(
+    `SELECT ${ACCOUNT_COLUMNS} FROM account_state_history
+     WHERE address = $1 AND network = $2 AND last_modified_ledger <= $3
+     ORDER BY last_modified_ledger DESC
+     LIMIT 1`,
+    [address, network, ledger]
+  );
+  if (!rows[0]) return null;
+  return accountFromRow(rows[0]);
+}
+
 export async function getAccountsFromDb(pool: Pool, network: string, addresses: readonly string[]) {
   if (addresses.length === 0) return new Map<string, ReturnType<typeof mapAccount>>();
   const { rows } = await pool.query<AccountRow>(

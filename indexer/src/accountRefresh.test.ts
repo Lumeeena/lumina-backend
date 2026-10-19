@@ -14,8 +14,9 @@ function fakePool(batches: Array<Array<Record<string, string | null>>>) {
       return { rows: [] };
     },
     connect: async () => ({
-      query: async (sql: string) => {
-        clientQueries.push(sql);
+      // Parameterised statements arrive as `{ text, values }`; record the text.
+      query: async (sql: string | { text: string }) => {
+        clientQueries.push(typeof sql === 'string' ? sql : sql.text);
         return { rows: [] };
       },
       release: () => {},
@@ -51,6 +52,26 @@ test('refreshAccountQueueBatch fetches stale accounts and commits state with que
   assert.ok(clientQueries.some(sql => sql.includes('INSERT INTO accounts')));
   assert.ok(clientQueries.some(sql => sql.includes('DELETE FROM account_refresh_queue')));
   assert.equal(clientQueries.at(-1), 'COMMIT');
+});
+
+test('refreshAccountQueueBatch stores account history inside the same transaction as the upsert', async () => {
+  const { pool, clientQueries } = fakePool([[
+    { address: 'G-history', last_requested_ledger: '100', last_modified_ledger: '99' },
+  ]]);
+
+  await refreshAccountQueueBatch(
+    pool,
+    network,
+    horizonUrl,
+    async (_url, address) => makeAccount({ account_id: address }),
+    10
+  );
+
+  const upsert = clientQueries.findIndex(sql => sql.includes('INSERT INTO accounts'));
+  const history = clientQueries.findIndex(sql => sql.includes('INSERT INTO account_state_history'));
+  const commit = clientQueries.indexOf('COMMIT');
+  assert.ok(upsert >= 0 && history > upsert, 'history is written after the accounts upsert');
+  assert.ok(history < commit, 'history is written before COMMIT, so a rollback removes both');
 });
 
 test('refreshAccountQueueBatch skips a snapshot that already covers its request', async () => {

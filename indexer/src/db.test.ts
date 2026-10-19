@@ -12,6 +12,7 @@ import {
   insertContractEvents,
   isCheckViolation,
   markContractStorageEntriesArchived,
+  insertAccountStateHistory,
   upsertAccount,
   upsertContractStorageEntries,
   processLiquidityPoolOperation,
@@ -322,6 +323,27 @@ test('upsertAccount inserts with an ON CONFLICT upsert', async () => {
   // in the key, one chain's balances silently overwrite another's.
   assert.match(queries[0]!, /ON CONFLICT \(address, network\) DO UPDATE/);
   assert.match(queries[0]!, /network\)/);
+});
+
+test('insertAccountStateHistory stores the state under its own ledger, and only once', async () => {
+  const calls: Array<{ text: string; values: unknown[] }> = [];
+  const client = {
+    query: async (q: { text: string; values: unknown[] }) => {
+      calls.push(q);
+      return { rows: [] };
+    },
+  } as unknown as PoolClient;
+
+  await insertAccountStateHistory(client, 'testnet', account);
+
+  assert.equal(calls.length, 1);
+  assert.match(calls[0]!.text, /INSERT INTO account_state_history/);
+  // Keyed by the state's own last-modified ledger: seeing the same state on a
+  // second refresh must not add a row.
+  assert.match(calls[0]!.text, /ON CONFLICT \(address, network, last_modified_ledger\) DO NOTHING/);
+  assert.equal(calls[0]!.values[0], account.account_id);
+  assert.equal(calls[0]!.values[1], 'testnet');
+  assert.equal(calls[0]!.values[2], account.last_modified_ledger);
 });
 
 const event = makeContractEvent();
