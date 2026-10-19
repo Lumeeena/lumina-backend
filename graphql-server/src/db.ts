@@ -1010,3 +1010,209 @@ export async function getTableCountEstimateOrExact(
     isEstimate: true,
   };
 }
+
+// ─── Signers & Sponsorship (#226) ────────────────────────────────────────────
+
+export interface SignerRow {
+  key: string;
+  type: string;
+  weight: number;
+}
+
+export async function getAccountSigners(
+  pool: Pool,
+  network: string,
+  address: string
+): Promise<SignerRow[]> {
+  const { rows } = await pool.query<SignerRow>(
+    `SELECT key, type, weight FROM account_signers
+     WHERE network = $1 AND account_address = $2
+     ORDER BY weight DESC, key ASC`,
+    [network, address]
+  );
+  return rows;
+}
+
+export async function getSponsoredAccounts(
+  pool: Pool,
+  network: string,
+  sponsorAddress: string
+): Promise<NormalizedAccount[]> {
+  const { rows } = await pool.query(
+    `SELECT a.address, a.network, a.sequence, a.subentry_count, a.last_modified_ledger,
+            a.num_sponsored, a.num_sponsoring, a.balances, a.flags, a.thresholds
+     FROM accounts a
+     JOIN sponsorships s ON s.sponsored_id = a.address AND s.network = a.network
+     WHERE s.sponsoring_id = $1 AND s.network = $2
+     ORDER BY a.address ASC`,
+    [network, sponsorAddress]
+  );
+  return rows.map((row) =>
+    mapAccount({
+      address: row.address,
+      sequence: row.sequence,
+      subentry_count: row.subentry_count,
+      last_modified_ledger: row.last_modified_ledger,
+      num_sponsored: row.num_sponsored,
+      num_sponsoring: row.num_sponsoring,
+      balances: row.balances,
+      flags: row.flags,
+      thresholds: row.thresholds,
+    })
+  );
+}
+
+// ─── Contracts & Deployments (#227) ──────────────────────────────────────────
+
+export interface ContractDeploymentRow {
+  contract_id: string;
+  deployer: string;
+  wasm_hash: string;
+  deployed_ledger: number;
+  deployed_at: string;
+}
+
+export async function getContractDeployment(
+  pool: Pool,
+  network: string,
+  contractId: string
+): Promise<ContractDeploymentRow | null> {
+  const { rows } = await pool.query<ContractDeploymentRow>(
+    `SELECT contract_id, deployer, wasm_hash, deployed_ledger, deployed_at
+     FROM contract_deployments
+     WHERE network = $1 AND contract_id = $2`,
+    [network, contractId]
+  );
+  return rows[0] ?? null;
+}
+
+export async function getContracts(
+  pool: Pool,
+  network: string,
+  limit: number,
+  cursor?: string
+): Promise<ContractDeploymentRow[]> {
+  const conditions = ['network = $1'];
+  const params: unknown[] = [network];
+  if (cursor) {
+    params.push(cursor);
+    conditions.push(`deployed_ledger < $${params.length}`);
+  }
+  params.push(limit);
+  const { rows } = await pool.query<ContractDeploymentRow>(
+    `SELECT contract_id, deployer, wasm_hash, deployed_ledger, deployed_at
+     FROM contract_deployments
+     WHERE ${conditions.join(' AND ')}
+     ORDER BY deployed_ledger DESC
+     LIMIT $${params.length}`,
+    params
+  );
+  return rows;
+}
+
+export async function getSharedWasmContracts(
+  pool: Pool,
+  network: string,
+  wasmHash: string,
+  excludeContractId: string,
+  limit: number
+): Promise<ContractDeploymentRow[]> {
+  const { rows } = await pool.query<ContractDeploymentRow>(
+    `SELECT contract_id, deployer, wasm_hash, deployed_ledger, deployed_at
+     FROM contract_deployments
+     WHERE network = $1 AND wasm_hash = $2 AND contract_id != $3
+     ORDER BY deployed_ledger DESC
+     LIMIT $4`,
+    [network, wasmHash, excludeContractId, limit]
+  );
+  return rows;
+}
+
+// ─── Network Statistics (#228) ───────────────────────────────────────────────
+
+export interface NetworkStatsBucketRow {
+  bucket_start: string;
+  transaction_count: number;
+  operation_count: number;
+  active_accounts: number;
+  total_volume: string;
+}
+
+export async function getNetworkStats(
+  pool: Pool,
+  network: string,
+  startTime: string,
+  endTime: string,
+  granularity: string
+): Promise<NetworkStatsBucketRow[]> {
+  const interval = granularity === 'day' ? '1 day' : '1 hour';
+  const { rows } = await pool.query<NetworkStatsBucketRow>(
+    `SELECT
+       bucket_start,
+       transaction_count,
+       operation_count,
+       active_accounts,
+       total_volume::text AS total_volume
+     FROM activity_rollups
+     WHERE network = $1 AND granularity = $2
+       AND bucket_start >= $3 AND bucket_start < $4
+     ORDER BY bucket_start ASC`,
+    [network, granularity, startTime, endTime]
+  );
+  return rows;
+}
+
+// ─── Activity Rollups (#229) ─────────────────────────────────────────────────
+
+export interface ActivityRollupRow {
+  bucket_start: string;
+  granularity: string;
+  network: string;
+  transaction_count: number;
+  operation_count: number;
+  active_accounts: number;
+  total_volume: string;
+}
+
+export async function getActivityRollups(
+  pool: Pool,
+  network: string,
+  granularity: string,
+  startTime: string,
+  endTime: string
+): Promise<ActivityRollupRow[]> {
+  const { rows } = await pool.query<ActivityRollupRow>(
+    `SELECT
+       bucket_start, granularity, network,
+       transaction_count, operation_count, active_accounts,
+       total_volume::text AS total_volume
+     FROM activity_rollups
+     WHERE network = $1 AND granularity = $2
+       AND bucket_start >= $3 AND bucket_start < $4
+     ORDER BY bucket_start ASC`,
+    [network, granularity, startTime, endTime]
+  );
+  return rows;
+}
+
+export async function getRollupConsistency(
+  pool: Pool,
+  network: string,
+  granularity: string,
+  bucketStart: string
+): Promise<{ rollupCount: number; baseCount: number; matches: boolean }> {
+  const { rows: rollupRows } = await pool.query<{ transaction_count: string }>(
+    `SELECT transaction_count::text FROM activity_rollups
+     WHERE network = $1 AND granularity = $2 AND bucket_start = $3`,
+    [network, granularity, bucketStart]
+  );
+  const { rows: baseRows } = await pool.query<{ count: string }>(
+    `SELECT COUNT(*)::text AS count FROM transactions
+     WHERE network = $1 AND ledger_close_time >= $2
+       AND ledger_close_time < $2::timestamptz + CASE WHEN $3 = 'day' THEN INTERVAL '1 day' ELSE INTERVAL '1 hour' END`,
+    [network, bucketStart, granularity]
+  );
+  const rollupCount = parseInt(rollupRows[0]?.transaction_count ?? '0', 10);
+  const baseCount = parseInt(baseRows[0]?.count ?? '0', 10);
+  return { rollupCount, baseCount, matches: rollupCount === baseCount };
+}

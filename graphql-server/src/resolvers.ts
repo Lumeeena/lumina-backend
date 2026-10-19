@@ -32,6 +32,16 @@ import { getNetworks, resolveNetworkArgument, type NetworkConfig, type NetworkRe
 import type { LedgerNotifier } from './pubsub';
 import { ANONYMOUS_CALLER, type ApiCaller } from './auth';
 import { computeBalanceHistory } from './balanceHistory';
+import {
+  getAccountSigners,
+  getSponsoredAccounts,
+  getContractDeployment,
+  getContracts,
+  getSharedWasmContracts,
+  getNetworkStats,
+  getActivityRollups,
+  getRollupConsistency,
+} from './db';
 import { memoizeRequestQuery } from './requestMemo';
 
 export interface BaseContext {
@@ -633,6 +643,113 @@ export const resolvers = {
         return getIndexerStatus(ctx.pool, network);
       });
     },
+
+    // ─── #226: Signers & Sponsorship ─────────────────────────────────────
+    async accountSigners(
+      _: unknown,
+      args: { network?: string | null; address: string },
+      ctx: Context
+    ) {
+      const network = networkArgument(args, ctx);
+      return getAccountSigners(ctx.pool, network.name, args.address);
+    },
+    async sponsoredAccounts(
+      _: unknown,
+      args: { network?: string | null; sponsorAddress: string },
+      ctx: Context
+    ) {
+      const network = networkArgument(args, ctx);
+      return getSponsoredAccounts(ctx.pool, network.name, args.sponsorAddress);
+    },
+
+    // ─── #227: Contracts & Deployments ───────────────────────────────────
+    async contract(
+      _: unknown,
+      args: { network?: string | null; contractId: string },
+      ctx: Context
+    ) {
+      const network = networkArgument(args, ctx);
+      const row = await getContractDeployment(ctx.pool, network.name, args.contractId);
+      if (!row) return null;
+      return {
+        contractId: row.contract_id,
+        deployer: row.deployer,
+        wasmHash: row.wasm_hash,
+        deployedLedger: row.deployed_ledger,
+        deployedAt: row.deployed_at,
+      };
+    },
+    async contracts(
+      _: unknown,
+      args: { network?: string | null; limit?: number; cursor?: string },
+      ctx: Context
+    ) {
+      const network = networkArgument(args, ctx);
+      const limit = getPageSize(args.limit, 20);
+      const rows = await getContracts(ctx.pool, network.name, limit, args.cursor ?? undefined);
+      return rows.map((row) => ({
+        contractId: row.contract_id,
+        deployer: row.deployer,
+        wasmHash: row.wasm_hash,
+        deployedLedger: row.deployed_ledger,
+        deployedAt: row.deployed_at,
+      }));
+    },
+
+    // ─── #228: Network Statistics ────────────────────────────────────────
+    async networkStats(
+      _: unknown,
+      args: { network?: string | null; startTime: string; endTime: string; granularity?: string },
+      ctx: Context
+    ) {
+      const network = networkArgument(args, ctx);
+      const granularity = args.granularity === 'day' ? 'day' : 'hour';
+      const rows = await getNetworkStats(
+        ctx.pool,
+        network.name,
+        args.startTime,
+        args.endTime,
+        granularity
+      );
+      return rows.map((row) => ({
+        bucketStart: row.bucket_start,
+        transactionCount: row.transaction_count,
+        operationCount: row.operation_count,
+        activeAccounts: row.active_accounts,
+        totalVolume: row.total_volume,
+      }));
+    },
+
+    // ─── #229: Activity Rollups ──────────────────────────────────────────
+    async activityRollups(
+      _: unknown,
+      args: {
+        network?: string | null;
+        granularity?: string;
+        startTime: string;
+        endTime: string;
+      },
+      ctx: Context
+    ) {
+      const network = networkArgument(args, ctx);
+      const granularity = args.granularity === 'day' ? 'day' : 'hour';
+      const rows = await getActivityRollups(
+        ctx.pool,
+        network.name,
+        granularity,
+        args.startTime,
+        args.endTime
+      );
+      return rows.map((row) => ({
+        bucketStart: row.bucket_start,
+        granularity: row.granularity,
+        network: row.network,
+        transactionCount: row.transaction_count,
+        operationCount: row.operation_count,
+        activeAccounts: row.active_accounts,
+        totalVolume: row.total_volume,
+      }));
+    },
   },
 
   Account: {
@@ -641,10 +758,39 @@ export const resolvers = {
       const network = networkForParent(ctx, parent.network);
       return getAccountTransactions(ctx.pool, network.name, parent.address, limit);
     },
+    async signers(parent: { address: string; network?: string }, _: unknown, ctx: Context) {
+      const network = networkForParent(ctx, parent.network);
+      return getAccountSigners(ctx.pool, network.name, parent.address);
+    },
     async operations(parent: { address: string; network?: string }, args: { limit?: number }, ctx: Context) {
       const limit = getPageSize(args.limit, 10);
       const network = networkForParent(ctx, parent.network);
       return getAccountOperations(ctx.pool, network.name, parent.address, limit);
+    },
+  },
+
+  ContractDeployment: {
+    async sharedWasmContracts(
+      parent: { contractId: string; wasmHash: string; network?: string },
+      args: { limit?: number },
+      ctx: Context
+    ) {
+      const network = networkForParent(ctx, parent.network);
+      const limit = getPageSize(args.limit, 10);
+      const rows = await getSharedWasmContracts(
+        ctx.pool,
+        network.name,
+        parent.wasmHash,
+        parent.contractId,
+        limit
+      );
+      return rows.map((row) => ({
+        contractId: row.contract_id,
+        deployer: row.deployer,
+        wasmHash: row.wasm_hash,
+        deployedLedger: row.deployed_ledger,
+        deployedAt: row.deployed_at,
+      }));
     },
   },
 
