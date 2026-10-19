@@ -138,3 +138,68 @@ test('PRIMARY_NETWORK must name a declared network', () => {
     /PRIMARY_NETWORK "futurenet" is not one of the declared networks/
   );
 });
+
+// ── Default passphrases ───────────────────────────────────────────────────
+
+test('testnet gets the correct default passphrase', () => {
+  const registry = resolveNetworks({
+    NETWORKS: 'testnet',
+    TESTNET_HORIZON_URL: 'https://horizon-testnet.stellar.org',
+  });
+  assert.equal(registry.primary.networkPassphrase, 'Test SDF Network ; September 2015');
+});
+
+test('futurenet gets the correct default passphrase', () => {
+  const registry = resolveNetworks({
+    NETWORKS: 'futurenet',
+    FUTURENET_HORIZON_URL: 'https://horizon-futurenet.stellar.org',
+  });
+  assert.equal(registry.primary.networkPassphrase, 'Test SDF Future Network ; October 2022');
+});
+
+test('mainnet gets the public Stellar passphrase by default', () => {
+  const registry = resolveNetworks({});
+  assert.equal(registry.primary.networkPassphrase, 'Public Global Stellar Network ; September 2015');
+});
+
+test('a custom NETWORK_PASSPHRASE overrides the default in single-network mode', () => {
+  const registry = resolveNetworks({ NETWORK_PASSPHRASE: 'My Custom Network ; 2025' });
+  assert.equal(registry.primary.networkPassphrase, 'My Custom Network ; 2025');
+});
+
+test('a per-network passphrase override is respected in multi-network mode', () => {
+  const registry = resolveNetworks({
+    NETWORKS: 'testnet',
+    TESTNET_HORIZON_URL: 'https://h',
+    TESTNET_NETWORK_PASSPHRASE: 'Custom Testnet Passphrase',
+  });
+  assert.equal(registry.primary.networkPassphrase, 'Custom Testnet Passphrase');
+});
+
+// ── Blank / whitespace NETWORKS ───────────────────────────────────────────
+
+test('NETWORKS set to empty string falls back to single-network mode', () => {
+  // An empty string is treated the same as unset so that a deployment can
+  // clear the variable without also removing all the per-network keys.
+  const registry = resolveNetworks({ NETWORKS: '', HORIZON_URL: 'https://h' });
+  assert.equal(registry.networks.length, 1);
+  assert.equal(registry.primary.horizonUrl, 'https://h');
+});
+
+test('NETWORKS set to whitespace-only falls back to single-network mode', () => {
+  const registry = resolveNetworks({ NETWORKS: '   ', HORIZON_URL: 'https://h' });
+  assert.equal(registry.networks.length, 1);
+});
+
+// ── PRIMARY_NETWORK in single-network mode with unknown name ─────────────
+
+test('PRIMARY_NETWORK set to an unknown network name fails in single-network mode', () => {
+  assert.throws(
+    () => resolveNetworks({ PRIMARY_NETWORK: 'staging' }),
+    (err: unknown) => {
+      assert.ok(err instanceof NetworkConfigError);
+      assert.match(err.message, /PRIMARY_NETWORK "staging" is not a known network/);
+      return true;
+    }
+  );
+});

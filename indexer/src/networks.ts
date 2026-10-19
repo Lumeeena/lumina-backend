@@ -37,12 +37,32 @@
  * rather than a shared import: the two packages don't share code (see
  * `graphql-server/src/horizon.ts` and `notifications.ts` for the same rule),
  * and each service reads its own configuration at its own startup.
+ *
+ * ## Tuning constants
+ *
+ * There are none here by design. Network names are determined by what the
+ * GraphQL schema's `Network` enum contains, and Horizon/RPC URLs are
+ * fully operator-supplied. The only default is `DEFAULT_HORIZON_URL` for
+ * single-network deployments that have never set `HORIZON_URL`.
  */
 
-/** Networks the GraphQL schema's `Network` enum carries. */
+/**
+ * Networks the GraphQL schema's `Network` enum carries.
+ *
+ * Adding a network here without a matching entry in the GraphQL `Network` enum
+ * will cause `resolveNetworks` to accept a name that the API cannot serve —
+ * update the enum first, then add the name here.
+ */
 export const KNOWN_NETWORKS = ['mainnet', 'testnet', 'futurenet'] as const;
 
-/** Passphrase a network's transactions are signed against, by name. */
+/**
+ * Passphrase a network's transactions are signed against, by name.
+ *
+ * Stellar requires every operation to carry the passphrase of the network it
+ * is submitted to. An incorrect passphrase produces a transaction that is
+ * valid on a different network and invalid here — a correctness failure rather
+ * than an obvious error.
+ */
 function defaultPassphrase(name: string): string {
   switch (name) {
     case 'testnet':
@@ -54,9 +74,21 @@ function defaultPassphrase(name: string): string {
   }
 }
 
-/** Endpoint used when a flat (single-network) deployment sets no `HORIZON_URL`. */
+/**
+ * Endpoint used when a flat (single-network) deployment sets no `HORIZON_URL`.
+ *
+ * The public Horizon is suitable for read-only access and low-volume indexing.
+ * High-volume deployments should point at a dedicated or private Horizon and
+ * set `HORIZON_URL` explicitly, or they will hit the public rate limits and
+ * trigger the adaptive backoff.
+ */
 export const DEFAULT_HORIZON_URL = 'https://horizon.stellar.org';
 
+/**
+ * Thrown at startup whenever the network configuration is incomplete or
+ * contradictory. Callers can catch this specifically to distinguish
+ * configuration errors from runtime failures.
+ */
 export class NetworkConfigError extends Error {
   constructor(message: string) {
     super(message);
@@ -64,6 +96,7 @@ export class NetworkConfigError extends Error {
   }
 }
 
+/** One fully resolved network the indexer polls. */
 export interface NetworkConfig {
   /** Lowercase declared name — the value stored in the `network` column. */
   name: string;
@@ -74,9 +107,14 @@ export interface NetworkConfig {
   networkPassphrase: string;
 }
 
+/** The resolved set of networks for this deployment. */
 export interface NetworkRegistry {
   /** Declaration order — the first entry is the default primary. */
   networks: NetworkConfig[];
+  /**
+   * The network that serves requests carrying no explicit `network` argument.
+   * Defaults to the first declared network; overridden by `PRIMARY_NETWORK`.
+   */
   primary: NetworkConfig;
 }
 

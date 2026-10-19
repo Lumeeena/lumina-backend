@@ -125,3 +125,59 @@ test('parseNotification drops a non-string network but keeps the notification', 
   assert.equal(parsed?.ledger, 5);
   assert.equal(parsed?.network, undefined);
 });
+
+// ── Additional coverage ───────────────────────────────────────────────────
+
+test('notifyIndexed works for events kind as well as ledger', async () => {
+  const { db, calls } = recordingDb();
+
+  await notifyIndexed(db, {
+    kind: 'events',
+    network: 'mainnet',
+    ledger: 200,
+    events: 12,
+  });
+
+  assert.equal(calls.length, 1);
+  assert.match(calls[0]!.sql, /pg_notify/);
+  const body = JSON.parse(calls[0]!.params?.[1] as string);
+  assert.equal(body.kind, 'events');
+  assert.equal(body.events, 12);
+});
+
+test('serializeNotification omits undefined network rather than sending "undefined"', () => {
+  // JSON.stringify drops undefined values; a missing network key means the
+  // same as it did before per-network notifications landed, so the server
+  // reads it as "the one network this deployment has".
+  const payload = serializeNotification({
+    kind: 'ledger',
+    network: undefined,
+    ledger: 10,
+  });
+
+  const parsed = JSON.parse(payload) as Record<string, unknown>;
+  assert.equal('network' in parsed, false, 'undefined network must not appear as the string "undefined"');
+  assert.equal(parsed['ledger'], 10);
+});
+
+test('serializeNotification degrades to bare essentials when network is undefined and payload is large', () => {
+  // When both the network and the filler are stripped the result must still
+  // parse cleanly and carry the required fields.
+  const payload = serializeNotification({
+    kind: 'ledger',
+    network: undefined,
+    ledger: 5,
+    transactions: 1,
+    operations: 1,
+    // Force degradation path.
+    filler: 'x'.repeat(9000),
+  } as never);
+
+  const parsed = JSON.parse(payload) as Record<string, unknown>;
+  assert.ok(Buffer.byteLength(payload, 'utf8') < 8000);
+  assert.equal(parsed['kind'], 'ledger');
+  assert.equal(parsed['ledger'], 5);
+  // `network` was undefined; JSON.stringify on the degraded object will also
+  // omit it (same behaviour as the full payload case).
+  assert.equal('network' in parsed, false);
+});

@@ -8,6 +8,37 @@
  * Indexing is opt-in: the indexer runs exactly as it does without any
  * Soroban configuration. Set SOROBAN_RPC_URL + INDEXED_CONTRACT_IDS to
  * enable it (see indexer/src/index.ts).
+ *
+ * ## Why direct JSON-RPC instead of the SDK's rpc.Server
+ *
+ * The SDK's `rpc.Server` wrapper is higher-level but ties the indexer to a
+ * specific SDK version. JSON-RPC `getEvents` is a stable wire protocol — the
+ * method name and parameter shape have not changed across SDK majors — so
+ * using it directly lets the indexer stay on an older or newer SDK without
+ * being blocked by wrapper API changes.
+ *
+ * ## Why contract IDs are split across multiple calls
+ *
+ * The Soroban RPC `getEvents` filter accepts at most `GET_EVENTS_MAX_CONTRACT_IDS`
+ * contract IDs per call (currently 5). A list longer than that causes the
+ * entire call to fail with an error. The indexer splits longer lists into
+ * chunks and makes one call per chunk, sharing a per-cycle event budget across
+ * all of them so the total number of decoded events stays bounded.
+ *
+ * ## Tuning constants
+ *
+ * `GET_LEDGER_ENTRIES_MAX_KEYS = 200` — the RPC's own page size for ledger
+ * entry reads. Requests with more keys than this are split across multiple
+ * calls and their results concatenated, preserving key order.
+ *
+ * `GET_EVENTS_MAX_CONTRACT_IDS = 5` — the RPC rejects a filter with more than
+ * this many contract IDs. Split here rather than surface an opaque RPC error.
+ *
+ * `SOROBAN_MIN_REQUEST_INTERVAL_MS` (default 100 ms) — minimum spacing between
+ * outbound Soroban RPC requests, matching the Horizon throttle default. Most
+ * public RPC endpoints are more permissive than Horizon, but the same guard
+ * prevents accidental burst traffic during backfill or a large contract list.
+ * Override with the environment variable of the same name.
  */
 import { scValToNative, StrKey, xdr } from '@stellar/stellar-sdk';
 import { sorobanRequestDuration, sorobanRequests } from './metrics';

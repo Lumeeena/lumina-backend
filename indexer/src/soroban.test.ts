@@ -8,7 +8,10 @@ import {
   getLatestLedgerSequence,
   getLedgerEntries,
   parseLedgerKey,
+  decodeScVal,
+  getRetentionInfo,
   GET_LEDGER_ENTRIES_MAX_KEYS,
+  GET_EVENTS_MAX_CONTRACT_IDS,
 } from './soroban';
 import { registry } from './metrics';
 
@@ -255,4 +258,96 @@ test('a large token amount decodes to a bigint rather than a rounded float', asy
 
   const { entries } = await getContractStorageEntries('https://rpc.example.com', [keyXdr]);
   assert.equal(entries[0]?.value, 1208925819614629174706176n);
+});
+
+// ── decodeScVal ────────────────────────────────────────────────────────────
+
+test('decodeScVal returns ok:true with the native value for a valid ScVal', () => {
+  // nativeToScVal produces a real XDR-encoded ScVal that round-trips cleanly.
+  const xdrB64 = nativeToScVal(42n).toXDR('base64');
+  const result = decodeScVal(xdrB64);
+  assert.equal(result.ok, true);
+  if (result.ok) assert.equal(result.value, 42n);
+});
+
+test('decodeScVal returns ok:false with an error string for invalid base64 XDR', () => {
+  const result = decodeScVal('not-valid-xdr!!');
+  assert.equal(result.ok, false);
+  if (!result.ok) assert.ok(result.error.length > 0, 'error message should be non-empty');
+});
+
+test('decodeScVal decodes a symbol ScVal to its string representation', () => {
+  // SWAP_TOPIC_XDR encodes ScSymbol("swap") — reuse the fixture from above.
+  const result = decodeScVal(SWAP_TOPIC_XDR);
+  assert.equal(result.ok, true);
+  if (result.ok) assert.equal(result.value, 'swap');
+});
+
+// ── getRetentionInfo ───────────────────────────────────────────────────────
+
+test('getRetentionInfo returns the oldest ledger from a getNetwork response', async () => {
+  mockFetchOnce({
+    jsonrpc: '2.0',
+    id: 1,
+    result: { friendbotUrl: 'https://...', passphrase: 'Test SDF Network ; September 2015', protocolVersion: 22, oldestLedger: 3_000_000 },
+  });
+
+  const info = await getRetentionInfo('https://rpc.example.com');
+  assert.deepEqual(info, { oldestLedger: 3_000_000 });
+});
+
+test('getRetentionInfo returns undefined when the RPC call fails', async () => {
+  // getRetentionInfo is a best-effort probe; a failure must not crash the indexer.
+  (global as unknown as { fetch: typeof fetch }).fetch = (async () => ({
+    ok: false,
+    status: 503,
+    json: async () => ({}),
+  })) as unknown as typeof fetch;
+
+  const info = await getRetentionInfo('https://rpc.example.com');
+  assert.equal(info, undefined);
+});
+
+// ── GET_EVENTS_MAX_CONTRACT_IDS chunking ───────────────────────────────────
+
+test('getEvents splits contract IDs into chunks of GET_EVENTS_MAX_CONTRACT_IDS', async () => {
+  // Build a list just over the chunk boundary so two RPC calls are required.
+  const contractIds = Array.from({ length: GET_EVENTS_MAX_CONTRACT_IDS + 1 }, (_, i) => `C${i}`);
+  const fetchedChunks: string[][] = [];
+
+  (global as unknown as { fetch: typeof fetch }).fetch = (async (_url: unknown, init?: RequestInit) => {
+    const body = JSON.parse(String(init?.body)) as { params: { filters: Array<{ contractIds: string[] }> } };
+    fetchedChunks.push(body.params.filters[0]!.contractIds);
+    return {
+      ok: true,
+      json: async () => ({
+        jsonrpc: '2.0',
+        id: 1,
+        result: { latestLedger: 200, events: [] },
+      }),
+    } as Response;
+  }) as typeof fetch;
+
+  await getEvents('https://rpc.example.com', contractIds, 100, 5000);
+
+  assert.equal(fetchedChunks.length, 2, 'two RPC calls for one-over-the-limit contract IDs');
+  assert.equal(fetchedChunks[0]!.length, GET_EVENTS_MAX_CONTRACT_IDS);
+  assert.equal(fetchedChunks[1]!.length, 1);
+});
+
+test('getEvents deduplicates contract IDs before chunking', async () => {
+  const calls: number[] = [];
+  (global as unknown as { fetch: typeof fetch }).fetch = (async (_url: unknown, init?: RequestInit) => {
+    const body = JSON.parse(String(init?.body)) as { params: { filters: Array<{ contractIds: string[] }> } };
+    calls.push(body.params.filters[0]!.contractIds.length);
+    return {
+      ok: true,
+      json: async () => ({ jsonrpc: '2.0', id: 1, result: { latestLedger: 100, events: [] } }),
+    } as Response;
+  }) as typeof fetch;
+
+  // Pass 3 duplicates of the same ID — should collapse to 1 and make 1 call.
+  await getEvents('https://rpc.example.com', ['CABC', 'CABC', 'CABC'], 100, 5000);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0], 1);
 });

@@ -18,6 +18,23 @@
  * plus counts for observability — and the GraphQL server reads the rows back
  * out of the database it is already connected to. One extra query per ledger
  * (~5s apart) buys a payload that cannot overflow.
+ *
+ * ## Why pg_notify instead of the NOTIFY statement
+ *
+ * The SQL `NOTIFY channel, 'payload'` statement takes a string literal, not a
+ * bind parameter. Constructing it by string interpolation would be an injection
+ * vulnerability (a crafted payload could escape the string literal and run
+ * arbitrary SQL). `pg_notify($1, $2)` accepts bind parameters, so the payload
+ * goes through the normal parameterised path and is never part of the SQL text.
+ *
+ * ## Tuning constants
+ *
+ * `MAX_PAYLOAD_BYTES = 4000` — Postgres hard-rejects a NOTIFY payload over
+ * 8 000 bytes. The threshold is set at 4 000 (half that) so any future field
+ * added to the notification struct cannot silently push a real-world payload
+ * over the limit. The ledger sequence and network name together are well under
+ * 100 bytes; the counts add a few dozen more. Even at half the Postgres limit,
+ * a normal payload is an order of magnitude smaller than the threshold.
  */
 import type { PoolClient, Pool } from 'pg';
 
