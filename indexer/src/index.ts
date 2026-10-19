@@ -20,6 +20,7 @@
  *   <NAME>_INDEXED_CONTRACT_IDS — Overrides INDEXED_CONTRACT_IDS for that network
  *   PRIMARY_NETWORK       — Which declared network is primary (default: the first one declared)
  *   HORIZON_URL           — Single-network deployments: the one Horizon base URL (default: mainnet)
+ *   HISTORY_ARCHIVE_URL   — Optional archive root used for the configured historical backfill range
  *   SOROBAN_RPC_URL       — Single-network deployments: Soroban RPC endpoint; unset disables contract event indexing
  *   DATABASE_URL          — PostgreSQL connection string
  *   START_LEDGER          — Ledger to begin indexing from if a network's DB is empty (default: that network's latest)
@@ -59,6 +60,7 @@ import { loadConfig } from './config';
 import { routineLogger, subsystem } from './logger';
 import { RetryWorker } from './retryWorker';
 import { refreshAccountQueueBatch } from './accountRefresh';
+import { HistoryArchiveReader } from './historyArchive';
 import {
   contractEventsIndexed,
   customEventsDecoded,
@@ -184,6 +186,7 @@ let isLoopRunning = false;
  */
 interface NetworkLoop {
   network: NetworkConfig;
+  historyArchiveReader: HistoryArchiveReader | undefined;
   /** Soroban RPC endpoint for this network; unset disables contract events. */
   sorobanRpcUrl: string | undefined;
   /** Contract ids to index events for: the global list, or this network's override. */
@@ -219,6 +222,9 @@ function createLoop(network: NetworkConfig, registries: Map<string, RegistryConf
   const override = process.env[`${network.name.toUpperCase()}_INDEXED_CONTRACT_IDS`];
   return {
     network,
+    historyArchiveReader: network.historyArchiveUrl
+      ? new HistoryArchiveReader(network.historyArchiveUrl, network.networkPassphrase)
+      : undefined,
     sorobanRpcUrl: network.sorobanRpcUrl,
     staticContractIds:
       override === undefined
@@ -271,11 +277,16 @@ async function fetchAndIndexLedger(loop: NetworkLoop, sequence: number, isBackfi
   const isBackfill = isBackfillMode || (loop.state.latestHorizonLedger - sequence > 10);
   const purpose: RequestPurpose = isBackfill ? 'backfill' : 'tip';
   
-  const [ledger, transactions, operations] = await Promise.all([
-    getLedger(loop.network.horizonUrl, sequence, purpose),
-    getLedgerTransactions(loop.network.horizonUrl, sequence, purpose),
-    getLedgerOperations(loop.network.horizonUrl, sequence, purpose),
-  ]);
+  const archived = isBackfillMode && loop.historyArchiveReader
+    ? await loop.historyArchiveReader.getLedger(sequence)
+    : undefined;
+  const [ledger, transactions, operations] = archived
+    ? [archived.ledger, archived.transactions, archived.operations]
+    : await Promise.all([
+      getLedger(loop.network.horizonUrl, sequence, purpose),
+      getLedgerTransactions(loop.network.horizonUrl, sequence, purpose),
+      getLedgerOperations(loop.network.horizonUrl, sequence, purpose),
+    ]);
 
   const addresses = new Set<string>();
   for (const tx of transactions) addresses.add(tx.source_account);
@@ -1065,4 +1076,3 @@ function redactUrl(url: string): string {
     return '(unparseable)';
   }
 }
-

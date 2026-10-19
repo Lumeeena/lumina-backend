@@ -55,6 +55,27 @@ test('NETWORKS declares several networks and both resolve', () => {
   assert.equal(testnet.networkPassphrase, 'Test SDF Network ; September 2015');
 });
 
+test('history archive URLs may be configured per network', () => {
+  const registry = resolveNetworks({
+    NETWORKS: 'mainnet,testnet',
+    MAINNET_HORIZON_URL: 'https://horizon.stellar.org',
+    MAINNET_HISTORY_ARCHIVE_URL: 'https://history.example/mainnet',
+    TESTNET_HORIZON_URL: 'https://horizon-testnet.stellar.org',
+  });
+
+  assert.equal(registry.networks[0]?.historyArchiveUrl, 'https://history.example/mainnet');
+  assert.equal(registry.networks[1]?.historyArchiveUrl, undefined);
+});
+
+test('history archive URL is supported for a flat single-network deployment', () => {
+  const registry = resolveNetworks({
+    HORIZON_URL: 'https://horizon.stellar.org',
+    HISTORY_ARCHIVE_URL: 'https://history.example/mainnet',
+  });
+
+  assert.equal(registry.primary.historyArchiveUrl, 'https://history.example/mainnet');
+});
+
 test('PRIMARY_NETWORK chooses which declared network is the default', () => {
   const registry = resolveNetworks({
     NETWORKS: 'mainnet,testnet',

@@ -101,6 +101,8 @@ export interface NetworkConfig {
   /** Lowercase declared name — the value stored in the `network` column. */
   name: string;
   horizonUrl: string;
+  /** Optional Stellar history archive base URL for historical ledger backfills. */
+  historyArchiveUrl?: string;
   /** Unset means Soroban event indexing is disabled for this network. */
   sorobanRpcUrl?: string;
   /** Passphrase transactions are signed against for this network. */
@@ -159,7 +161,7 @@ function parseNetworkNames(env: Env): string[] | null {
  * variable whose prefix happens to look like one.
  */
 function prefixedEndpointVars(env: Env): { key: string; prefix: string }[] {
-  const suffixes = ['_HORIZON_URL', '_SOROBAN_RPC_URL'];
+  const suffixes = ['_HORIZON_URL', '_SOROBAN_RPC_URL', '_HISTORY_ARCHIVE_URL'];
   return Object.keys(env)
     .map(key => ({ key, suffix: suffixes.find(suffix => key.endsWith(suffix)) }))
     .filter((entry): entry is { key: string; suffix: string } => entry.suffix !== undefined)
@@ -191,6 +193,8 @@ function buildNetwork(env: Env, name: string, prefix: string): NetworkConfig {
   };
   const sorobanRpcUrl = optional(env, `${prefix}_SOROBAN_RPC_URL`);
   if (sorobanRpcUrl !== undefined) network.sorobanRpcUrl = sorobanRpcUrl;
+  const historyArchiveUrl = optional(env, `${prefix}_HISTORY_ARCHIVE_URL`);
+  if (historyArchiveUrl !== undefined) network.historyArchiveUrl = historyArchiveUrl;
   return network;
 }
 
@@ -229,6 +233,8 @@ export function resolveNetworks(env: Env = process.env): NetworkRegistry {
     };
     const sorobanRpcUrl = optional(env, 'SOROBAN_RPC_URL');
     if (sorobanRpcUrl !== undefined) network.sorobanRpcUrl = sorobanRpcUrl;
+    const historyArchiveUrl = optional(env, 'HISTORY_ARCHIVE_URL');
+    if (historyArchiveUrl !== undefined) network.historyArchiveUrl = historyArchiveUrl;
 
     return { networks: [network], primary: network };
   }
