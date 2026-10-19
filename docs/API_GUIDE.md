@@ -767,3 +767,35 @@ For issues or questions:
 - **Authentication and API keys:** `docs/AUTHENTICATION.md`
 - **Schema reference:** `docs/CUSTOM_SCHEMAS.md`
 - **Examples:** this guide
+
+## Account lifecycle history
+
+`accountLifecycle` returns indexed creation and merge operations for the address
+itself, newest first, including accounts already merged away and repeated
+creation/merge cycles. No current account snapshot is required.
+
+```graphql
+query {
+  accountLifecycle(address: "G...", network: MAINNET, limit: 20) {
+    items {
+      id type createdAt transactionHash sourceAccount
+      createdAccount funder startingBalance mergeDestination
+    }
+    pageInfo { hasNextPage cursor }
+  }
+}
+```
+
+Pass the returned cursor to `accountLifecycle(cursor:)` with the same address
+and network to continue. Limits must be between 1 and 100.
+`createdAccount`, `funder`, and `startingBalance` identify creation; the balance
+is an exact decimal string in XLM. `mergeDestination` is Horizon's `into`
+address, receiving the removed source account's remaining XLM; the merge
+operation does not supply an amount. These decoded fields are also available
+on ordinary operation queries.
+
+This query matches Horizon's `account` field for both lifecycle types. Operations
+funding other addresses or receiving another account's merge are not the queried
+address's own lifecycle. Existing `operations(account:)` keeps its submitting
+account semantics. Empty results mean no matching indexed history. Existing
+JSONB rows are decoded at read time, so no migration or reindex is required.

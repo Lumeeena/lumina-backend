@@ -119,6 +119,13 @@ export const exportRunDuration = new Histogram({
   registers: [registry],
 });
 
+export const deprecatedFieldUsage = new Counter({
+  name: 'lumina_deprecated_field_usage_total',
+  help: 'Usage of deprecated GraphQL fields, by type and field name.',
+  labelNames: ['type', 'field'] as const,
+  registers: [registry],
+});
+
 export function metricsContentType(): string {
   return registry.contentType;
 }

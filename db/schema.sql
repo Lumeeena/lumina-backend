@@ -323,18 +323,12 @@ CREATE TABLE IF NOT EXISTS trustlines (
     CONSTRAINT trustlines_last_modified_ledger_check CHECK (last_modified_ledger > 0)
 );
 
-CREATE INDEX IF NOT EXISTS idx_trustlines_asset
-    ON trustlines (asset_code, asset_issuer, network);
-
-CREATE INDEX IF NOT EXISTS idx_trustlines_asset_active
-    ON trustlines (asset_code, asset_issuer, network)
-    WHERE balance <> '0';
-
-CREATE INDEX IF NOT EXISTS idx_trustlines_account
-    ON trustlines (account, network);
-
-CREATE INDEX IF NOT EXISTS idx_trustlines_ledger
-    ON trustlines (last_modified_ledger DESC);
+-- No secondary indexes, on purpose. Every statement that touches this table is
+-- an indexer write keyed by the full primary key, and no API query reads it;
+-- the four indexes 010_trustlines created were dropped by
+-- 015_drop_unused_trustline_indexes on measured usage. See
+-- docs/TRUSTLINES_INDEX_REVIEW.md before adding one back: an index here must
+-- come with the query that reads it.
 
 -- ─── Assets (Asset Analytics) ────────────────────────────────────────────────
 
@@ -347,6 +341,9 @@ CREATE TABLE IF NOT EXISTS assets (
     created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     network             TEXT NOT NULL DEFAULT 'mainnet',
+    issuer_home_domain  TEXT,
+    issuer_metadata     JSONB,
+    is_lookalike        BOOLEAN DEFAULT FALSE,
     PRIMARY KEY (asset_code, asset_issuer, network),
     CONSTRAINT assets_asset_code_check          CHECK (asset_code <> ''),
     CONSTRAINT assets_asset_issuer_check        CHECK (asset_issuer <> ''),
@@ -363,6 +360,12 @@ CREATE INDEX IF NOT EXISTS idx_assets_activity
 
 CREATE INDEX IF NOT EXISTS idx_assets_network
     ON assets (network);
+
+CREATE INDEX IF NOT EXISTS idx_assets_issuer_home_domain
+    ON assets (issuer_home_domain, network);
+
+CREATE INDEX IF NOT EXISTS idx_assets_lookalike
+    ON assets (is_lookalike, network) WHERE is_lookalike = TRUE;
 
 -- ─── Asset Volume Buckets (Asset Analytics) ───────────────────────────────────
 
@@ -449,7 +452,10 @@ CREATE TABLE IF NOT EXISTS ledger_retry_queue (
     PRIMARY KEY (ledger, network)
 );
 
-CREATE INDEX IF NOT EXISTS idx_retry_queue_next_attempt ON ledger_retry_queue (next_attempt_at)
+-- `network` leads because the retry worker polls one network at a time; see
+-- db/migrations/015_retry_queue_network_index.sql.
+CREATE INDEX IF NOT EXISTS idx_retry_queue_network_next_attempt
+    ON ledger_retry_queue (network, next_attempt_at)
     WHERE NOT permanently_failed;
 
 -- ─── Failed Ledgers ───────────────────────────────────────────────────────────
@@ -606,6 +612,19 @@ CREATE INDEX IF NOT EXISTS idx_threshold_changes_account
 CREATE INDEX IF NOT EXISTS idx_threshold_changes_op
     ON account_threshold_changes (operation_id, network);
 
+-- ─── Admin Operations ─────────────────────────────────────────────────────────
+
+CREATE TABLE IF NOT EXISTS admin_operations (
+    id              BIGSERIAL PRIMARY KEY,
+    network         TEXT NOT NULL,
+    command         TEXT NOT NULL,
+    arguments       JSONB NOT NULL,
+    success         BOOLEAN NOT NULL,
+    details         TEXT,
+    executed_at     TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_admin_operations_network ON admin_operations (network, executed_at DESC);
 
 -- Lower insert-triggered vacuum/analyze thresholds for the append-heavy tables.
 -- transactions vacuums on a fixed row count so the visibility map keeps up with

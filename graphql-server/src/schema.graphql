@@ -211,6 +211,23 @@ type Query {
   ): AccountPage!
 
   """
+  Indexed creation and merge operations for an account, newest first.
+  Works even after the account has been removed, and includes repeated
+  creation/merge cycles. Does not require an indexed account snapshot.
+  An empty page means no matching indexed history, not proof it never existed.
+  """
+  accountLifecycle(
+    """Network to read; defaults to the primary network."""
+    network: Network
+    """The account created or removed, rather than its funder or merge recipient."""
+    address: String!
+    """Page size from 1 to 100."""
+    limit: Int = 20
+    """Opaque cursor returned by a previous accountLifecycle page."""
+    cursor: String
+  ): OperationPage!
+
+  """
   Fetch operations, newest first, optionally filtered by account and type.
 
   Filters combine as AND. `account` matches the submitting account
@@ -917,6 +934,11 @@ type Operation {
   startingBalance: String
   """Create account (and sponsorship): the account paying."""
   funder: String
+  """Create account: the newly funded address."""
+  createdAccount: String
+
+  """Account merge: address receiving the removed account's remaining XLM."""
+  mergeDestination: String
 
   # Manage offer fields
   """Offer: the offer's id, absent while it is newly created."""
@@ -1232,6 +1254,20 @@ type Asset {
   Recent volume (last 7 days) in the asset's base units.
   """
   recentVolume: String
+  """
+  The issuer's home domain, if published in their account settings.
+  """
+  issuerHomeDomain: String
+  """
+  Self-declared asset metadata from the issuer's stellar.toml file.
+  This is not verified - it's what the issuer claims about their asset.
+  """
+  issuerMetadata: String
+  """
+  True if this asset's code matches a well-known asset but has a different issuer.
+  Such assets may be attempting to impersonate the real asset.
+  """
+  isLookalike: Boolean
 }
 
 """

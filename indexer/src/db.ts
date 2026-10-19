@@ -4,6 +4,7 @@ import type { ContractEvent, ContractStorageEntry } from './soroban';
 import { notifyIndexed } from './notify';
 import { subsystem } from './logger';
 import { indexerPoolErrors } from './metrics';
+import { configurePoolWithPreparedStatements, PREPARED_STATEMENTS } from './preparedStatements';
 
 const log = subsystem('db');
 import { parseContractSchema, type ContractSchema } from './customSchema';
@@ -74,6 +75,7 @@ export function createPool(databaseUrl: string, options?: PoolConfig): Pool {
     indexerPoolErrors.inc();
     log.error({ err: err.message }, 'unexpected PostgreSQL pool client error; pool will replace the client');
   });
+  configurePoolWithPreparedStatements(pool);
   return pool;
 }
 
@@ -313,11 +315,12 @@ export async function indexLedger(
   try {
     await client.query('BEGIN');
 
-    await client.query(
-      `INSERT INTO ledgers (sequence, closed_at, transaction_count, operation_count, base_fee, base_reserve, network)
-       VALUES ($1, $2, $3, $4, $5, $6, $7)
-       ON CONFLICT (sequence, network) DO NOTHING`,
-      [
+    await client.query({
+      name: PREPARED_STATEMENTS.INSERT_LEDGER,
+      text: `INSERT INTO ledgers (sequence, closed_at, transaction_count, operation_count, base_fee, base_reserve, network)
+             VALUES ($1, $2, $3, $4, $5, $6, $7)
+             ON CONFLICT (sequence, network) DO NOTHING`,
+      values: [
         ledger.sequence,
         ledger.closed_at,
         ledger.successful_transaction_count + ledger.failed_transaction_count,
@@ -325,8 +328,8 @@ export async function indexLedger(
         ledger.base_fee_in_stroops,
         ledger.base_reserve_in_stroops,
         network,
-      ]
-    );
+      ],
+    });
 
     if (transactions.length > 0) {
       for (let i = 0; i < transactions.length; i += BATCH_CHUNK_SIZE) {
@@ -406,14 +409,16 @@ export async function indexLedger(
         );
       }
 
-      // Process asset-related operations for trustlines, assets, and volume tracking
-      await processAssetOperation(client, network, ledger.sequence, op);
+      for (const op of operations) {
+        // Process asset-related operations for trustlines, assets, and volume tracking
+        await processAssetOperation(client, network, ledger.sequence, op);
 
-      // Process liquidity pools, claimable balances, path payments, and set_options operations
-      await processLiquidityPoolOperation(client, network, ledger.sequence, op);
-      await processClaimableBalanceOperation(client, network, ledger.sequence, op);
-      await processPathPaymentOperation(client, network, ledger.sequence, op);
-      await processSetOptionsOperation(client, network, ledger.sequence, op);
+        // Process liquidity pools, claimable balances, path payments, and set_options operations
+        await processLiquidityPoolOperation(client, network, ledger.sequence, op);
+        await processClaimableBalanceOperation(client, network, ledger.sequence, op);
+        await processPathPaymentOperation(client, network, ledger.sequence, op);
+        await processSetOptionsOperation(client, network, ledger.sequence, op);
+      }
     }
 
     if (accountAddresses.length > 0) {
@@ -427,8 +432,8 @@ export async function indexLedger(
       );
     }
 
-    // Clear from failed_ledgers if previously recorded as failed
-    await clearFailedLedger(client, network, ledger.sequence);
+    // Clear any failure records for this ledger now that it has landed
+    await clearLedgerFailures(client, network, ledger.sequence);
 
     // Queued inside the transaction on purpose: Postgres delivers notifications
     // at commit, so a rolled-back ledger announces nothing and no subscriber is
@@ -463,20 +468,21 @@ export async function upsertAccount(
   network: string,
   account: HorizonAccount
 ): Promise<void> {
-  await client.query(
-    `INSERT INTO accounts (address, sequence, subentry_count, last_modified_ledger, num_sponsored, num_sponsoring, balances, flags, thresholds, updated_at, network)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW(), $10)
-     ON CONFLICT (address, network) DO UPDATE SET
-       sequence = EXCLUDED.sequence,
-       subentry_count = EXCLUDED.subentry_count,
-       last_modified_ledger = EXCLUDED.last_modified_ledger,
-       num_sponsored = EXCLUDED.num_sponsored,
-       num_sponsoring = EXCLUDED.num_sponsoring,
-       balances = EXCLUDED.balances,
-       flags = EXCLUDED.flags,
-       thresholds = EXCLUDED.thresholds,
-       updated_at = NOW()`,
-    [
+  await client.query({
+    name: PREPARED_STATEMENTS.UPSERT_ACCOUNT,
+    text: `INSERT INTO accounts (address, sequence, subentry_count, last_modified_ledger, num_sponsored, num_sponsoring, balances, flags, thresholds, updated_at, network)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW(), $10)
+           ON CONFLICT (address, network) DO UPDATE SET
+             sequence = EXCLUDED.sequence,
+             subentry_count = EXCLUDED.subentry_count,
+             last_modified_ledger = EXCLUDED.last_modified_ledger,
+             num_sponsored = EXCLUDED.num_sponsored,
+             num_sponsoring = EXCLUDED.num_sponsoring,
+             balances = EXCLUDED.balances,
+             flags = EXCLUDED.flags,
+             thresholds = EXCLUDED.thresholds,
+             updated_at = NOW()`,
+    values: [
       account.account_id,
       account.sequence,
       account.subentry_count,
@@ -487,8 +493,8 @@ export async function upsertAccount(
       JSON.stringify(account.flags),
       JSON.stringify(account.thresholds),
       network,
-    ]
-  );
+    ],
+  });
 }
 
 export async function insertContractEvents(
@@ -505,11 +511,12 @@ export async function insertContractEvents(
 
   try {
     for (const event of events) {
-      await pool.query(
-        `INSERT INTO contract_events (id, type, contract_id, ledger, created_at, paging_token, topics, value, network)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-         ON CONFLICT (id, network) DO NOTHING`,
-        [
+      await pool.query({
+        name: PREPARED_STATEMENTS.INSERT_CONTRACT_EVENT,
+        text: `INSERT INTO contract_events (id, type, contract_id, ledger, created_at, paging_token, topics, value, network)
+               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+               ON CONFLICT (id, network) DO NOTHING`,
+        values: [
           event.id,
           event.type,
           event.contractId,
@@ -519,8 +526,8 @@ export async function insertContractEvents(
           event.topics,
           event.value === undefined ? null : JSON.stringify(event.value),
           network,
-        ]
-      );
+        ],
+      });
       if (event.ledger > highestLedger) highestLedger = event.ledger;
     }
   } catch (err) {
@@ -839,15 +846,30 @@ export async function recordFailedLedger(
 }
 
 /**
- * Remove a ledger from failed_ledgers after successful indexing.
+ * Remove a ledger from failed_ledgers and ledger_retry_queue after successful
+ * indexing.
+ *
+ * The retry queue has to be cleared here, not only by the retry worker. Every
+ * caller that enqueues a retry (forward loop, backfill, gap repair) also
+ * retries the same ledger itself on its next pass, so the ledger usually lands
+ * through that caller rather than through the worker. Before this, the row
+ * outlived the ledger: the worker re-fetched and re-wrote a ledger that was
+ * already indexed, and a row that had reached permanently_failed first was
+ * never deleted by anything. See docs/LEDGER_RETRY_QUEUE_REVIEW.md.
+ *
+ * One statement rather than two so the extra delete costs a primary-key probe
+ * on a near-empty table, not an extra round trip on the ledger write path.
  */
-export async function clearFailedLedger(
+export async function clearLedgerFailures(
   client: Pool | PoolClient,
   network: string,
   sequence: number
 ): Promise<void> {
   await client.query(
-    'DELETE FROM failed_ledgers WHERE sequence = $1 AND network = $2',
+    `WITH cleared_failure AS (
+       DELETE FROM failed_ledgers WHERE sequence = $1 AND network = $2
+     )
+     DELETE FROM ledger_retry_queue WHERE ledger = $1 AND network = $2`,
     [sequence, network]
   );
 }

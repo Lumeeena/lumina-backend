@@ -87,6 +87,27 @@ test('indexLedger writes ledger, transactions, and operations inside one commit'
   ]);
 });
 
+test('indexLedger clears the ledger from failed_ledgers and ledger_retry_queue in one statement', async () => {
+  const statements: Array<{ sql: string; params: unknown[] }> = [];
+  const client = {
+    query: async (sql: string, params?: unknown[]) => {
+      statements.push({ sql, params: params ?? [] });
+      return { rows: [] };
+    },
+    release: () => {},
+  };
+  await indexLedger(fakePool(client), 'testnet', ledger, [tx], [op]);
+  // The forward loop, backfill and gap repair all retry a failed ledger
+  // themselves, so the ledger usually lands here rather than through the retry
+  // worker. A queue row left behind would be re-indexed for nothing, or, once
+  // permanently_failed, never deleted at all.
+  const clears = statements.filter(s => /DELETE FROM (failed_ledgers|ledger_retry_queue)/.test(s.sql));
+  assert.equal(clears.length, 1, 'both deletes should share one round trip');
+  assert.match(clears[0]!.sql, /DELETE FROM failed_ledgers WHERE sequence = \$1 AND network = \$2/);
+  assert.match(clears[0]!.sql, /DELETE FROM ledger_retry_queue WHERE ledger = \$1 AND network = \$2/);
+  assert.deepEqual(clears[0]!.params, [ledger.sequence, 'testnet']);
+});
+
 test('indexLedger inserts every transaction before any operation (FK order)', async () => {
   const { client, calls } = makeFakeClient();
   const tx2 = { ...tx, hash: 'tx2' };

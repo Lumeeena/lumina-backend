@@ -107,7 +107,7 @@ pruning code:
 | `contract_schemas`           | **no**   | Configuration, not history.                                  |
 | `api_keys`, `exports`        | **no**   | Configuration and operator state.                           |
 | `account_refresh_queue`      | **no**   | A work queue that drains itself. A retention window would only delete pending work. |
-| `retry_queue`                | **no**   | Same.                                                         |
+| `ledger_retry_queue`         | **no**   | Same. It drains because `indexLedger` deletes a ledger's row when the ledger lands, whichever loop indexed it; rows that remain are ledgers still missing. See [LEDGER_RETRY_QUEUE_REVIEW.md](LEDGER_RETRY_QUEUE_REVIEW.md). |
 
 If a table is not in the list, no configuration will make it disappear.
 

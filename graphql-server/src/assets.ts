@@ -261,6 +261,9 @@ export interface Asset {
   firstSeenLedger: number;
   lastActivityLedger: number;
   recentVolume?: string;
+  issuerHomeDomain?: string | null;
+  issuerMetadata?: string | null;
+  isLookalike?: boolean;
 }
 
 export interface AssetPageInfo {
@@ -280,6 +283,9 @@ interface AssetRow {
   first_seen_ledger: number;
   last_activity_ledger: number;
   recent_volume: string | null;
+  issuer_home_domain: string | null;
+  issuer_metadata: unknown | null;
+  is_lookalike: boolean | null;
 }
 
 /**
@@ -313,14 +319,17 @@ export async function getAssetByKey(
   const { rows } = await pool.query<AssetRow>(
     `SELECT a.asset_code, a.asset_issuer, a.holder_count, a.first_seen_ledger, a.last_activity_ledger,
             COALESCE(
-              (SELECT SUM(volume)::text 
-               FROM asset_volume_buckets 
-               WHERE asset_code = a.asset_code 
-                 AND asset_issuer = a.asset_issuer 
+              (SELECT SUM(volume)::text
+               FROM asset_volume_buckets
+               WHERE asset_code = a.asset_code
+                 AND asset_issuer = a.asset_issuer
                  AND network = a.network
                  AND bucket_time >= NOW() - INTERVAL '7 days'),
               '0'
-            ) AS recent_volume
+            ) AS recent_volume,
+            a.issuer_home_domain,
+            a.issuer_metadata,
+            a.is_lookalike
        FROM assets a
       WHERE a.asset_code = $1 AND a.asset_issuer = $2 AND a.network = $3`,
     [code, issuer, network]
@@ -338,6 +347,9 @@ export async function getAssetByKey(
     firstSeenLedger: row.first_seen_ledger,
     lastActivityLedger: row.last_activity_ledger,
     recentVolume: row.recent_volume ?? '0',
+    issuerHomeDomain: row.issuer_home_domain,
+    issuerMetadata: row.issuer_metadata ? JSON.stringify(row.issuer_metadata) : null,
+    isLookalike: row.is_lookalike ?? false,
   };
 }
 
@@ -395,12 +407,15 @@ export async function getAssets(pool: Pool, query: AssetsQuery): Promise<AssetPa
            AND bucket_time >= NOW() - INTERVAL '7 days'
          GROUP BY asset_code, asset_issuer, network
       )
-      SELECT a.asset_code, a.asset_issuer, a.holder_count, 
+      SELECT a.asset_code, a.asset_issuer, a.holder_count,
              a.first_seen_ledger, a.last_activity_ledger,
-             COALESCE(v.recent_volume, 0)::text AS recent_volume
+             COALESCE(v.recent_volume, 0)::text AS recent_volume,
+             a.issuer_home_domain,
+             a.issuer_metadata,
+             a.is_lookalike
         FROM assets a
-        LEFT JOIN volume_agg v ON v.asset_code = a.asset_code 
-                               AND v.asset_issuer = a.asset_issuer 
+        LEFT JOIN volume_agg v ON v.asset_code = a.asset_code
+                               AND v.asset_issuer = a.asset_issuer
                                AND v.network = a.network
        WHERE ${whereClauses.join(' AND ')}
          ${cursorClause}
@@ -410,17 +425,20 @@ export async function getAssets(pool: Pool, query: AssetsQuery): Promise<AssetPa
   } else {
     orderClause = 'a.holder_count DESC, a.asset_code ASC, a.asset_issuer ASC';
     query_sql = `
-      SELECT a.asset_code, a.asset_issuer, a.holder_count, 
+      SELECT a.asset_code, a.asset_issuer, a.holder_count,
              a.first_seen_ledger, a.last_activity_ledger,
              COALESCE(
-               (SELECT SUM(volume)::text 
-                FROM asset_volume_buckets 
-                WHERE asset_code = a.asset_code 
-                  AND asset_issuer = a.asset_issuer 
+               (SELECT SUM(volume)::text
+                FROM asset_volume_buckets
+                WHERE asset_code = a.asset_code
+                  AND asset_issuer = a.asset_issuer
                   AND network = a.network
                   AND bucket_time >= NOW() - INTERVAL '7 days'),
                '0'
-             ) AS recent_volume
+             ) AS recent_volume,
+             a.issuer_home_domain,
+             a.issuer_metadata,
+             a.is_lookalike
         FROM assets a
        WHERE ${whereClauses.join(' AND ')}
          ${cursorClause}
@@ -451,6 +469,9 @@ export async function getAssets(pool: Pool, query: AssetsQuery): Promise<AssetPa
       firstSeenLedger: row.first_seen_ledger,
       lastActivityLedger: row.last_activity_ledger,
       recentVolume: row.recent_volume ?? '0',
+      issuerHomeDomain: row.issuer_home_domain,
+      issuerMetadata: row.issuer_metadata ? JSON.stringify(row.issuer_metadata) : null,
+      isLookalike: row.is_lookalike ?? false,
     })),
     pageInfo: {
       hasNextPage,

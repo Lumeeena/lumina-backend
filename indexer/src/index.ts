@@ -50,10 +50,11 @@ import {
   enqueueLedgerRetry,
   recordContractStorageHistory,
   recordFailedLedger,
-  clearFailedLedger,
+  clearLedgerFailures,
   findLedgerGaps,
   countLedgerGaps,
 } from './db';
+import { validateDatabaseSchema } from './validateSchema';
 import { decodeEvents } from './customDecode';
 import { loadConfig } from './config';
 import { routineLogger, subsystem } from './logger';
@@ -943,6 +944,22 @@ async function run() {
   const registries = resolveRegistryConfigs(registry.networks);
   const startedAt = Date.now();
   const loops = registry.networks.map(network => createLoop(network, registries));
+
+  // Schema validation at startup if enabled
+  if (process.env['VALIDATE_SCHEMA_ON_STARTUP'] === 'true') {
+    log.info('validating database schema on startup');
+    try {
+      await validateDatabaseSchema(pool);
+      log.info('schema validation passed');
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      log.error({ err: msg }, 'schema validation failed');
+      if (process.env['FAIL_ON_SCHEMA_MISMATCH'] === 'true') {
+        log.fatal('FAIL_ON_SCHEMA_MISMATCH is set, exiting');
+        process.exit(1);
+      }
+    }
+  }
 
   log.info(
     {

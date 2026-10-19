@@ -45,6 +45,8 @@ Derived from the statements in `indexer/src/db.ts`; keep the two in sync.
 | `account_refresh_queue` | yes | yes | yes | yes | enqueue, defer, and complete durable account refreshes |
 | `custom_events` | yes | yes | yes | — | `INSERT … ON CONFLICT (event_id, event_name, network) DO UPDATE` |
 | `contract_schemas` | yes | yes | yes | yes | `(contract_id, network)` upsert, plus registry deletion |
+| `failed_ledgers` | yes | yes | yes | yes | `(sequence, network)` upsert on exhaustion, deleted when the ledger lands |
+| `ledger_retry_queue` | yes | yes | yes | yes | `(ledger, network)` upsert, retry-worker poll and delete, deleted when the ledger lands |
 | `api_keys`, `schema_migrations` | — | — | — | — | never touched by the indexer |
 
 `USAGE, SELECT` on sequences is granted as well, so `SERIAL` columns on indexed
