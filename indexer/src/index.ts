@@ -50,7 +50,7 @@ import {
   enqueueLedgerRetry,
   recordContractStorageHistory,
   recordFailedLedger,
-  clearFailedLedger,
+  clearLedgerFailures,
   findLedgerGaps,
   countLedgerGaps,
 } from './db';

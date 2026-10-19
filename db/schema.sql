@@ -442,7 +442,10 @@ CREATE TABLE IF NOT EXISTS ledger_retry_queue (
     PRIMARY KEY (ledger, network)
 );
 
-CREATE INDEX IF NOT EXISTS idx_retry_queue_next_attempt ON ledger_retry_queue (next_attempt_at)
+-- `network` leads because the retry worker polls one network at a time; see
+-- db/migrations/015_retry_queue_network_index.sql.
+CREATE INDEX IF NOT EXISTS idx_retry_queue_network_next_attempt
+    ON ledger_retry_queue (network, next_attempt_at)
     WHERE NOT permanently_failed;
 
 -- ─── Failed Ledgers ───────────────────────────────────────────────────────────

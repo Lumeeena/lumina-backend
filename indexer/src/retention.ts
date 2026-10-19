@@ -19,7 +19,7 @@
  *     "absent" (no row at all). Pruning them would collapse that distinction.
  *   - `accounts`, `contract_schemas`, `api_keys` and `exports` are current state
  *     or configuration, not a log.
- *   - `account_refresh_queue` and `retry_queue` are work queues that drain
+ *   - `account_refresh_queue` and `ledger_retry_queue` are work queues that drain
  *     themselves; a retention window would only delete pending work.
  *
  * ## Chain time, not index time

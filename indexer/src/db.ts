@@ -429,8 +429,8 @@ export async function indexLedger(
       );
     }
 
-    // Clear from failed_ledgers if previously recorded as failed
-    await clearFailedLedger(client, network, ledger.sequence);
+    // Clear any failure records for this ledger now that it has landed
+    await clearLedgerFailures(client, network, ledger.sequence);
 
     // Queued inside the transaction on purpose: Postgres delivers notifications
     // at commit, so a rolled-back ledger announces nothing and no subscriber is
@@ -841,15 +841,30 @@ export async function recordFailedLedger(
 }
 
 /**
- * Remove a ledger from failed_ledgers after successful indexing.
+ * Remove a ledger from failed_ledgers and ledger_retry_queue after successful
+ * indexing.
+ *
+ * The retry queue has to be cleared here, not only by the retry worker. Every
+ * caller that enqueues a retry (forward loop, backfill, gap repair) also
+ * retries the same ledger itself on its next pass, so the ledger usually lands
+ * through that caller rather than through the worker. Before this, the row
+ * outlived the ledger: the worker re-fetched and re-wrote a ledger that was
+ * already indexed, and a row that had reached permanently_failed first was
+ * never deleted by anything. See docs/LEDGER_RETRY_QUEUE_REVIEW.md.
+ *
+ * One statement rather than two so the extra delete costs a primary-key probe
+ * on a near-empty table, not an extra round trip on the ledger write path.
  */
-export async function clearFailedLedger(
+export async function clearLedgerFailures(
   client: Pool | PoolClient,
   network: string,
   sequence: number
 ): Promise<void> {
   await client.query(
-    'DELETE FROM failed_ledgers WHERE sequence = $1 AND network = $2',
+    `WITH cleared_failure AS (
+       DELETE FROM failed_ledgers WHERE sequence = $1 AND network = $2
+     )
+     DELETE FROM ledger_retry_queue WHERE ledger = $1 AND network = $2`,
     [sequence, network]
   );
 }
