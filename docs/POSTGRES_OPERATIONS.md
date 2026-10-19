@@ -42,6 +42,14 @@ The values currently in the rules have not been calibrated against production
 history in this checkout; no production time series was available for this
 review.
 
+The `IndexingStalled` 60-second cutoff and `IndexingLagHigh` 20-ledger cutoff
+currently match `HEALTH_MAX_SECONDS_SINCE_INDEX` and
+`HEALTH_MAX_LAG_LEDGERS` defaults in `indexer/src/health.ts`. This is a
+consistency check, not evidence that either value is appropriate for production.
+Keep alert and healthcheck cutoffs aligned unless an intentional difference is
+documented; after collecting a representative range, assess both the cutoff
+and the alert's `for` duration against normal operation and incident impact.
+
 ## Insert-heavy table maintenance
 
 `transactions` and `operations` are append-heavy and rarely updated. Their
