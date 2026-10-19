@@ -8,6 +8,7 @@ import {
   pruneExpiredData,
   retentionCutoff,
   retainedTables,
+  retentionWindowConflicts,
   unlimitedRetentionWindows,
   type RetentionSpec,
   type RetentionWindows,
@@ -69,6 +70,42 @@ test('retention is enabled when any single table has a window', () => {
     ['operations', 'contract_events', 'ledgers'],
     'retained tables come back in prune order, not the order they were configured'
   );
+});
+
+test('no window conflicts when nothing is configured or windows nest correctly', () => {
+  assert.deepEqual(retentionWindowConflicts(unlimitedRetentionWindows()), []);
+  assert.deepEqual(retentionWindowConflicts(windows({ operations: 30 })), [], 'a lone child window is fine');
+  assert.deepEqual(
+    retentionWindowConflicts(windows({ operations: 30, transactions: 30, ledgers: 30 })),
+    [],
+    'equal windows are allowed'
+  );
+  assert.deepEqual(
+    retentionWindowConflicts(windows({ operations: 365, transactions: 90, ledgers: 90 })),
+    [],
+    'children may keep longer than parents'
+  );
+});
+
+test('a parent window with an unlimited child is a conflict', () => {
+  const problems = retentionWindowConflicts(windows({ ledgers: 30 }));
+  assert.equal(problems.length, 1);
+  assert.match(problems[0], /RETENTION_TRANSACTIONS_DAYS must be at least RETENTION_LEDGERS_DAYS \(30\), got 0/);
+  assert.match(problems[0], /0 keeps every row/);
+});
+
+test('a child window shorter than its parent is a conflict', () => {
+  const problems = retentionWindowConflicts(windows({ operations: 7, transactions: 30 }));
+  assert.equal(problems.length, 1);
+  assert.match(problems[0], /RETENTION_OPERATIONS_DAYS must be at least RETENTION_TRANSACTIONS_DAYS \(30\), got 7/);
+  assert.match(problems[0], /still reference the parent rows/);
+});
+
+test('every broken link in the foreign-key chain is reported', () => {
+  const problems = retentionWindowConflicts(windows({ ledgers: 30, transactions: 30 }));
+  assert.equal(problems.length, 1, 'ledgers/transactions is satisfied; only transactions/operations is broken');
+  assert.match(problems[0], /RETENTION_OPERATIONS_DAYS/);
+  assert.equal(retentionWindowConflicts(windows({ ledgers: 30, transactions: 10, operations: 5 })).length, 2);
 });
 
 test('cutoff is a window of chain time before now', () => {
