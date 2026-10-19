@@ -69,6 +69,27 @@ index has been removed based on unobserved production usage. Run the report
 against a representative deployment and attach its output before deciding on
 any unused-index removal.
 
+### Transactions index use and growth
+
+The transactions-specific result sets at the end of
+[`db/audit-index-usage.sql`](../db/audit-index-usage.sql) report each index's
+scan counters, size, validity and constraint role, plus table insert/update/
+delete and sequential-scan counters, vacuum timestamps and heap/index/total
+sizes. `stats_reset` is included because these counters are cumulative and
+cannot be interpreted without their observation window.
+
+Take and retain dated snapshots of the result sets across a representative
+workload window; `pg_stat_user_tables` exposes cumulative row estimates, not
+historical table-size growth. Do not remove a zero-scan index if it enforces a
+unique/primary-key constraint, and do not call an index redundant based only on
+matching key columns without checking its predicate, operator class, included
+columns, and ordering. Run the plans in [`QUERY_PLANS.md`](QUERY_PLANS.md) as
+well: the seeded EXPLAIN dataset tests query shapes, but does not substitute for
+deployment statistics. Transactions already participate in the configurable,
+opt-in retention job; see [`RETENTION.md`](RETENTION.md). Its default remains
+unlimited, so deployments that do not configure a window intentionally retain
+all transaction history.
+
 ## Asynchronous account refreshes
 
 Ledger, transaction, and operation rows are committed together with durable

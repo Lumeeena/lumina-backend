@@ -60,6 +60,45 @@ index with substantial write amplification, especially for JSONB. Check the
 actual plan and index size first; a small transfer reduction is not sufficient
 reason to make a write-heavy index wider.
 
+Measure projected JSON row size for the same representative transaction page
+with this read-only query (replace `mainnet` with the deployment network):
+
+```sql
+WITH full_page AS (
+  SELECT *
+  FROM transactions
+  WHERE network = 'mainnet'
+  ORDER BY ledger DESC, hash DESC
+  LIMIT 20
+),
+projected_page AS (
+  SELECT hash, network, ledger, created_at, source_account, fee_charged,
+         operation_count, successful, memo_type, memo
+  FROM transactions
+  WHERE network = 'mainnet'
+  ORDER BY ledger DESC, hash DESC
+  LIMIT 20
+),
+payloads AS (
+  SELECT 'all columns' AS projection, row_to_json(r)::text AS payload
+  FROM full_page AS r
+  UNION ALL
+  SELECT 'mapper columns', row_to_json(r)::text
+  FROM projected_page AS r
+)
+SELECT projection, count(*) AS rows,
+       sum(octet_length(payload)) AS serialized_bytes
+FROM payloads
+GROUP BY projection
+ORDER BY projection;
+```
+
+This compares JSON serialization sizes of rows, not PostgreSQL wire-protocol
+bytes; report it as a proxy and include network, row count, and PostgreSQL
+version. Run the same comparison for operation JSONB separately because
+`details` can dominate the row payload and its projected shape is constructed
+by the query.
+
 Each entry is captured twice: a warm-up pass whose plans are discarded, then the
 recorded pass, so the plan reflects a warm cache. `EXPLAIN ANALYZE` executes the
 statement, so every catalog entry is read-only and the harness refuses to

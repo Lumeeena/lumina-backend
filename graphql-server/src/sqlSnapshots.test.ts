@@ -118,7 +118,7 @@ test('SQL snapshot: getTransactions filtered (successful, from, to, sourceAccoun
 
 test('SQL snapshot: getTransactions paginated forward', async () => {
   const { pool, getLastQuery } = fakePool();
-  await getTransactions(pool, 'mainnet', 20, 'hash123', {
+  await getTransactions(pool, 'mainnet', 20, encodeCursor('transactions', [500000, 'hash123']), {
     direction: 'FORWARD',
     order: 'DESC',
   });
@@ -128,7 +128,7 @@ test('SQL snapshot: getTransactions paginated forward', async () => {
 
 test('SQL snapshot: getTransactions paginated backward', async () => {
   const { pool, getLastQuery } = fakePool();
-  await getTransactions(pool, 'mainnet', 20, 'hash123', {
+  await getTransactions(pool, 'mainnet', 20, encodeCursor('transactions', [500000, 'hash123']), {
     direction: 'BACKWARD',
     order: 'DESC',
   });
@@ -138,7 +138,7 @@ test('SQL snapshot: getTransactions paginated backward', async () => {
 
 test('SQL snapshot: getTransactions ascending order', async () => {
   const { pool, getLastQuery } = fakePool();
-  await getTransactions(pool, 'mainnet', 20, 'hash123', {
+  await getTransactions(pool, 'mainnet', 20, encodeCursor('transactions', [500000, 'hash123']), {
     order: 'ASC',
   });
   const q = getLastQuery();
@@ -170,7 +170,7 @@ test('SQL snapshot: getOperations paginated forward', async () => {
   const { pool, getLastQuery } = fakePool();
   await getOperations(pool, {
     network: 'mainnet',
-    cursor: 'op123',
+    cursor: encodeCursor('operations', [500000, 'op123']),
     direction: 'FORWARD',
     limit: 20,
   });
@@ -182,7 +182,7 @@ test('SQL snapshot: getOperations paginated backward', async () => {
   const { pool, getLastQuery } = fakePool();
   await getOperations(pool, {
     network: 'mainnet',
-    cursor: 'op123',
+    cursor: encodeCursor('operations', [500000, 'op123']),
     direction: 'BACKWARD',
     limit: 20,
   });
@@ -278,7 +278,7 @@ test('SQL snapshot: getEventsByContract filtered with topic and cursor', async (
     network: 'mainnet',
     contractId: 'CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC',
     topic: 'transfer',
-    cursor: 'evt-123',
+    cursor: encodeCursor('events', [500000, 'evt-123']),
     direction: 'FORWARD',
     limit: 20,
   });
@@ -332,7 +332,7 @@ test('SQL snapshot: getOperationsByAsset issued token forward', async () => {
   await getOperationsByAsset(pool, {
     network: 'mainnet',
     asset: 'USDC:GBRPYHIL2CI537KXVHBV4Z6G7MXNGSQXN4F2XGJFFHJ3KJV3J4WKZQLQ',
-    cursor: 'op123',
+    cursor: encodeCursor('operations', [500000, 'op123']),
     direction: 'FORWARD',
     limit: 20,
   });

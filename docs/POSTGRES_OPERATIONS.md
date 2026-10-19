@@ -16,6 +16,32 @@ Watch `lumina_scheduled_exports_total{outcome="failure"}` for failed runs and
 `lumina_scheduled_export_duration_seconds` for duration. An absent bucket
 disables the scheduler.
 
+## Calibrating alert thresholds
+
+Alert thresholds should be compared with a representative operating window
+before they are changed. For a continuously scraped deployment, inspect the
+observed distributions of the corresponding signals (with network labels kept
+separate) before adjusting `docker/observability/alerts.yml`. Examples for a
+30-day window:
+
+```promql
+quantile_over_time(0.95, lumina_indexing_lag_ledgers{network="mainnet"}[30d])
+max_over_time(lumina_indexing_lag_ledgers{network="mainnet"}[30d])
+quantile_over_time(0.95, (time() - lumina_last_successful_index_timestamp_seconds{network="mainnet"})[30d:1m])
+max_over_time((time() - lumina_last_successful_index_timestamp_seconds{network="mainnet"})[30d:1m])
+sum(increase(lumina_horizon_requests_total{status="429"}[30d]))
+sum(increase(lumina_indexing_errors_total[30d]))
+```
+
+The range-query subqueries sample freshness once per minute; choose a step and
+window that cover normal deploys, traffic cycles, and known transient
+dependencies. Compare warning thresholds with the normal tail and critical
+thresholds with service impact, while accounting for each rule's `for` duration.
+Keep the chosen window, percentiles/maxima, and reasoning with the rule change.
+The values currently in the rules have not been calibrated against production
+history in this checkout; no production time series was available for this
+review.
+
 ## Insert-heavy table maintenance
 
 `transactions` and `operations` are append-heavy and rarely updated. Their

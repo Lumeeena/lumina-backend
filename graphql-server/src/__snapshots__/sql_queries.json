@@ -28,8 +28,8 @@
     "paramCount": 3
   },
   "getEventsByContract_filtered_forward": {
-    "sql": "SELECT id, network, type, contract_id, ledger, created_at, paging_token, topics, value FROM contract_events WHERE contract_id = $1 AND network = $2 AND $3 = ANY(topics) AND (ledger, id) < (SELECT ledger, id FROM contract_events WHERE id = $4 AND network = $2) ORDER BY ledger DESC, id DESC LIMIT $5",
-    "paramCount": 5
+    "sql": "SELECT id, network, type, contract_id, ledger, created_at, paging_token, topics, value FROM contract_events WHERE contract_id = $1 AND network = $2 AND $3 = ANY(topics) AND (ledger, id) < ($4::bigint, $5::text) ORDER BY ledger DESC, id DESC LIMIT $6",
+    "paramCount": 6
   },
   "getLedgers_backward": {
     "sql": "SELECT sequence, network, closed_at, transaction_count, operation_count, base_fee, base_reserve FROM ledgers WHERE network = $1 AND (sequence) > ($2::bigint) ORDER BY sequence ASC LIMIT $3",
@@ -44,16 +44,16 @@
     "paramCount": 3
   },
   "getOperationsByAsset_issued_forward": {
-    "sql": "SELECT * FROM operations WHERE network = $1 AND ((details->>'asset_code' = $2 AND details->>'asset_issuer' = $3) OR (details->>'selling_asset_code' = $2 AND details->>'selling_asset_issuer' = $3) OR (details->>'buying_asset_code' = $2 AND details->>'buying_asset_issuer' = $3)) AND (ledger, id) < (SELECT ledger, id FROM operations WHERE id = $4 AND network = $1) ORDER BY ledger DESC, id DESC LIMIT $5",
-    "paramCount": 5
+    "sql": "SELECT id, network, type, transaction_hash, ledger, created_at, source_account, jsonb_build_object( 'from', details->'from', 'to', details->'to', 'amount', details->'amount', 'asset_type', details->'asset_type', 'asset_code', details->'asset_code', 'asset_issuer', details->'asset_issuer', 'starting_balance', details->'starting_balance', 'funder', details->'funder', 'offer_id', details->'offer_id', 'price', details->'price', 'selling_asset_type', details->'selling_asset_type', 'selling_asset_code', details->'selling_asset_code', 'selling_asset_issuer', details->'selling_asset_issuer', 'buying_asset_type', details->'buying_asset_type', 'buying_asset_code', details->'buying_asset_code', 'buying_asset_issuer', details->'buying_asset_issuer' ) AS details FROM operations WHERE network = $1 AND ((details->>'asset_code' = $2 AND details->>'asset_issuer' = $3) OR (details->>'selling_asset_code' = $2 AND details->>'selling_asset_issuer' = $3) OR (details->>'buying_asset_code' = $2 AND details->>'buying_asset_issuer' = $3)) AND (ledger, id) < ($4::bigint, $5::text) ORDER BY ledger DESC, id DESC LIMIT $6",
+    "paramCount": 6
   },
   "getOperationsByAsset_native_XLM": {
-    "sql": "SELECT * FROM operations WHERE network = $1 AND (details->>'asset_type' = $2 OR details->>'selling_asset_type' = $2 OR details->>'buying_asset_type' = $2) ORDER BY ledger DESC, id DESC LIMIT $3",
+    "sql": "SELECT id, network, type, transaction_hash, ledger, created_at, source_account, jsonb_build_object( 'from', details->'from', 'to', details->'to', 'amount', details->'amount', 'asset_type', details->'asset_type', 'asset_code', details->'asset_code', 'asset_issuer', details->'asset_issuer', 'starting_balance', details->'starting_balance', 'funder', details->'funder', 'offer_id', details->'offer_id', 'price', details->'price', 'selling_asset_type', details->'selling_asset_type', 'selling_asset_code', details->'selling_asset_code', 'selling_asset_issuer', details->'selling_asset_issuer', 'buying_asset_type', details->'buying_asset_type', 'buying_asset_code', details->'buying_asset_code', 'buying_asset_issuer', details->'buying_asset_issuer' ) AS details FROM operations WHERE network = $1 AND (details->>'asset_type' = $2 OR details->>'selling_asset_type' = $2 OR details->>'buying_asset_type' = $2) ORDER BY ledger DESC, id DESC LIMIT $3",
     "paramCount": 3
   },
   "getOperations_backward": {
-    "sql": "SELECT id, network, type, transaction_hash, ledger, created_at, source_account, jsonb_build_object( 'from', details->'from', 'to', details->'to', 'amount', details->'amount', 'asset_type', details->'asset_type', 'asset_code', details->'asset_code', 'asset_issuer', details->'asset_issuer', 'starting_balance', details->'starting_balance', 'funder', details->'funder', 'offer_id', details->'offer_id', 'price', details->'price', 'selling_asset_type', details->'selling_asset_type', 'selling_asset_code', details->'selling_asset_code', 'selling_asset_issuer', details->'selling_asset_issuer', 'buying_asset_type', details->'buying_asset_type', 'buying_asset_code', details->'buying_asset_code', 'buying_asset_issuer', details->'buying_asset_issuer' ) AS details FROM operations WHERE network = $1 AND (ledger, id) > (SELECT ledger, id FROM operations WHERE id = $2 AND network = $1) ORDER BY ledger ASC, id ASC LIMIT $3",
-    "paramCount": 3
+    "sql": "SELECT id, network, type, transaction_hash, ledger, created_at, source_account, jsonb_build_object( 'from', details->'from', 'to', details->'to', 'amount', details->'amount', 'asset_type', details->'asset_type', 'asset_code', details->'asset_code', 'asset_issuer', details->'asset_issuer', 'starting_balance', details->'starting_balance', 'funder', details->'funder', 'offer_id', details->'offer_id', 'price', details->'price', 'selling_asset_type', details->'selling_asset_type', 'selling_asset_code', details->'selling_asset_code', 'selling_asset_issuer', details->'selling_asset_issuer', 'buying_asset_type', details->'buying_asset_type', 'buying_asset_code', details->'buying_asset_code', 'buying_asset_issuer', details->'buying_asset_issuer' ) AS details FROM operations WHERE network = $1 AND (ledger, id) > ($2::bigint, $3::text) ORDER BY ledger ASC, id ASC LIMIT $4",
+    "paramCount": 4
   },
   "getOperations_default": {
     "sql": "SELECT id, network, type, transaction_hash, ledger, created_at, source_account, jsonb_build_object( 'from', details->'from', 'to', details->'to', 'amount', details->'amount', 'asset_type', details->'asset_type', 'asset_code', details->'asset_code', 'asset_issuer', details->'asset_issuer', 'starting_balance', details->'starting_balance', 'funder', details->'funder', 'offer_id', details->'offer_id', 'price', details->'price', 'selling_asset_type', details->'selling_asset_type', 'selling_asset_code', details->'selling_asset_code', 'selling_asset_issuer', details->'selling_asset_issuer', 'buying_asset_type', details->'buying_asset_type', 'buying_asset_code', details->'buying_asset_code', 'buying_asset_issuer', details->'buying_asset_issuer' ) AS details FROM operations WHERE network = $1 ORDER BY ledger DESC, id DESC LIMIT $2",
@@ -64,16 +64,16 @@
     "paramCount": 4
   },
   "getOperations_forward": {
-    "sql": "SELECT id, network, type, transaction_hash, ledger, created_at, source_account, jsonb_build_object( 'from', details->'from', 'to', details->'to', 'amount', details->'amount', 'asset_type', details->'asset_type', 'asset_code', details->'asset_code', 'asset_issuer', details->'asset_issuer', 'starting_balance', details->'starting_balance', 'funder', details->'funder', 'offer_id', details->'offer_id', 'price', details->'price', 'selling_asset_type', details->'selling_asset_type', 'selling_asset_code', details->'selling_asset_code', 'selling_asset_issuer', details->'selling_asset_issuer', 'buying_asset_type', details->'buying_asset_type', 'buying_asset_code', details->'buying_asset_code', 'buying_asset_issuer', details->'buying_asset_issuer' ) AS details FROM operations WHERE network = $1 AND (ledger, id) < (SELECT ledger, id FROM operations WHERE id = $2 AND network = $1) ORDER BY ledger DESC, id DESC LIMIT $3",
-    "paramCount": 3
+    "sql": "SELECT id, network, type, transaction_hash, ledger, created_at, source_account, jsonb_build_object( 'from', details->'from', 'to', details->'to', 'amount', details->'amount', 'asset_type', details->'asset_type', 'asset_code', details->'asset_code', 'asset_issuer', details->'asset_issuer', 'starting_balance', details->'starting_balance', 'funder', details->'funder', 'offer_id', details->'offer_id', 'price', details->'price', 'selling_asset_type', details->'selling_asset_type', 'selling_asset_code', details->'selling_asset_code', 'selling_asset_issuer', details->'selling_asset_issuer', 'buying_asset_type', details->'buying_asset_type', 'buying_asset_code', details->'buying_asset_code', 'buying_asset_issuer', details->'buying_asset_issuer' ) AS details FROM operations WHERE network = $1 AND (ledger, id) < ($2::bigint, $3::text) ORDER BY ledger DESC, id DESC LIMIT $4",
+    "paramCount": 4
   },
   "getTransactions_ascending": {
-    "sql": "SELECT hash, network, ledger, created_at, source_account, fee_charged, operation_count, successful, memo_type, memo FROM transactions WHERE network = $1 AND (ledger, hash) > (SELECT ledger, hash FROM transactions WHERE hash = $2 AND network = $1) ORDER BY ledger ASC, hash ASC LIMIT $3",
-    "paramCount": 3
+    "sql": "SELECT hash, network, ledger, created_at, source_account, fee_charged, operation_count, successful, memo_type, memo FROM transactions WHERE network = $1 AND (ledger, hash) > ($2::bigint, $3::text) ORDER BY ledger ASC, hash ASC LIMIT $4",
+    "paramCount": 4
   },
   "getTransactions_backward": {
-    "sql": "SELECT hash, network, ledger, created_at, source_account, fee_charged, operation_count, successful, memo_type, memo FROM transactions WHERE network = $1 AND (ledger, hash) > (SELECT ledger, hash FROM transactions WHERE hash = $2 AND network = $1) ORDER BY ledger ASC, hash ASC LIMIT $3",
-    "paramCount": 3
+    "sql": "SELECT hash, network, ledger, created_at, source_account, fee_charged, operation_count, successful, memo_type, memo FROM transactions WHERE network = $1 AND (ledger, hash) > ($2::bigint, $3::text) ORDER BY ledger ASC, hash ASC LIMIT $4",
+    "paramCount": 4
   },
   "getTransactions_default": {
     "sql": "SELECT hash, network, ledger, created_at, source_account, fee_charged, operation_count, successful, memo_type, memo FROM transactions WHERE network = $1 ORDER BY ledger DESC, hash DESC LIMIT $2",
@@ -84,15 +84,15 @@
     "paramCount": 6
   },
   "getTransactions_forward": {
-    "sql": "SELECT hash, network, ledger, created_at, source_account, fee_charged, operation_count, successful, memo_type, memo FROM transactions WHERE network = $1 AND (ledger, hash) < (SELECT ledger, hash FROM transactions WHERE hash = $2 AND network = $1) ORDER BY ledger DESC, hash DESC LIMIT $3",
-    "paramCount": 3
+    "sql": "SELECT hash, network, ledger, created_at, source_account, fee_charged, operation_count, successful, memo_type, memo FROM transactions WHERE network = $1 AND (ledger, hash) < ($2::bigint, $3::text) ORDER BY ledger DESC, hash DESC LIMIT $4",
+    "paramCount": 4
   },
   "searchTransactions_backward": {
-    "sql": "SELECT *, GREATEST(similarity(memo, $1), CASE WHEN lower(memo) = lower($1) THEN 1 ELSE 0 END) AS rank FROM transactions WHERE network = $3 AND memo IS NOT NULL AND memo % $1 AND GREATEST(similarity(memo, $1), CASE WHEN lower(memo) = lower($1) THEN 1 ELSE 0 END) >= $2 AND (GREATEST(similarity(memo, $1), CASE WHEN lower(memo) = lower($1) THEN 1 ELSE 0 END), ledger, hash) > ($4::real, $5::bigint, $6::text) ORDER BY rank ASC, ledger ASC, hash ASC LIMIT $7",
+    "sql": "SELECT hash, network, ledger, created_at, source_account, fee_charged, operation_count, successful, memo_type, memo, GREATEST(similarity(memo, $1), CASE WHEN lower(memo) = lower($1) THEN 1 ELSE 0 END) AS rank FROM transactions WHERE network = $3 AND memo IS NOT NULL AND memo % $1 AND GREATEST(similarity(memo, $1), CASE WHEN lower(memo) = lower($1) THEN 1 ELSE 0 END) >= $2 AND (GREATEST(similarity(memo, $1), CASE WHEN lower(memo) = lower($1) THEN 1 ELSE 0 END), ledger, hash) > ($4::real, $5::bigint, $6::text) ORDER BY rank ASC, ledger ASC, hash ASC LIMIT $7",
     "paramCount": 7
   },
   "searchTransactions_default": {
-    "sql": "SELECT *, GREATEST(similarity(memo, $1), CASE WHEN lower(memo) = lower($1) THEN 1 ELSE 0 END) AS rank FROM transactions WHERE network = $3 AND memo IS NOT NULL AND memo % $1 AND GREATEST(similarity(memo, $1), CASE WHEN lower(memo) = lower($1) THEN 1 ELSE 0 END) >= $2 ORDER BY rank DESC, ledger DESC, hash DESC LIMIT $4",
+    "sql": "SELECT hash, network, ledger, created_at, source_account, fee_charged, operation_count, successful, memo_type, memo, GREATEST(similarity(memo, $1), CASE WHEN lower(memo) = lower($1) THEN 1 ELSE 0 END) AS rank FROM transactions WHERE network = $3 AND memo IS NOT NULL AND memo % $1 AND GREATEST(similarity(memo, $1), CASE WHEN lower(memo) = lower($1) THEN 1 ELSE 0 END) >= $2 ORDER BY rank DESC, ledger DESC, hash DESC LIMIT $4",
     "paramCount": 4
   }
 }

@@ -42,6 +42,8 @@ const OPERATORS: Record<string, string> = {
 };
 
 const ORDERED_OPERATORS = new Set(['GT', 'GTE', 'LT', 'LTE']);
+const CUSTOM_EVENT_MAPPER_COLUMNS =
+  'event_id, contract_id, event_name, ledger, created_at, schema_version, fields';
 
 export interface StoredSchemaField {
   name: string;
@@ -173,7 +175,6 @@ export async function getCustomEvents(pool: Pool, query: CustomEventQuery) {
   const direction = query.direction ?? 'FORWARD';
   const isForward = direction === 'FORWARD';
   const queryOrder = isForward ? baseOrder : (baseOrder === 'DESC' ? 'ASC' : 'DESC');
-  const cursorOperator = baseOrder === 'ASC' ? (isForward ? '>' : '<') : (isForward ? '<' : '>');
   const schema = await getContractSchema(pool, query.network, query.contractId);
   if (!schema) {
     throw new CustomQueryError(`No custom schema registered for contract ${query.contractId}`);
@@ -192,17 +193,13 @@ export async function getCustomEvents(pool: Pool, query: CustomEventQuery) {
 
   conditions.push(...buildFilterClause(event, query.where ?? [], params));
 
-  if (query.cursor) {
-    params.push(query.cursor);
-    conditions.push(
-      `(ledger, event_id) ${cursorOperator} (SELECT ledger, event_id FROM custom_events WHERE event_id = $${params.length} AND network = $3 LIMIT 1)`
-    );
-  }
+  const cursorClause = cursorCondition(params, KEYSETS.customEvents, query.cursor, direction, baseOrder);
+  if (cursorClause) conditions.push(cursorClause);
 
   params.push(query.limit);
 
   const { rows } = await pool.query<CustomEventRow>(
-    `SELECT * FROM custom_events
+    `SELECT ${CUSTOM_EVENT_MAPPER_COLUMNS} FROM custom_events
       WHERE ${conditions.join(' AND ')}
       ORDER BY ledger ${queryOrder}, event_id ${queryOrder}
       LIMIT $${params.length}`,

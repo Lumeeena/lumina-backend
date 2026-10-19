@@ -23,7 +23,14 @@
  * row across the seam.
  */
 import type { Pool } from 'pg';
-import { mapOperation, mapTransaction, type OperationRow, type TransactionRow } from './db';
+import {
+  mapOperation,
+  mapTransaction,
+  OPERATION_MAPPER_COLUMNS,
+  TRANSACTION_MAPPER_COLUMNS,
+  type OperationRow,
+  type TransactionRow,
+} from './db';
 import {
   cursorCondition,
   decodeCursor as decodeKeysetCursor,
@@ -146,7 +153,7 @@ export async function searchTransactions(pool: Pool, options: SearchOptions) {
   params.push(options.limit);
 
   const { rows } = await pool.query<RankedTransactionRow>(
-    `SELECT *, ${rankExpression} AS rank
+    `SELECT ${TRANSACTION_MAPPER_COLUMNS}, ${rankExpression} AS rank
        FROM transactions
       WHERE ${conditions.join(' AND ')}
       ORDER BY rank ${queryOrder}, ledger ${queryOrder}, hash ${queryOrder}
@@ -252,7 +259,6 @@ export async function getOperationsByAsset(pool: Pool, options: AssetOperationsO
   const direction = options.direction ?? 'FORWARD';
   const isForward = direction === 'FORWARD';
   const queryOrder = isForward ? baseOrder : (baseOrder === 'DESC' ? 'ASC' : 'DESC');
-  const cursorOperator = baseOrder === 'ASC' ? (isForward ? '>' : '<') : (isForward ? '<' : '>');
   const parsed = parseAsset(options.asset);
   const params: unknown[] = [options.network];
   const conditions = ['network = $1', assetConditions(parsed, params)];
@@ -265,21 +271,19 @@ export async function getOperationsByAsset(pool: Pool, options: AssetOperationsO
     params.push(options.type.toLowerCase());
     conditions.push(`type = $${params.length}`);
   }
-  if (options.cursor) {
-    params.push(options.cursor);
-    // An operation id exists on every network, so the cursor's own row is
-    // looked up within this network ($1). Resolving it without that predicate
-    // compares the page against another chain's boundary, which silently
-    // repeats a row or ends the results early.
-    conditions.push(
-      `(ledger, id) ${cursorOperator} (SELECT ledger, id FROM operations WHERE id = $${params.length} AND network = $1)`
-    );
-  }
+  const cursorClause = cursorCondition(
+    params,
+    KEYSETS.assetOperations,
+    options.cursor,
+    direction,
+    baseOrder
+  );
+  if (cursorClause) conditions.push(cursorClause);
 
   params.push(options.limit);
 
   const { rows } = await pool.query<OperationRow>(
-    `SELECT * FROM operations
+    `SELECT ${OPERATION_MAPPER_COLUMNS} FROM operations
       WHERE ${conditions.join(' AND ')}
       ORDER BY ledger ${queryOrder}, id ${queryOrder}
       LIMIT $${params.length}`,

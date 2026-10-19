@@ -169,6 +169,8 @@ test('getCustomEvents scopes to the contract and event', async () => {
 
   const query = calls[1]!;
   assert.match(query.sql, /FROM custom_events/);
+  assert.doesNotMatch(query.sql, /SELECT \*/);
+  assert.match(query.sql, /event_id, contract_id, event_name, ledger, created_at, schema_version, fields/);
   assert.match(query.sql, /contract_id = \$1/);
   assert.match(query.sql, /event_name = \$2/);
   assert.deepEqual(query.params.slice(0, 2), [CONTRACT, 'transfer']);
@@ -226,7 +228,13 @@ test('an invalid cursor is rejected with the shared cursor error', async () => {
   // Silently ignoring it would restart from the top, which reads to a client as
   // duplicate rows rather than as a bad request.
   await assert.rejects(
-    () => getCustomEvents(pool, { network: 'mainnet', contractId: CONTRACT, event: 'transfer', limit: 5, cursor: 'evt9' }),
+    () => getCustomEvents(pool, {
+      network: 'mainnet',
+      contractId: CONTRACT,
+      event: 'transfer',
+      limit: 5,
+      cursor: 'evt9',
+    }),
     (err: unknown) => {
       assert.ok(err instanceof InvalidCursorError);
       assert.equal((err as InvalidCursorError).extensions['code'], 'INVALID_CURSOR');
@@ -243,7 +251,7 @@ test('ascending custom events reverse cursor comparison and result ordering', as
     contractId: CONTRACT,
     event: 'transfer',
     limit: 5,
-    cursor: 'evt9',
+    cursor: encodeCursor('customEvents', [100, 'evt9']),
     order: 'ASC',
   });
 
