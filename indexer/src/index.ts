@@ -28,6 +28,8 @@
  *   POLL_INTERVAL_MS      — How often to poll for new ledgers (default: 5000)
  *   LEDGER_RETRY_ATTEMPTS — Attempts per failing ledger before the cursor stops at it (default: 3)
  *   LEDGER_RETRY_BASE_MS  — Base retry delay in ms, doubled each attempt (default: 500)
+ *   INDEXER_LEADER_LOCK   — 'false' disables the single-writer lock (default: on; see leaderLock.ts)
+ *   INDEXER_LEADER_RETRY_MS — How often a standby retries the lock (default: 5000)
  *   INDEXED_CONTRACT_IDS  — Comma-separated contract IDs to index events for (requires a Soroban RPC URL)
  *   REGISTRY_CONTRACT_ID  — Lumina Registry contract every network polls by default (requires a Soroban RPC URL + REGISTRY_READ_ACCOUNT)
  *   REGISTRY_READ_ACCOUNT — Any funded account address used to simulate the registry's read calls (no secret key needed)
@@ -89,6 +91,7 @@ import {
   type RetentionReport,
 } from './retention';
 import { initErrorTracking, captureException, shutdownErrorTracking } from './errorTracking';
+import { LeaderLock } from './leaderLock';
 import { getRetentionInfo, getContractStorageEntries } from './soroban';
 import { getLatestLedgerSequence, getLedger, getLedgerOperations, getLedgerTransactions, getTrades, initializeHorizonClient } from './horizon';
 import type { RequestPurpose } from './throttle';
@@ -113,6 +116,14 @@ const routine = routineLogger('indexer');
 const config = loadConfig();
 
 const HEALTH_PORT = parseInt(process.env['HEALTH_PORT'] ?? '9090', 10);
+
+// Single-writer guard. On by default: two indexers on one database both walk
+// the same cursors. INDEXER_LEADER_LOCK=false turns it off for a deliberate
+// multi-writer setup, which nothing in this repo supports.
+const LEADER_LOCK_ENABLED = process.env['INDEXER_LEADER_LOCK'] !== 'false';
+const LEADER_RETRY_MS = parseInt(process.env['INDEXER_LEADER_RETRY_MS'] ?? '5000', 10);
+let leader: LeaderLock | null = null;
+let leaderLost = false;
 
 const DATABASE_URL = config.databaseUrl;
 const POLL_INTERVAL_MS = config.pollIntervalMs;
@@ -1001,6 +1012,24 @@ async function run() {
     pool,
   });
 
+  // A standby waits here, before any loop reads a cursor or calls Horizon.
+  if (LEADER_LOCK_ENABLED) {
+    leader = new LeaderLock({
+      databaseUrl: DATABASE_URL,
+      retryIntervalMs: LEADER_RETRY_MS,
+      stopRequested: () => isShuttingDown,
+      onLost: () => {
+        leaderLost = true;
+        void shutdown();
+      },
+    });
+    const acquired = await leader.acquire();
+    if (!acquired) {
+      log.info('shutdown requested while waiting for the leader lock');
+      return;
+    }
+  }
+
   isLoopRunning = true;
   await runIndependently(loops, loop => runNetworkLoop(loop));
   isLoopRunning = false;
@@ -1020,10 +1049,13 @@ async function shutdown() {
     await new Promise(r => setTimeout(r, 100));
   }
 
+  await leader?.release();
   if (pool) await pool.end();
   await shutdownTracing();
   await shutdownErrorTracking();
-  process.exit(0);
+  // Exit non-zero after losing the lock, so a supervisor restarts this process
+  // into standby rather than treating the stop as a clean exit.
+  process.exit(leaderLost ? 1 : 0);
 }
 
 if (require.main === module) {
