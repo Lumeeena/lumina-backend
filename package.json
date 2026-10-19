@@ -21,7 +21,8 @@
     "test:graphql": "cd graphql-server && npm test",
     "manage-keys": "npm run --prefix graphql-server manage-keys --",
     "migrate": "npm run --prefix graphql-server migrate --",
-    "build:shared": "tsc -p shared/tsconfig.json"
+    "build:shared": "tsc -p shared/tsconfig.json",
+    "check:data-dictionary": "ts-node db/check-data-dictionary.ts"
   },
   "engines": {
     "node": ">=18 <=22"
