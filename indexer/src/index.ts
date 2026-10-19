@@ -898,6 +898,31 @@ async function runRetentionLoop(): Promise<void> {
   }
 }
 
+/**
+ * Builds a one-off indexer for the primary network for the benchmark harness:
+ * the same fetch-and-index path (with retries) as the main loop, without
+ * starting the loop, health server or workers. The caller owns `pool` and
+ * must end it.
+ */
+export function createBenchmarkIndexer() {
+  initializeHorizonClient({
+    minIntervalMs: config.horizonMinRequestIntervalMs,
+    maxIntervalMs: config.horizonMaxRequestIntervalMs,
+    authToken: config.horizonAuthToken,
+    tipWeightFactor: config.horizonTipWeightFactor,
+  });
+  const { primary, networks } = resolveNetworks(process.env);
+  const loop = createLoop(primary, resolveRegistryConfigs(networks));
+  return {
+    pool,
+    horizonUrl: primary.horizonUrl,
+    databaseUrl: redactUrl(DATABASE_URL),
+    // Backfill mode: the benchmark replays historical ledgers, not the tip.
+    indexOne: (sequence: number): Promise<boolean> =>
+      fetchAndIndexLedgerWithRetry(primary.name, sequence, seq => fetchAndIndexLedger(loop, seq, true)),
+  };
+}
+
 async function run() {
   initErrorTracking();
   initTracing();

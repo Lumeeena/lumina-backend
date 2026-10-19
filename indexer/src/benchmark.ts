@@ -1,84 +1,126 @@
 /**
  * Lumina Indexer Benchmark Harness
  *
- * This harness provides a basic way to benchmark the indexer's performance
- * over a specified range of ledgers. It measures the time taken to fetch
- * and index ledgers.
+ * Measures how fast the indexer can fetch and index a fixed range of ledgers,
+ * so changes to batching, pacing or retry behaviour can be compared against a
+ * number rather than a feeling.
  *
- * To run this benchmark, you would typically:
- * 1. Ensure the indexer's environment variables (e.g., HORIZON_URL, DATABASE_URL) are set.
- * 2. Execute this script with a tool like `ts-node` or compile it and run with `node`.
- *    e.g., `ts-node indexer/src/benchmark.ts <startLedger> <endLedger>`
+ * Usage (HORIZON_URL / DATABASE_URL etc. must be set as for the indexer):
+ *   ts-node indexer/src/benchmark.ts <startLedger> <endLedger>
  *
- * This is a standalone harness and does not integrate with the main indexer loop
- * or its health/metrics servers.
+ * Ledgers are indexed sequentially, in backfill mode, through the same
+ * retry-wrapped path the main loop uses. Sequential on purpose: the result is
+ * then a per-ledger latency figure that is not confounded by concurrency.
+ *
+ * This is a standalone harness. It does not start the indexer loop or its
+ * health/metrics servers, and it writes to the configured database, so do not
+ * point it at production data you are not prepared to re-index.
  */
 
 import { performance } from 'perf_hooks';
-import {
-  DATABASE_URL,
-  HORIZON_URL,
-  fetchAndIndexLedgerWithRetry,
-  message,
-  redactUrl,
-  pool as indexerPool, // Renaming to avoid conflict with local pool
-} from './index'; // Importing necessary functions and constants from index.ts
+import { createBenchmarkIndexer } from './index';
 import { subsystem } from './logger';
 
 const log = subsystem('benchmark');
 
-async function runBenchmark(startLedger: number, endLedger: number) {
-  log.info({
-    startLedger,
-    endLedger,
-    horizon: HORIZON_URL,
-    database: redactUrl(DATABASE_URL),
-  }, 'Starting indexer benchmark');
+/** Outcome of one benchmark run. */
+export interface BenchmarkResult {
+  /** Ledgers that were indexed successfully. */
+  indexedCount: number;
+  /** Ledgers that failed after exhausting retries (or whose indexer threw). */
+  errorCount: number;
+  durationMs: number;
+  /** Successful ledgers per second; 0 when no time elapsed. */
+  ledgersPerSecond: number;
+}
 
-  const pool = indexerPool; // Use the existing pool from index.ts
+/**
+ * Parses `<startLedger> <endLedger>` from argv-style arguments.
+ *
+ * Returns `null` for anything unusable: missing or non-numeric values, or a
+ * start after the end. The range is inclusive, so start === end is valid.
+ */
+export function parseBenchmarkArgs(args: string[]): { start: number; end: number } | null {
+  const start = parseInt(args[0], 10);
+  const end = parseInt(args[1], 10);
+  if (isNaN(start) || isNaN(end) || start > end) return null;
+  return { start, end };
+}
 
+/**
+ * Indexes every ledger in `[startLedger, endLedger]` in order and reports
+ * timing.
+ *
+ * `indexOne` follows the indexer's contract: it resolves `false` when a ledger
+ * was given up on after retries (it does not throw), so `false` and a thrown
+ * error both count as failures. A failed ledger never aborts the run.
+ * `ledgersPerSecond` only counts successes, so failures lower throughput
+ * rather than inflating it.
+ */
+export async function runBenchmark(
+  startLedger: number,
+  endLedger: number,
+  indexOne: (sequence: number) => Promise<boolean>,
+  now: () => number = () => performance.now()
+): Promise<BenchmarkResult> {
   let indexedCount = 0;
   let errorCount = 0;
-  const startTime = performance.now();
+  const startTime = now();
 
   for (let sequence = startLedger; sequence <= endLedger; sequence++) {
     try {
-      await fetchAndIndexLedgerWithRetry(sequence);
-      indexedCount++;
-      log.debug({ ledger: sequence }, 'Indexed ledger');
+      if (await indexOne(sequence)) {
+        indexedCount++;
+        log.debug({ ledger: sequence }, 'Indexed ledger');
+      } else {
+        errorCount++;
+        log.error({ ledger: sequence }, 'Failed to index ledger after retries');
+      }
     } catch (err) {
       errorCount++;
-      log.error({ ledger: sequence, err: message(err) }, 'Failed to index ledger');
+      log.error({ ledger: sequence, err: err instanceof Error ? err.message : String(err) }, 'Failed to index ledger');
     }
   }
 
-  const endTime = performance.now();
-  const durationMs = endTime - startTime;
-  const ledgersPerSecond = indexedCount / (durationMs / 1000);
-
-  log.info({
-    indexedCount,
-    errorCount,
-    durationMs: durationMs.toFixed(2),
-    ledgersPerSecond: ledgersPerSecond.toFixed(2),
-    startLedger,
-    endLedger,
-  }, 'Benchmark complete');
-
-  await pool.end(); // Close the pool after benchmark
+  const durationMs = now() - startTime;
+  const ledgersPerSecond = durationMs > 0 ? indexedCount / (durationMs / 1000) : 0;
+  return { indexedCount, errorCount, durationMs, ledgersPerSecond };
 }
 
-// Command-line argument parsing
-const args = process.argv.slice(2);
-const start = parseInt(args[0], 10);
-const end = parseInt(args[1], 10);
+async function main(): Promise<void> {
+  const range = parseBenchmarkArgs(process.argv.slice(2));
+  if (!range) {
+    console.error('Usage: ts-node indexer/src/benchmark.ts <startLedger> <endLedger>');
+    process.exit(1);
+  }
 
-if (isNaN(start) || isNaN(end) || start > end) {
-  console.error('Usage: ts-node indexer/src/benchmark.ts <startLedger> <endLedger>');
-  process.exit(1);
+  const indexer = createBenchmarkIndexer();
+  log.info(
+    { startLedger: range.start, endLedger: range.end, horizon: indexer.horizonUrl, database: indexer.databaseUrl },
+    'Starting indexer benchmark'
+  );
+
+  try {
+    const result = await runBenchmark(range.start, range.end, indexer.indexOne);
+    log.info(
+      {
+        indexedCount: result.indexedCount,
+        errorCount: result.errorCount,
+        durationMs: result.durationMs.toFixed(2),
+        ledgersPerSecond: result.ledgersPerSecond.toFixed(2),
+        startLedger: range.start,
+        endLedger: range.end,
+      },
+      'Benchmark complete'
+    );
+  } finally {
+    await indexer.pool.end();
+  }
 }
 
-runBenchmark(start, end).catch(err => {
-  log.fatal({ err: message(err) }, 'Benchmark failed fatally');
-  process.exit(1);
-});
+if (require.main === module) {
+  main().catch(err => {
+    log.fatal({ err: err instanceof Error ? err.message : String(err) }, 'Benchmark failed fatally');
+    process.exit(1);
+  });
+}
