@@ -1424,3 +1424,159 @@ type TradePage {
   items: [Trade!]!
   pageInfo: PageInfo!
 }
+
+# ─── Signers & Sponsorship (#226) ────────────────────────────────────────────
+
+"""
+One signer on a Stellar account.
+
+The `key` is the signer's public key (`G...` for ed25519) or pre-auth
+transaction hash / hash-x hash. `weight` contributes to the account's
+signature threshold.
+"""
+type Signer {
+  """Signer public key or hash."""
+  key: String!
+  """Signer type: `ed25519_public_key`, `preauth_tx`, or `hash_x`."""
+  type: String!
+  """Signature weight this signer contributes."""
+  weight: Int!
+}
+
+"""
+Sponsorship relationship: an account sponsoring reserves for another account's
+entries.
+"""
+type Sponsorship {
+  """The sponsoring account (pays reserves)."""
+  sponsoringId: String!
+  """The sponsored account (receives reserves)."""
+  sponsoredId: String!
+  """Ledger this sponsorship was last modified in."""
+  lastModifiedLedger: Int!
+}
+
+# ─── Contracts & Deployments (#227) ──────────────────────────────────────────
+
+"""
+A deployed Soroban contract and its on-chain deployment metadata.
+"""
+type ContractDeployment {
+  """Contract address (`C...`)."""
+  contractId: String!
+  """Account that deployed the contract."""
+  deployer: String!
+  """Wasm hash of the deployed contract code."""
+  wasmHash: String!
+  """Ledger the contract was deployed in."""
+  deployedLedger: Int!
+  """Timestamp of the deployment ledger."""
+  deployedAt: String!
+  """Other contracts sharing the same wasm code."""
+  sharedWasmContracts(
+    limit: Int = 10
+  ): [ContractDeployment!]
+}
+
+# ─── Network Statistics (#228) ───────────────────────────────────────────────
+
+"""
+Network-level activity statistics for a time period, computed from rollups.
+"""
+type NetworkStats {
+  """Period start (ISO 8601)."""
+  periodStart: String!
+  """Period end (ISO 8601)."""
+  periodEnd: String!
+  """Bucket granularity: `hour` or `day`."""
+  granularity: String!
+  """Total transactions in the period."""
+  transactionCount: Int!
+  """Total operations in the period."""
+  operationCount: Int!
+  """Number of distinct active accounts."""
+  activeAccounts: Int!
+  """Total volume moved (stroops, as string)."""
+  totalVolume: String!
+}
+
+"""
+A single time bucket for charting network statistics.
+"""
+type NetworkStatsBucket {
+  """Bucket start time (ISO 8601)."""
+  bucketStart: String!
+  """Transactions in this bucket."""
+  transactionCount: Int!
+  """Operations in this bucket."""
+  operationCount: Int!
+  """Distinct active accounts in this bucket."""
+  activeAccounts: Int!
+  """Total volume in this bucket (stroops)."""
+  totalVolume: String!
+}
+
+# ─── Activity Rollups (#229) ─────────────────────────────────────────────────
+
+"""
+A rolled-up activity aggregate for a time bucket.
+"""
+type ActivityRollup {
+  """Bucket start time (ISO 8601)."""
+  bucketStart: String!
+  """Bucket granularity: `hour` or `day`."""
+  granularity: String!
+  """Network name."""
+  network: String!
+  """Transactions in this bucket."""
+  transactionCount: Int!
+  """Operations in this bucket."""
+  operationCount: Int!
+  """Distinct active accounts in this bucket."""
+  activeAccounts: Int!
+  """Total volume in this bucket (stroops)."""
+  totalVolume: String!
+}
+
+# ─── Query additions ─────────────────────────────────────────────────────────
+
+extend type Query {
+  """
+  Account signers and sponsorship details (#226).
+  """
+  accountSigners(address: String!): [Signer!]!
+
+  """
+  Accounts sponsored by the given address (#226).
+  """
+  sponsoredAccounts(sponsorAddress: String!): [Account!]!
+
+  """
+  Resolve a contract ID to its deployment details (#227).
+  """
+  contract(contractId: String!): ContractDeployment
+
+  """
+  List deployed contracts, newest first (#227).
+  """
+  contracts(limit: Int = 20, cursor: String): [ContractDeployment!]!
+
+  """
+  Network statistics for a time period, computed from rollups (#228).
+  """
+  networkStats(
+    startTime: String!
+    endTime: String!
+    granularity: String = "hour"
+  ): [NetworkStatsBucket!]!
+
+  """
+  Rolled-up activity aggregates (#229).
+  """
+  activityRollups(
+    network: String!
+    granularity: String = "hour"
+    startTime: String!
+    endTime: String!
+  ): [ActivityRollup!]!
+}
