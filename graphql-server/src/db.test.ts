@@ -191,6 +191,42 @@ test('getTransactions composes filters with its stable keyset cursor', async () 
   ]);
 });
 
+test('getTransactions binds filter values and pages by keyset, never OFFSET', async () => {
+  const { pool, queries } = fakePool([]);
+  // A value that would end the statement if it were ever concatenated in.
+  const sourceAccount = "GACCOUNT'; DROP TABLE transactions; --";
+
+  await getTransactions(pool, 'mainnet', 10, encodeCursor('transactions', [500, 'cursor-hash']), {
+    successful: true,
+    from: '2026-01-01T00:00:00Z',
+    to: '2026-01-31T23:59:59Z',
+    sourceAccount,
+  });
+
+  const sql = queries[0]?.sql ?? '';
+  const params = queries[0]?.params ?? [];
+
+  // Every filter is a placeholder and its value travels as a bind parameter:
+  // the statement text never carries one, hostile or not.
+  assert.match(sql, /network = \$1/);
+  assert.match(sql, /successful = \$2/);
+  assert.match(sql, /created_at >= \$3::timestamptz/);
+  assert.match(sql, /created_at <= \$4::timestamptz/);
+  assert.match(sql, /source_account = \$5/);
+  assert.deepEqual(params.slice(0, 5), [
+    'mainnet', true, '2026-01-01T00:00:00Z', '2026-01-31T23:59:59Z', sourceAccount,
+  ]);
+  assert.equal(params.length, 7);
+  assert.equal(params.at(-1), 10, 'limit is the last bound parameter');
+  assert.ok(!sql.includes(sourceAccount));
+  assert.ok(!sql.includes('2026-01-01T00:00:00Z'));
+
+  // Paging resumes on the (ledger, hash) tuple — an OFFSET would shift every
+  // subsequent page as new transactions land, duplicating a row across the seam.
+  assert.ok(!/OFFSET/i.test(sql));
+  assert.match(sql, /\(ledger, hash\) < \(SELECT ledger, hash FROM transactions WHERE hash = \$\d+ AND network = \$1\)/);
+});
+
 test('getOperations builds WHERE clause only for provided filters', async () => {
   const { pool, queries } = fakePool([]);
   await getOperations(pool, { network: 'mainnet', account: 'GABC', limit: 10 });
