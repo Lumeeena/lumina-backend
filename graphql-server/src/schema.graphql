@@ -949,6 +949,16 @@ type Operation {
   selling: String
   """Offer: the asset being bought."""
   buying: String
+
+  # Bump sequence fields (Issue #260)
+  """Bump sequence: the sequence number to bump to."""
+  bumpSequence: String
+
+  # Manage data fields (Issue #260)
+  """Manage data: the data entry name."""
+  dataName: String
+  """Manage data: the data entry value (base64-encoded)."""
+  dataValue: String
 }
 
 """

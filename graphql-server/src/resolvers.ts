@@ -676,5 +676,24 @@ export const resolvers = {
     async account(parent: { sourceAccount: string; network?: string }, _: unknown, ctx: Context) {
       return resolveAccount(parent.sourceAccount, ctx, networkForParent(ctx, parent.network));
     },
+    bumpSequence(parent: { details?: Record<string, unknown> }): string | null {
+      // Issue #260: Extract bump_sequence from details
+      return (parent.details?.bump_to as string) ||
+             (parent.details?.bumpTo as string) ||
+             (parent.details?.bump_sequence as string) ||
+             null;
+    },
+    dataName(parent: { details?: Record<string, unknown> }): string | null {
+      // Issue #260: Extract data_name from details
+      return (parent.details?.data_name as string) ||
+             (parent.details?.name as string) ||
+             null;
+    },
+    dataValue(parent: { details?: Record<string, unknown> }): string | null {
+      // Issue #260: Extract data_value from details
+      return (parent.details?.data_value as string) ||
+             (parent.details?.value as string) ||
+             null;
+    },
   },
 };
