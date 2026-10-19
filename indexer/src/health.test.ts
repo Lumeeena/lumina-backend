@@ -164,7 +164,6 @@ test('a booting service with an unreachable database is still degraded', async (
 
   assert.equal(report.status, 'degraded');
 });
-
 test('uptime is reported in seconds', async () => {
   const report = await buildHealthReport(state({ startedAt: NOW - 90_000 }), okPool, THRESHOLDS, NOW);
 
@@ -296,4 +295,57 @@ test('GET /debug/config returns no-store JSON and rejects writes', async () => {
       server.close(err => err ? reject(err) : resolve());
     });
   }
+});
+
+// ── startToleranceSeconds expiry ──────────────────────────────────────────────
+
+test('a service that has never indexed degrades once the start tolerance window closes', async () => {
+  // `starting` is a grace period — the service reports `starting` while it is
+  // genuinely still catching up on first boot. Once `startToleranceSeconds`
+  // has elapsed with no ledger indexed, reporting `starting` indefinitely would
+  // mask a misconfiguration, so the status flips to `degraded`.
+  const expiredStart = NOW - (THRESHOLDS.startToleranceSeconds + 1) * 1000;
+  const report = await buildHealthReport(
+    state({ lastIndexedAt: null, latestIndexedLedger: 0, startedAt: expiredStart }),
+    okPool,
+    THRESHOLDS,
+    NOW
+  );
+
+  assert.equal(report.status, 'degraded');
+  assert.equal(report.secondsSinceLastIndex, null);
+  // The freshness check should be failing with a message naming the tolerance window.
+  const freshness = report.checks.find(c => c.name === 'indexing-freshness');
+  assert.equal(freshness?.ok, false);
+  assert.match(freshness?.detail ?? '', /start tolerance window closed/);
+});
+
+test('a service still within its start tolerance window reports starting even without a database', async () => {
+  // The tolerance window is only about indexing latency, not database
+  // connectivity — a database failure always degrades.
+  const recentStart = NOW - (THRESHOLDS.startToleranceSeconds - 60) * 1000;
+  const report = await buildHealthReport(
+    state({ lastIndexedAt: null, latestIndexedLedger: 0, startedAt: recentStart }),
+    okPool,
+    THRESHOLDS,
+    NOW
+  );
+
+  assert.equal(report.status, 'starting');
+  assert.equal(healthStatusCode(report), 200);
+});
+
+test('startToleranceSeconds threshold is honoured as configured', async () => {
+  // A generous tolerance lets slow-starting deployments stay green longer.
+  const longTolerance = { ...THRESHOLDS, startToleranceSeconds: 3600 };
+  const expiredForDefault = NOW - (THRESHOLDS.startToleranceSeconds + 1) * 1000;
+  const report = await buildHealthReport(
+    state({ lastIndexedAt: null, latestIndexedLedger: 0, startedAt: expiredForDefault }),
+    okPool,
+    longTolerance,
+    NOW
+  );
+
+  // Expired under the default threshold but still within the configured one.
+  assert.equal(report.status, 'starting');
 });

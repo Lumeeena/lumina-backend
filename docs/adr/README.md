@@ -24,6 +24,7 @@ survives.
 | [0003](0003-trigram-search-instead-of-tsvector.md) | Memo search is trigram similarity, not `tsvector` full-text search |
 | [0004](0004-network-in-every-key.md) | Every indexed row is scoped to a network, in the key |
 | [0005](0005-partition-operations-by-ledger-range.md) | `operations` is partitioned by ledger range |
+| [0006](0006-one-process-n-polling-loops.md) | Multi-network: one process runs N independent polling loops, writes to one database |
 
 ## Decisions recorded elsewhere
 

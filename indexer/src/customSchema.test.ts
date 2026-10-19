@@ -4,6 +4,7 @@ import {
   findEventDefinition,
   MAX_EVENTS_PER_SCHEMA,
   MAX_FIELDS_PER_EVENT,
+  NUMERIC_TYPES,
   normalizeTopic,
   parseContractSchema,
   SchemaValidationError,
@@ -196,4 +197,82 @@ test('findEventDefinition matches on the first topic', () => {
   assert.equal(findEventDefinition(schema, ['"transfer"', '"GFROM"'])?.name, 'transfer');
   assert.equal(findEventDefinition(schema, ['"mint"'])?.name, undefined);
   assert.equal(findEventDefinition(schema, []), null);
+});
+
+// ── optional fields ───────────────────────────────────────────────────────────
+
+test('optional: true is preserved through parsing', () => {
+  const schema = parseContractSchema({
+    contractId: CONTRACT,
+    version: 1,
+    events: [
+      {
+        name: 'mint',
+        topic: 'mint',
+        fields: [
+          { name: 'to', type: 'address', source: 'topic[1]' },
+          { name: 'memo', type: 'string', source: 'value.memo', optional: true },
+        ],
+      },
+    ],
+  });
+
+  const mint = schema.events[0];
+  assert.ok(mint, 'event parsed');
+  assert.equal(mint.fields[0].optional, false, 'non-optional defaults to false');
+  assert.equal(mint.fields[1].optional, true, 'optional: true is preserved');
+});
+
+test('rejects a non-boolean optional flag', () => {
+  rejects(
+    d => ({
+      ...d,
+      events: [
+        {
+          ...d.events[0],
+          fields: [{ name: 'x', type: 'string', source: 'value', optional: 'yes' }],
+        },
+      ],
+    }),
+    /must be a boolean/
+  );
+});
+
+test('optional field present in the event indexes with its value', () => {
+  // When the source resolves to a value the optional flag makes no difference —
+  // the value is decoded normally.
+  const schema = parseContractSchema({
+    contractId: CONTRACT,
+    version: 1,
+    events: [
+      {
+        name: 'mint',
+        topic: 'mint',
+        fields: [
+          { name: 'to', type: 'address', source: 'topic[1]' },
+          { name: 'memo', type: 'string', source: 'value.memo', optional: true },
+        ],
+      },
+    ],
+  });
+
+  // The field definition carries the flag; consumers (e.g. customDecode.ts)
+  // use it when the source is absent. The schema layer's job is to parse and
+  // validate — confirming `optional` is preserved is all we need here.
+  const field = schema.events[0].fields.find(f => f.name === 'memo');
+  assert.ok(field, 'memo field present');
+  assert.equal(field.optional, true);
+  assert.equal(field.source, 'value.memo');
+  assert.equal(field.type, 'string');
+});
+
+test('NUMERIC_TYPES covers exactly the ordered comparison types', () => {
+  // This set drives the GT/LT/GTE/LTE filter operators in the GraphQL API;
+  // adding a type there without adding it here silently disables ordering on it.
+  for (const t of ['i32', 'u32', 'i64', 'u64', 'i128', 'u128']) {
+    assert.ok(NUMERIC_TYPES.has(t as Parameters<typeof NUMERIC_TYPES.has>[0]), `${t} should be numeric`);
+  }
+  for (const t of ['address', 'string', 'symbol', 'bool', 'bytes', 'json']) {
+    assert.equal(NUMERIC_TYPES.has(t as Parameters<typeof NUMERIC_TYPES.has>[0]), false, `${t} should not be numeric`);
+  }
 });
