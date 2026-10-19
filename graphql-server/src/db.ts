@@ -113,6 +113,8 @@ const OPERATION_COLUMNS = `id, network, type, transaction_hash, ledger, created_
     'asset_issuer', details->'asset_issuer',
     'starting_balance', details->'starting_balance',
     'funder', details->'funder',
+    'account', details->'account',
+    'into', details->'into',
     'offer_id', details->'offer_id',
     'price', details->'price',
     'selling_asset_type', details->'selling_asset_type',
@@ -188,6 +190,8 @@ export function mapOperation(row: OperationRow) {
     asset: formatAsset(d['asset_type'] as string, d['asset_code'] as string, d['asset_issuer'] as string),
     startingBalance: (d['starting_balance'] as string) ?? null,
     funder: (d['funder'] as string) ?? null,
+    createdAccount: row.type === 'create_account' ? (d['account'] as string) ?? null : null,
+    mergeDestination: row.type === 'account_merge' ? (d['into'] as string) ?? null : null,
     offerId: (d['offer_id'] as string) ?? null,
     price: (d['price'] as string) ?? null,
     selling: formatAsset(d['selling_asset_type'] as string, d['selling_asset_code'] as string, d['selling_asset_issuer'] as string),
@@ -419,6 +423,29 @@ export async function getOperations(
   );
   const items = rows.map(mapOperation);
   return isForward ? items : items.reverse();
+}
+
+/** Lifecycle boundaries of the address itself, including accounts already merged away. */
+export async function getAccountLifecycle(
+  pool: Pool,
+  network: string,
+  address: string,
+  limit: number,
+  cursor?: string | null
+) {
+  // Both Horizon operation types identify the created/deleted address as `account`.
+  // Containment can use the existing details GIN index, including historical rows.
+  const params: unknown[] = [network, JSON.stringify({ account: address })];
+  const after = cursorCondition(params, KEYSETS.accountLifecycle, cursor);
+  params.push(limit);
+  const { rows } = await pool.query<OperationRow>(
+    `SELECT ${OPERATION_COLUMNS} FROM operations
+     WHERE network = $1 AND type IN ('create_account', 'account_merge')
+       AND details @> $2::jsonb${after ? ` AND ${after}` : ''}
+     ORDER BY ledger DESC, id DESC LIMIT $${params.length}`,
+    params
+  );
+  return rows.map(mapOperation);
 }
 
 export async function getOperationsByTransactionHash(pool: Pool, network: string, hash: string) {

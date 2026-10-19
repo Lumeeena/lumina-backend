@@ -17,6 +17,7 @@
     "explain:seed": "ts-node-transpile-only --project db/explain/tsconfig.json db/explain/run.ts seed",
     "explain:check": "ts-node-transpile-only --project db/explain/tsconfig.json db/explain/run.ts check",
     "explain:update": "ts-node-transpile-only --project db/explain/tsconfig.json db/explain/run.ts update",
+    "audit:trustlines": "ts-node-transpile-only --project db/explain/tsconfig.json db/audit/trustlines.ts",
     "test:indexer": "cd indexer && npm test",
     "test:graphql": "cd graphql-server && npm test",
     "manage-keys": "npm run --prefix graphql-server manage-keys --",

@@ -3,6 +3,7 @@ import {
   ACCOUNT_ORDER_NAMES,
   ACCOUNT_ORDERS,
   getAccountFromDb,
+  getAccountLifecycle,
   getAccountOperations,
   getAccountTransactions,
   getAccounts,
@@ -236,6 +237,22 @@ export const resolvers = {
         return {
           items,
           pageInfo: pageInfo(ACCOUNT_ORDERS[orderBy].keyset, items, limit, account => ACCOUNT_ORDERS[orderBy].keyOf(account), totalCount),
+        };
+      });
+    },
+
+    async accountLifecycle(
+      _: unknown,
+      args: { network?: string | null; address: string; limit?: number | null; cursor?: string | null },
+      ctx: Context
+    ) {
+      return memoizeRequestQuery(ctx.queryMemo, 'accountLifecycle', args, async () => {
+        const limit = getPageSize(args.limit);
+        const network = networkArgument(args, ctx);
+        const items = await getAccountLifecycle(ctx.pool, network.name, args.address, limit, args.cursor);
+        return {
+          items,
+          pageInfo: pageInfo(KEYSETS.accountLifecycle, items, limit, operation => [operation.ledger, operation.id]),
         };
       });
     },

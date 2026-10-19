@@ -97,6 +97,7 @@ export interface Keyset {
  * wrong.
  */
 export const KEYSETS = {
+  accountLifecycle: { query: 'accountLifecycle', columns: ['ledger', 'id'], types: ['bigint', 'text'] },
   transactions: { query: 'transactions', columns: ['ledger', 'hash'], types: ['bigint', 'text'] },
   ledgers: { query: 'ledgers', columns: ['sequence'], types: ['bigint'] },
   accountsActivity: { query: 'accounts', columns: ['last_modified_ledger', 'address'], types: ['bigint', 'text'] },

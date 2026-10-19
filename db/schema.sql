@@ -316,18 +316,12 @@ CREATE TABLE IF NOT EXISTS trustlines (
     CONSTRAINT trustlines_last_modified_ledger_check CHECK (last_modified_ledger > 0)
 );
 
-CREATE INDEX IF NOT EXISTS idx_trustlines_asset
-    ON trustlines (asset_code, asset_issuer, network);
-
-CREATE INDEX IF NOT EXISTS idx_trustlines_asset_active
-    ON trustlines (asset_code, asset_issuer, network)
-    WHERE balance <> '0';
-
-CREATE INDEX IF NOT EXISTS idx_trustlines_account
-    ON trustlines (account, network);
-
-CREATE INDEX IF NOT EXISTS idx_trustlines_ledger
-    ON trustlines (last_modified_ledger DESC);
+-- No secondary indexes, on purpose. Every statement that touches this table is
+-- an indexer write keyed by the full primary key, and no API query reads it;
+-- the four indexes 010_trustlines created were dropped by
+-- 015_drop_unused_trustline_indexes on measured usage. See
+-- docs/TRUSTLINES_INDEX_REVIEW.md before adding one back: an index here must
+-- come with the query that reads it.
 
 -- ─── Assets (Asset Analytics) ────────────────────────────────────────────────
 

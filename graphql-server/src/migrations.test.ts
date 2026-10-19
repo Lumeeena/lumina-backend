@@ -16,7 +16,9 @@ test('loads migrations in order and expands initial schema include', () => {
     '008_account_refresh_queue', '008_accounts_listing_index', '008_data_constraints',
     '008_retry_queue', '009_contract_storage_entries', '010_contract_storage_history',
     '010_retention_prune_indexes', '010_transaction_filters', '010_trustlines',
-    '011_assets', '012_asset_volume_buckets',
+    '011_assets', '012_asset_volume_buckets', '013_backfill_progress', '013_export_jobs',
+    '013_failed_ledgers', '013_trades', '013_trustline_changes', '014_pools_claims_paths_signers',
+    '015_drop_unused_trustline_indexes',
   ]);
   assert.match(migrations[0].sql, /CREATE TABLE IF NOT EXISTS ledgers/);
   assert.match(migrations[0].sql, /PRIMARY KEY \(id, network\)/);
