@@ -406,14 +406,16 @@ export async function indexLedger(
         );
       }
 
-      // Process asset-related operations for trustlines, assets, and volume tracking
-      await processAssetOperation(client, network, ledger.sequence, op);
+      for (const op of operations) {
+        // Process asset-related operations for trustlines, assets, and volume tracking
+        await processAssetOperation(client, network, ledger.sequence, op);
 
-      // Process liquidity pools, claimable balances, path payments, and set_options operations
-      await processLiquidityPoolOperation(client, network, ledger.sequence, op);
-      await processClaimableBalanceOperation(client, network, ledger.sequence, op);
-      await processPathPaymentOperation(client, network, ledger.sequence, op);
-      await processSetOptionsOperation(client, network, ledger.sequence, op);
+        // Process liquidity pools, claimable balances, path payments, and set_options operations
+        await processLiquidityPoolOperation(client, network, ledger.sequence, op);
+        await processClaimableBalanceOperation(client, network, ledger.sequence, op);
+        await processPathPaymentOperation(client, network, ledger.sequence, op);
+        await processSetOptionsOperation(client, network, ledger.sequence, op);
+      }
     }
 
     if (accountAddresses.length > 0) {
