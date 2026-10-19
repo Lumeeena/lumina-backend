@@ -117,5 +117,48 @@
       "med_threshold": 0,
       "high_threshold": 0
     }
+  },
+  "trade": {
+    "id": "1234567890123456789",
+    "paging_token": "1234567890123456789",
+    "ledger_close_time": "2026-05-06T10:22:14Z",
+    "trade_type": "orderbook",
+    "base_offer_id": "1001",
+    "base_account": "GBBD47UZQ2RRULJ3UISD3HX2E7E5B57ONDST4NYUAOK5RYSOFSHMARTY",
+    "base_amount": "100.0000000",
+    "base_asset_type": "native",
+    "counter_offer_id": "2002",
+    "counter_account": "GBUQWP3BOUZX34ULNQG23RQ6F4WHCQXBMCQTKSAXMBTMOYXFRYKRYX3N",
+    "counter_amount": "50.0000000",
+    "counter_asset_type": "credit_alphanum4",
+    "counter_asset_code": "USDC",
+    "counter_asset_issuer": "GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN",
+    "base_is_seller": true,
+    "price": { "n": 2, "d": 1 }
+  },
+  "tradesPage": {
+    "_embedded": {
+      "records": [
+        {
+          "id": "1234567890123456789",
+          "paging_token": "1234567890123456789",
+          "ledger_close_time": "2026-05-06T10:22:14Z",
+          "trade_type": "orderbook",
+          "base_offer_id": "1001",
+          "base_account": "GBBD47UZQ2RRULJ3UISD3HX2E7E5B57ONDST4NYUAOK5RYSOFSHMARTY",
+          "base_amount": "100.0000000",
+          "base_asset_type": "native",
+          "counter_offer_id": "2002",
+          "counter_account": "GBUQWP3BOUZX34ULNQG23RQ6F4WHCQXBMCQTKSAXMBTMOYXFRYKRYX3N",
+          "counter_amount": "50.0000000",
+          "counter_asset_type": "credit_alphanum4",
+          "counter_asset_code": "USDC",
+          "counter_asset_issuer": "GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN",
+          "base_is_seller": true,
+          "price": { "n": 2, "d": 1 }
+        }
+      ]
+    },
+    "_links": {}
   }
 }

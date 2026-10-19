@@ -11,18 +11,24 @@ import { join } from 'node:path';
 import {
   horizonRequests,
   indexingLag,
+  indexingErrors,
   latestHorizonLedger,
   latestIndexedLedger,
   lastSuccessfulIndexTimestamp,
   ledgersIndexed,
   operationsIndexed,
+  recordBackfillLedger,
   recordHorizonTip,
   recordIndexedLedger,
   recordLedgerGaps,
   registry,
   renderMetrics,
+  metricsContentType,
   transactionsIndexed,
   indexerPoolErrors,
+  contractsWatched,
+  retentionPrunedRows,
+  accountCacheSize,
 } from './metrics';
 
 /** The current value of a counter/gauge, optionally for one label set. */
@@ -218,4 +224,81 @@ test('the dashboard actually charts this package s headline metrics', async () =
   for (const metric of HEADLINE_METRICS) {
     assert.ok(dashboard.includes(metric), `dashboard is missing a panel for ${metric}`);
   }
+});
+
+test('recordBackfillLedger advances backfill counters and gauge', async () => {
+  const before = {
+    ledgers: await value('lumina_ledgers_indexed_total'),
+    transactions: await value('lumina_transactions_indexed_total'),
+    operations: await value('lumina_operations_indexed_total'),
+    backfilled: await value('lumina_backfilled_ledgers_total', { network: 'testnet' }),
+  };
+
+  recordBackfillLedger('testnet', 1000, 3, 8);
+
+  assert.equal(await value('lumina_ledgers_indexed_total'), before.ledgers + 1);
+  assert.equal(await value('lumina_transactions_indexed_total'), before.transactions + 3);
+  assert.equal(await value('lumina_operations_indexed_total'), before.operations + 8);
+  assert.equal(await value('lumina_backfilled_ledgers_total', { network: 'testnet' }), before.backfilled + 1);
+  assert.equal(await value('lumina_backfill_current_ledger', { network: 'testnet' }), 1000);
+});
+
+test('recordBackfillLedger keeps each network independent', async () => {
+  recordBackfillLedger('mainnet', 50_000, 1, 1);
+  recordBackfillLedger('testnet', 500, 1, 1);
+
+  assert.equal(await value('lumina_backfill_current_ledger', { network: 'mainnet' }), 50_000);
+  assert.equal(await value('lumina_backfill_current_ledger', { network: 'testnet' }), 500);
+  assert.equal(await value('lumina_backfilled_ledgers_total', { network: 'mainnet' }), 1);
+  assert.equal(await value('lumina_backfilled_ledgers_total', { network: 'testnet' }), 1);
+});
+
+test('metricsContentType returns a valid Prometheus content type', () => {
+  const ct = metricsContentType();
+  assert.ok(ct.startsWith('text/plain'), `expected text/plain, got ${ct}`);
+  assert.ok(ct.includes('version=0.0.4'), `expected version=0.0.4, got ${ct}`);
+});
+
+test('renderMetrics includes backfill gauges after recordBackfillLedger', async () => {
+  recordBackfillLedger('mainnet', 42_000, 1, 1);
+  const body = await renderMetrics();
+
+  assert.match(body, /# HELP lumina_backfill_current_ledger/);
+  assert.match(body, /# TYPE lumina_backfill_current_ledger gauge/);
+  assert.match(body, /lumina_backfill_current_ledger\{network="mainnet"\} 42000/);
+  assert.match(body, /# HELP lumina_backfilled_ledgers_total/);
+  assert.match(body, /# TYPE lumina_backfilled_ledgers_total counter/);
+});
+
+test('contractsWatched gauge is settable per network', async () => {
+  contractsWatched.set({ network: 'mainnet' }, 5);
+  contractsWatched.set({ network: 'testnet' }, 0);
+
+  assert.equal(await value('lumina_soroban_contracts_watched', { network: 'mainnet' }), 5);
+  assert.equal(await value('lumina_soroban_contracts_watched', { network: 'testnet' }), 0);
+});
+
+test('retentionPrunedRows counter is incrementable per table', async () => {
+  const beforeOps = await value('lumina_retention_pruned_rows_total', { table: 'operations' });
+  const beforeTx = await value('lumina_retention_pruned_rows_total', { table: 'transactions' });
+
+  retentionPrunedRows.inc({ table: 'operations' }, 100);
+  retentionPrunedRows.inc({ table: 'transactions' }, 50);
+
+  assert.equal(await value('lumina_retention_pruned_rows_total', { table: 'operations' }), beforeOps + 100);
+  assert.equal(await value('lumina_retention_pruned_rows_total', { table: 'transactions' }), beforeTx + 50);
+});
+
+test('accountCacheSize gauge is settable per network', async () => {
+  accountCacheSize.set({ network: 'mainnet' }, 10_000);
+
+  assert.equal(await value('lumina_account_cache_size', { network: 'mainnet' }), 10_000);
+});
+
+test('indexingErrors counter is incrementable per loop', async () => {
+  const before = await value('lumina_indexing_errors_total', { loop: 'ledger' });
+
+  indexingErrors.inc({ loop: 'ledger' });
+
+  assert.equal(await value('lumina_indexing_errors_total', { loop: 'ledger' }), before + 1);
 });

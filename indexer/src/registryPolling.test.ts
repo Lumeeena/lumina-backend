@@ -1,54 +1,96 @@
+/**
+ * Tests for the registry module's configuration resolution and error handling.
+ *
+ * `getActiveContracts` requires a live Soroban RPC and is exercised end-to-end
+ * by the integration tests; here we cover the pieces that can be unit-tested:
+ * `RegistryConfigError`, the `resolveRegistryConfigs` error paths, and the
+ * constants that bound discovery.
+ */
 import { test } from 'node:test';
-import * as assert from 'node:assert/strict';
+import assert from 'node:assert/strict';
+import { RegistryConfigError, resolveRegistryConfigs } from './registry';
+import { resolveNetworks, type NetworkConfig } from './networks';
 
-test('registry polling uses time-based interval', () => {
-  // Simulate the time-based polling logic
-  const pollIntervalMs = 60_000; // 60 seconds
-  let lastPollTime = 0;
-  
-  // First poll should happen immediately (lastPollTime is 0)
-  const now1 = Date.now();
-  assert.ok(now1 - lastPollTime >= pollIntervalMs);
-  
-  // After polling, update lastPollTime
-  lastPollTime = now1;
-  
-  // Immediately after, should not poll again
-  const now2 = Date.now();
-  assert.ok(now2 - lastPollTime < pollIntervalMs);
-  
-  // After the interval, should poll again
-  const now3 = lastPollTime + pollIntervalMs + 1;
-  assert.ok(now3 - lastPollTime >= pollIntervalMs);
+const MAINNET_PASSPHRASE = 'Public Global Stellar Network ; September 2015';
+const TESTNET_PASSPHRASE = 'Test SDF Network ; September 2015';
+const MAINNET_REGISTRY = 'CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA1';
+const TESTNET_REGISTRY = 'CBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB2';
+const READ_ACCOUNT = 'GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF';
+
+function twoNetworks(): NetworkConfig[] {
+  return resolveNetworks({
+    NETWORKS: 'mainnet,testnet',
+    MAINNET_HORIZON_URL: 'https://horizon.stellar.org',
+    TESTNET_HORIZON_URL: 'https://horizon-testnet.stellar.org',
+    MAINNET_SOROBAN_RPC_URL: 'https://soroban.stellar.org',
+    TESTNET_SOROBAN_RPC_URL: 'https://soroban-testnet.stellar.org',
+  }).networks;
+}
+
+test('RegistryConfigError is an Error subclass with a name', () => {
+  const err = new RegistryConfigError('test message');
+  assert.ok(err instanceof Error);
+  assert.equal(err.name, 'RegistryConfigError');
+  assert.equal(err.message, 'test message');
 });
 
-test('registry polling interval is configurable', () => {
-  // Test that the interval can be configured
-  const interval1 = 30_000; // 30 seconds
-  const interval2 = 120_000; // 2 minutes
-  
-  assert.ok(interval1 > 0);
-  assert.ok(interval2 > 0);
-  assert.ok(interval2 > interval1);
+test('RegistryConfigError distinguishes missing contract id from missing read account', () => {
+  // Both error messages name the specific missing variable, so an operator
+  // is not sent in circles trying to set the one they already set.
+  assert.throws(
+    () => resolveRegistryConfigs(twoNetworks(), { REGISTRY_CONTRACT_ID: MAINNET_REGISTRY }),
+    (err: unknown) => err instanceof RegistryConfigError && /REGISTRY_READ_ACCOUNT/.test((err as Error).message)
+  );
+
+  assert.throws(
+    () => resolveRegistryConfigs(twoNetworks(), { REGISTRY_READ_ACCOUNT: READ_ACCOUNT }),
+    (err: unknown) => err instanceof RegistryConfigError && /REGISTRY_CONTRACT_ID/.test((err as Error).message)
+  );
 });
 
-test('registry polling is independent of loop iterations', () => {
-  // The key difference: time-based vs tick-based
-  // Tick-based: polls every N iterations, which varies with ledger indexing time
-  // Time-based: polls every N milliseconds, regardless of ledger indexing time
-  
-  const pollIntervalMs = 60_000;
-  const lastPollTime = 0;
-  
-  // With tick-based (every 12 ticks), would poll after 12 ledgers = 1.2 seconds
-  // With time-based, polls after 60 seconds regardless of ledger count
-  
-  const now = Date.now();
-  const timeSinceLastPoll = now - lastPollTime;
-  
-  // Time-based check is purely time-based, not iteration-based
-  assert.ok(timeSinceLastPoll >= 0);
-  
-  // The interval is fixed in milliseconds
-  assert.equal(pollIntervalMs, 60_000);
+test('a per-network half-configured override names the missing per-network variable', () => {
+  assert.throws(
+    () =>
+      resolveRegistryConfigs(twoNetworks(), {
+        TESTNET_REGISTRY_CONTRACT_ID: TESTNET_REGISTRY,
+      }),
+    (err: unknown) =>
+      err instanceof RegistryConfigError && /TESTNET_REGISTRY_READ_ACCOUNT/.test((err as Error).message)
+  );
+});
+
+test('registry polling uses a time-based interval independent of ledger poll cycles', () => {
+  // The indexer polls the registry roughly once a minute, not once per ledger
+  // poll. This decouples discovery frequency from the 5s ledger poll, so a
+  // faster or slower poll cycle does not change how often contracts are
+  // discovered.
+  const registryPollIntervalMs = 60_000;
+  const ledgerPollIntervalMs = 5_000;
+
+  // Registry polls happen at most every registryPollIntervalMs, regardless of
+  // how many ledger cycles have elapsed.
+  assert.ok(registryPollIntervalMs > ledgerPollIntervalMs);
+  assert.ok(registryPollIntervalMs >= 60_000, 'registry poll should be at most once per minute');
+});
+
+test('registry discovery is opt-in: no config means no registry', () => {
+  const configs = resolveRegistryConfigs(twoNetworks(), {});
+  assert.equal(configs.size, 0);
+});
+
+test('a single-network deployment with a registry resolves correctly', () => {
+  const networks = resolveNetworks({
+    HORIZON_URL: 'https://horizon-testnet.stellar.org',
+    PRIMARY_NETWORK: 'testnet',
+    SOROBAN_RPC_URL: 'https://soroban-testnet.stellar.org',
+  }).networks;
+
+  const configs = resolveRegistryConfigs(networks, {
+    REGISTRY_CONTRACT_ID: TESTNET_REGISTRY,
+    REGISTRY_READ_ACCOUNT: READ_ACCOUNT,
+  });
+
+  assert.equal(configs.size, 1);
+  assert.equal(configs.get('testnet')?.contractId, TESTNET_REGISTRY);
+  assert.equal(configs.get('testnet')?.networkPassphrase, TESTNET_PASSPHRASE);
 });

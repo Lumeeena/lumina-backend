@@ -77,7 +77,15 @@ const log = subsystem('retention');
 
 const MS_PER_DAY = 24 * 60 * 60 * 1000;
 
-/** How long a prune statement may wait for a lock before yielding to the indexer. */
+/**
+ * How long a prune statement may wait for a lock before yielding to the indexer.
+ *
+ * Tuning: long enough to ride out the brief row locks of an ordinary ledger
+ * write, so a prune is not abandoned by a momentary collision, but short enough
+ * that a prune stuck behind a long indexer transaction fails fast and is
+ * retried next round instead of holding its connection and queue position.
+ * Giving way is cheap because pruning is idempotent and resumable.
+ */
 const PRUNE_LOCK_TIMEOUT_MS = 3_000;
 
 /**
@@ -85,9 +93,22 @@ const PRUNE_LOCK_TIMEOUT_MS = 3_000;
  * the rest for the next interval, which is what "does not block indexing"
  * means in practice: the prune converges over several rounds instead of
  * monopolising the database on the first one.
+ *
+ * Tuning: with the default batch size of 10,000 rows this caps a round at
+ * 200,000 rows per table — enough to keep up with steady-state ingest, while
+ * bounding how long one round can run when first enabled on a large backlog.
  */
 const MAX_BATCHES_PER_ROUND = 20;
 
+/**
+ * Rows deleted per statement when the caller does not pass `batchSize`.
+ *
+ * Tuning: large enough that per-statement overhead is amortised, small enough
+ * that one transaction stays short and its WAL and row locks stay modest.
+ */
+const DEFAULT_BATCH_SIZE = 10_000;
+
+/** The tables whose history may be pruned; see "What is and is not prunable" above. */
 export type RetentionTable =
   | 'operations'
   | 'transactions'
@@ -95,6 +116,7 @@ export type RetentionTable =
   | 'custom_events'
   | 'ledgers';
 
+/** How to prune one table: its name and the chain-time column the cutoff applies to. */
 export interface RetentionSpec {
   table: RetentionTable;
   /** Chain-time column the cutoff is compared against. */
@@ -115,6 +137,7 @@ export const RETENTION_SPECS: readonly RetentionSpec[] = [
   { table: 'ledgers', timeColumn: 'closed_at' },
 ];
 
+/** Prunable table names, in prune order (derived from `RETENTION_SPECS`). */
 export const RETENTION_TABLES: readonly RetentionTable[] = RETENTION_SPECS.map(spec => spec.table);
 
 /**
@@ -135,6 +158,7 @@ const FK_CHAIN: readonly (readonly [RetentionTable, RetentionTable])[] = [
 /** Window lengths in days. `0` means "keep everything" — the default for all. */
 export type RetentionWindows = Record<RetentionTable, number>;
 
+/** Outcome of pruning one table in a single `pruneExpiredData` pass. */
 export interface RetentionReport {
   table: RetentionTable;
   days: number;
@@ -202,8 +226,8 @@ export function retentionCutoff(days: number, now: number = Date.now()): Date {
 }
 
 /**
- * Catalog names are not user input, but they still reach SQL as identifiers
- * because `DROP TABLE` cannot be parameterised. Anything that is not a plain
+ * Table and column names are not user input, but they still reach SQL as
+ * identifiers because identifiers cannot be parameterised. Anything that is not a plain
  * unquoted identifier is refused rather than escaped, so a surprising catalog
  * value fails loudly instead of being interpolated.
  */
@@ -292,13 +316,18 @@ async function pruneTable(
  * `ROW EXCLUSIVE` would make ledger writes queue behind it — pruning would
  * then be the thing blocking indexing, which is the one outcome the issue
  * rules out.
+ *
+ * Non-obvious behaviour: tables with a window of `0` are not queried at all and
+ * appear in the result with `skipped: true`; reports come back in prune order.
+ * A lock timeout (or any other error) rejects the whole pass, but the client
+ * is always released. `options.now` exists so tests can pin the cutoff.
  */
 export async function pruneExpiredData(
   pool: Pool,
   windows: RetentionWindows,
   options: { batchSize?: number; now?: number } = {}
 ): Promise<RetentionReport[]> {
-  const batchSize = options.batchSize ?? 10_000;
+  const batchSize = options.batchSize ?? DEFAULT_BATCH_SIZE;
   const now = options.now ?? Date.now();
   const client = await pool.connect();
   try {
@@ -328,6 +357,7 @@ export async function pruneExpiredData(
   }
 }
 
+/** Resolve after `ms` milliseconds; used to pace the retention loop between rounds. */
 export function sleep(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
