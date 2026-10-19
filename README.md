@@ -231,6 +231,30 @@ correct plan, so a CI-sized database would report exactly the queries this is
 meant to catch as healthy. The recorded findings, and the indexes that would fix
 them, are in [docs/QUERY_PLANS.md](docs/QUERY_PLANS.md).
 
+### Index audits
+
+Plan baselines show whether a query uses its index. They can't show whether an
+index is paid for and never read. Indexes cost something on every write, and
+the indexer's write path is the bottleneck. So a table's indexes are reviewed
+against measured usage, and every index must name the query that reads it.
+
+`db/audit/` measures this for `trustlines`. It replays real mainnet operations
+through the indexer's own write path and reports index scans, HOT updates, WAL
+and growth:
+
+```bash
+npm run audit:trustlines -- fetch 400   # cache mainnet operations from Horizon (once)
+npm run audit:trustlines -- replay      # apply them to an empty scratch database
+npm run audit:trustlines -- report      # read-only stats; safe on a deployment
+psql $DATABASE_URL -f db/audit/trustlines.sql   # the same report, without Node
+```
+
+Point `replay` at a scratch database with `AUDIT_DATABASE_URL`. It refuses a
+non-empty `trustlines` table. The first review dropped all four secondary
+indexes on `trustlines`: HOT updates went from 0% to 97% and WAL fell by half.
+The measurements, and how the table grows, are in
+[docs/TRUSTLINES_INDEX_REVIEW.md](docs/TRUSTLINES_INDEX_REVIEW.md).
+
 ## Run with Docker
 
 ```bash
