@@ -116,6 +116,33 @@ test('an indexOne that throws does not crash the worker', async () => {
   assert.ok(cycles >= 1, 'indexOne should have been called');
 });
 
+test('a failed ledger does not prevent later ledgers in the batch from retrying', async () => {
+  const { pool, queries } = makePoolStub([[101, 102], []]);
+  const indexed: number[] = [];
+
+  const worker = new RetryWorker({
+    pool,
+    network: 'testnet',
+    indexOne: async (seq) => {
+      indexed.push(seq);
+      if (seq === 101) throw new Error('temporary failure');
+      return true;
+    },
+    pollIntervalMs: 1,
+  });
+
+  const done = worker.start();
+  await new Promise(r => setTimeout(r, 20));
+  worker.stop();
+  await done;
+
+  assert.deepEqual(indexed, [101, 102]);
+  const deleteQuery = queries.find(q => q.sql.includes('DELETE') && (q.params as unknown[]).includes(102));
+  assert.ok(deleteQuery, 'the successful later ledger should be removed from the queue');
+  const failedDelete = queries.find(q => q.sql.includes('DELETE') && (q.params as unknown[]).includes(101));
+  assert.equal(failedDelete, undefined, 'the failed ledger must remain queued');
+});
+
 // ── empty queue ───────────────────────────────────────────────────────────────
 
 test('the worker is a no-op when the queue is empty', async () => {

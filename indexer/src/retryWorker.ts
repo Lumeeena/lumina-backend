@@ -1,9 +1,11 @@
 /**
- * Durable retry worker for failed ledgers.
- * 
- * Runs independently of the forward indexing loop, periodically checking
- * the retry queue and attempting to re-index failed ledgers. This ensures
- * failures are retried after process restarts and don't block forward progress.
+ * Drains the durable ledger retry queue independently of the forward indexer.
+ *
+ * The forward loop records failures in PostgreSQL after its bounded inline
+ * retries are exhausted. This worker picks those rows up on a later pass so a
+ * transient Horizon or database outage does not permanently strand a ledger
+ * or hold the forward cursor back. A successful retry removes the row; a
+ * false result or thrown error leaves it available for a future poll.
  */
 
 import type { Pool } from 'pg';
@@ -13,9 +15,13 @@ import { getPendingRetries, removeLedgerFromRetryQueue } from './db';
 const log = subsystem('retry-worker');
 
 export interface RetryWorkerOptions {
+  /** PostgreSQL pool containing the network-scoped retry queue. */
   pool: Pool;
+  /** Network name used to prevent retries crossing network boundaries. */
   network: string;
+  /** Re-indexes one ledger and resolves `true` only when it is complete. */
   indexOne: (sequence: number) => Promise<boolean>;
+  /** Delay between queue polls. Defaults to the 30-second production cadence. */
   pollIntervalMs?: number;
 }
 
@@ -31,9 +37,18 @@ export class RetryWorker {
     this.pool = options.pool;
     this.network = options.network;
     this.indexOne = options.indexOne;
-    this.pollIntervalMs = options.pollIntervalMs ?? 30000; // Default 30 seconds
+    // The production caller uses the same 30-second cadence explicitly. The
+    // default keeps direct users of this worker on that operational policy.
+    this.pollIntervalMs = options.pollIntervalMs ?? 30000;
   }
 
+  /**
+   * Start polling until {@link stop} is called.
+   *
+   * A failed poll is isolated to its cycle and does not terminate the worker;
+   * the next poll can recover from a transient database failure. Calling
+   * `start` while already running is a no-op.
+   */
   async start(): Promise<void> {
     if (this.running) return;
     this.running = true;
@@ -51,7 +66,8 @@ export class RetryWorker {
         );
       }
 
-      // Wait before next cycle
+      // Wait before the next cycle. This also prevents a permanently empty
+      // queue from turning into a tight database polling loop.
       await new Promise(resolve => setTimeout(resolve, this.pollIntervalMs));
     }
 
@@ -59,11 +75,15 @@ export class RetryWorker {
     log.info({ network: this.network }, 'retry worker stopped');
   }
 
+  /** Request a graceful stop after the current retry attempt finishes. */
   stop(): void {
     this.stopped = true;
   }
 
+  /** Process at most ten due ledgers, preserving queue rows on failure. */
   private async processRetries(): Promise<void> {
+    // Ten rows per pass bounds the work done by one cycle while allowing the
+    // next poll to continue draining a larger backlog.
     const pendingLedgers = await getPendingRetries(this.pool, this.network, 10);
 
     if (pendingLedgers.length === 0) return;
