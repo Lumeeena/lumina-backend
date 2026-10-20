@@ -875,6 +875,78 @@ test('processClaimableBalanceOperation marks claimable balance as claimed rather
   ]);
 });
 
+test('processClaimableBalanceOperation keys a created balance by the id its claim will carry', async () => {
+  // Horizon's create_claimable_balance record has no balance_id (see
+  // test/contract/fixtures/operations.json); the id comes from the
+  // transaction. This is mainnet operation 279341181123747842.
+  const executed: { sql: string; params: unknown[] }[] = [];
+  const client = {
+    query: async (sql: string, params: unknown[] = []) => {
+      executed.push({ sql: sql.trim(), params });
+      return { rows: [] };
+    },
+  } as unknown as PoolClient;
+  const balanceId = '00000000dd35e5f1aa87257450979d481daa163a12a7c24ac82e7f829af6a47b7f261943';
+  const transaction = {
+    hash: '03660b0b49d4a6c31dec4a382758dd87af66d56743bba092e7be83e2551a4765',
+    ledger: 65039178,
+    created_at: '2026-02-01T12:00:00Z',
+    source_account: 'GB4NLVHUFFJYUG5PMJRPSOOXGM6GRKNKWJ2BMJQATAZOEG2GZD2PVN27',
+    source_account_sequence: '266166330288257195',
+    fee_charged: '100',
+    operation_count: 52,
+    successful: true,
+    memo_type: 'none',
+  };
+
+  await processClaimableBalanceOperation(client, 'mainnet', 65039178, {
+    ...op,
+    id: '279341181123747842',
+    type: 'create_claimable_balance',
+    transaction_hash: transaction.hash,
+    source_account: transaction.source_account,
+    asset: 'native',
+    amount: '1.0000000',
+    claimants: [{ destination: 'G_BENEFICIARY_1', predicate: { unconditional: true } }],
+  }, transaction);
+  assert.equal(executed[0]!.params[0], balanceId);
+  assert.equal(executed[1]!.params[0], balanceId);
+
+  // The claim, as Horizon reports it, now targets the same row.
+  await processClaimableBalanceOperation(client, 'mainnet', 65039200, {
+    ...op,
+    id: '279341300000000001',
+    type: 'claim_claimable_balance',
+    balance_id: balanceId,
+    claimant: 'G_BENEFICIARY_1',
+  });
+  assert.match(executed[2]!.sql, /UPDATE claimable_balances/);
+  assert.equal(executed[2]!.params[3], balanceId);
+});
+
+test('processClaimableBalanceOperation marks a clawed-back balance so it stops reading as claimable', async () => {
+  const executed: { sql: string; params: unknown[] }[] = [];
+  const client = {
+    query: async (sql: string, params: unknown[] = []) => {
+      executed.push({ sql: sql.trim(), params });
+      return { rows: [] };
+    },
+  } as unknown as PoolClient;
+
+  await processClaimableBalanceOperation(client, 'mainnet', 610, {
+    ...op,
+    id: 'op_cb_3',
+    type: 'clawback_claimable_balance',
+    balance_id: '00000000balance_123',
+    source_account: 'G_ISSUER',
+    created_at: '2026-02-03T10:00:00Z',
+  });
+
+  assert.equal(executed.length, 1);
+  assert.match(executed[0]!.sql, /SET status = 'clawed_back'/);
+  assert.deepEqual(executed[0]!.params, ['2026-02-03T10:00:00Z', 610, '00000000balance_123', 'mainnet']);
+});
+
 test('getClaimableBalancesForAccount queries claimable balances by claimant destination', async () => {
   const pool = {
     query: async () => ({

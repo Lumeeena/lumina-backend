@@ -317,3 +317,55 @@ test('asset query returns supply, holders and a matching volume series', { skip,
     await pool.query("DELETE FROM ledgers WHERE sequence = $1 AND network = 'mainnet'", [assetLedger]);
   }
 });
+
+test('claimableBalances evaluates claimability and hides claimed balances unless asked', { skip, timeout: TEST_TIMEOUT_MS }, async () => {
+  const claimant = 'GCLAIMABLE_INTEGRATION_CLAIMANT';
+  const ids = ['00000000cb_it_open', '00000000cb_it_later', '00000000cb_it_claimed'];
+  const insert = async (id: string, ledger: number, predicate: object, status = 'unclaimed') => {
+    const claimants = [{ destination: claimant, predicate }];
+    await pool.query(
+      `INSERT INTO claimable_balances (balance_id, asset, amount, sponsor, claimants, status, created_ledger, created_at, network)
+       VALUES ($1, 'native', 5, 'GCLAIMABLE_INTEGRATION_SPONSOR', $2, $3, $4, NOW(), 'mainnet')`,
+      [id, JSON.stringify(claimants), status, ledger]
+    );
+    await pool.query(
+      `INSERT INTO claimable_balance_claimants (balance_id, destination, predicate_details, network)
+       VALUES ($1, $2, $3, 'mainnet')`,
+      [id, claimant, JSON.stringify(predicate)]
+    );
+  };
+  const clean = async () => {
+    await pool.query('DELETE FROM claimable_balance_claimants WHERE balance_id = ANY($1)', [ids]);
+    await pool.query('DELETE FROM claimable_balances WHERE balance_id = ANY($1)', [ids]);
+  };
+
+  await clean();
+  try {
+    await insert(ids[0]!, 9, { unconditional: true });
+    await insert(ids[1]!, 10, { not: { abs_before: '2099-01-01T00:00:00Z' } });
+    await insert(ids[2]!, 8, { unconditional: true }, 'claimed');
+
+    const open = await resolvers.Query.claimableBalances(undefined, { claimant, limit: 1 }, createContext(pool));
+    assert.deepEqual(open.items.map(b => [b.id, b.claimableNow]), [[ids[1], false]]);
+    assert.equal(open.pageInfo.hasNextPage, true);
+
+    const next = await resolvers.Query.claimableBalances(undefined, { claimant, limit: 1, cursor: open.pageInfo.cursor }, createContext(pool));
+    assert.deepEqual(next.items.map(b => [b.id, b.claimableNow, b.asset]), [[ids[0], true, 'XLM']]);
+
+    const all = await resolvers.Query.claimableBalances(undefined, { claimant, includeClaimed: true }, createContext(pool));
+    assert.deepEqual(all.items.map(b => [b.id, b.status, b.claimableNow]), [
+      [ids[1], 'UNCLAIMED', false],
+      [ids[0], 'UNCLAIMED', true],
+      [ids[2], 'CLAIMED', false],
+    ]);
+
+    const bySponsorAndAsset = await resolvers.Query.claimableBalances(
+      undefined,
+      { sponsor: 'GCLAIMABLE_INTEGRATION_SPONSOR', asset: 'XLM' },
+      createContext(pool)
+    );
+    assert.deepEqual(bySponsorAndAsset.items.map(b => b.id), [ids[1], ids[0]]);
+  } finally {
+    await clean();
+  }
+});

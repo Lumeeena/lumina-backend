@@ -325,6 +325,38 @@ query ListOperations($account: String, $type: OperationType, $asset: String) {
 
 The asset filter matches operations where the asset appears as a payment asset or either side of a trade.
 
+### What can this account claim?
+
+`claimableBalances(claimant:)` returns the balances an account is a claimant
+of, newest first. Predicates are evaluated server-side, at the time of the
+request (`evaluatedAt`): `claimableNow` says whether the account can claim the
+balance right now, and each claimant's own `claimableNow` sits beside the raw
+`predicate`. Claimed and clawed-back balances are left out unless
+`includeClaimed: true`.
+
+```graphql
+query Claimable($account: String!, $cursor: String) {
+  claimableBalances(claimant: $account, limit: 20, cursor: $cursor) {
+    evaluatedAt
+    items {
+      id
+      asset
+      amount
+      sponsor
+      claimableNow
+      claimants { destination predicate claimableNow }
+    }
+    pageInfo { hasNextPage cursor }
+  }
+}
+```
+
+Filter by `sponsor` or `asset` (`"XLM"` or `"CODE:ISSUER"`) as well, or
+instead; at least one of `claimant`, `sponsor` and `asset` is required.
+A predicate the server cannot read gives `claimableNow: null` rather than a
+guess. The network judges a claim at its ledger's close time, so a balance
+whose deadline is seconds away may be claimable here and expired on chain.
+
 ### Fetch asset detail with supply and volume series
 
 One query returns everything a detail page needs — no separate supply, holder and chart round trips:

@@ -346,15 +346,15 @@ Stellar claimable balance entries (escrowed balances waiting to be claimed).
 
 | Column | Type | Nullable | Default | Units / Format | Source | Description |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| `balance_id` | `TEXT` | No (PK) | None | 64-char Hex ID | Horizon (`id`) | Unique claimable balance identifier. |
+| `balance_id` | `TEXT` | No (PK) | None | Hex `ClaimableBalanceID` (`00000000` + 64 hex) | Derived for a create (Horizon's operation record omits it; see `indexer/src/claimableBalanceId.ts`); Horizon (`balance_id`) for a claim | Unique claimable balance identifier, as Horizon reports it. Rows indexed before #224 hold the creating operation's id instead and need re-indexing. |
 | `asset` | `TEXT` | No | None | Asset string | Horizon (`asset`) | Asset escrowed in the balance. |
 | `amount` | `NUMERIC(20, 7)`| No | None | Asset units ($10^{-7}$) | Horizon (`amount`) | Escrowed asset amount. |
 | `sponsor` | `TEXT` | Yes | None | Stellar address (`G...`) | Horizon (`sponsor`) | Account providing the base reserve. |
 | `claimants` | `JSONB` | No | `'[]'::jsonb`| JSONB Array | Horizon (`claimants`) | Array of valid claimants and release conditions. |
-| `status` | `TEXT` | No | `'unclaimed'`| String enum | Internal tracking | Current state: `'unclaimed'` or `'claimed'`. |
+| `status` | `TEXT` | No | `'unclaimed'`| String enum | Internal tracking | Current state: `'unclaimed'`, `'claimed'`, or `'clawed_back'` (taken back by the issuer). |
 | `claimed_by` | `TEXT` | Yes | None | Stellar address (`G...`) | Horizon / Inferred | Account that successfully claimed the balance. |
-| `claimed_at` | `TIMESTAMPTZ` | Yes | None | ISO 8601 UTC | Horizon / Inferred | Timestamp balance was claimed. |
-| `claimed_ledger`| `BIGINT` | Yes | None | Ledger sequence | Horizon / Inferred | Ledger sequence in which the claim occurred. |
+| `claimed_at` | `TIMESTAMPTZ` | Yes | None | ISO 8601 UTC | Horizon / Inferred | Timestamp balance was claimed or clawed back. |
+| `claimed_ledger`| `BIGINT` | Yes | None | Ledger sequence | Horizon / Inferred | Ledger sequence in which the claim or clawback occurred. |
 | `created_ledger`| `BIGINT` | No | None | Ledger sequence | Horizon | Ledger sequence in which balance was created. |
 | `created_at` | `TIMESTAMPTZ` | No | None | ISO 8601 UTC | Horizon | Creation timestamp. |
 | `network` | `TEXT` | No (PK) | `'mainnet'` | Text name | Internal | Network identifier. |

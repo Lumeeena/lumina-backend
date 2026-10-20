@@ -592,7 +592,11 @@ CREATE TABLE IF NOT EXISTS claimable_balance_claimants (
 );
 
 CREATE INDEX IF NOT EXISTS idx_claimable_balances_status ON claimable_balances (status, network);
-CREATE INDEX IF NOT EXISTS idx_claimable_balances_sponsor ON claimable_balances (sponsor, network);
+-- Page order for claimableBalances(asset:) / (sponsor:); see migrations/020_claimable_balances_listing.sql.
+CREATE INDEX IF NOT EXISTS idx_claimable_balances_asset_page
+    ON claimable_balances (asset, network, created_ledger DESC, balance_id DESC);
+CREATE INDEX IF NOT EXISTS idx_claimable_balances_sponsor_page
+    ON claimable_balances (sponsor, network, created_ledger DESC, balance_id DESC);
 CREATE INDEX IF NOT EXISTS idx_cb_claimants_dest ON claimable_balance_claimants (destination, network);
 
 -- ─── Path Payments (Issue #206) ──────────────────────────────────────────────

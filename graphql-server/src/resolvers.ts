@@ -52,6 +52,7 @@ import { ANONYMOUS_CALLER, type ApiCaller } from './auth';
 import { computeBalanceHistory } from './balanceHistory';
 import { parseAsOfLedger } from './accountHistory';
 import { memoizeRequestQuery } from './requestMemo';
+import { getClaimableBalances } from './claimableBalances';
 
 export interface BaseContext {
   pool: Pool;
@@ -622,6 +623,46 @@ export const resolvers = {
             'FORWARD',
             Boolean(args.cursor),
             totalCount
+          ),
+        };
+      });
+    },
+
+    async claimableBalances(
+      _: unknown,
+      args: {
+        network?: string | null;
+        claimant?: string | null;
+        sponsor?: string | null;
+        asset?: string | null;
+        includeClaimed?: boolean | null;
+        limit?: number;
+        cursor?: string | null;
+      },
+      ctx: Context
+    ) {
+      return memoizeRequestQuery(ctx.queryMemo, 'claimableBalances', args, async () => {
+        const limit = getPageSize(args.limit);
+        const network = networkArgument(args, ctx);
+        const { items, evaluatedAt } = await getClaimableBalances(ctx.pool, {
+          network: network.name,
+          claimant: args.claimant ?? null,
+          sponsor: args.sponsor ?? null,
+          asset: args.asset ?? null,
+          includeClaimed: args.includeClaimed ?? false,
+          limit,
+          cursor: args.cursor ?? null,
+        });
+        return {
+          items,
+          evaluatedAt,
+          pageInfo: pageInfo(
+            KEYSETS.claimableBalances,
+            items,
+            limit,
+            balance => [balance.createdLedger, balance.id],
+            'FORWARD',
+            Boolean(args.cursor)
           ),
         };
       });

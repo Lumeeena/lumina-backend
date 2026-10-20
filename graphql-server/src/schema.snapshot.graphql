@@ -492,6 +492,33 @@ type Query {
     """Opt-in request for total matching count."""
     includeTotalCount: Boolean = false
   ): TradePage!
+
+  """
+  Claimable balances, newest first. Pass `claimant` to answer "what can this
+  account claim": each balance says whether it is claimable right now, with
+  every claimant's predicate evaluated server-side (`claimableNow`) rather
+  than only returned raw. Claimed and clawed-back balances are left out
+  unless `includeClaimed` is true.
+
+  At least one of `claimant`, `sponsor` or `asset` is required.
+  Pass `pageInfo.cursor` back as `cursor` for the next page; see `PageInfo`.
+  """
+  claimableBalances(
+    """Network to read; defaults to the primary network configured for this deployment."""
+    network: Network
+    """Balances this address is a claimant of."""
+    claimant: String
+    """Balances whose reserve this address sponsors."""
+    sponsor: String
+    """Balances of this asset: `"XLM"` or `"CODE:ISSUER"`."""
+    asset: String
+    """Also return balances that have been claimed or clawed back."""
+    includeClaimed: Boolean = false
+    """Maximum page size is 100. Larger limits are rejected."""
+    limit: Int = 20
+    """Opaque cursor from a previous page's `pageInfo`; see `PageInfo`."""
+    cursor: String
+  ): ClaimableBalancePage!
 }
 
 """
@@ -1414,6 +1441,90 @@ A page of trades, ordered by ledger close time descending.
 """
 type TradePage {
   items: [Trade!]!
+  pageInfo: PageInfo!
+}
+
+# ─── Claimable balances (#224) ───────────────────────────────────────────────
+
+"""
+Where a claimable balance stands.
+"""
+enum ClaimableBalanceStatus {
+  """On the ledger and claimable, subject to its claimants' predicates."""
+  UNCLAIMED
+  """Claimed by one of its claimants; no longer on the ledger."""
+  CLAIMED
+  """Taken back by the asset issuer; no longer on the ledger."""
+  CLAWED_BACK
+}
+
+"""
+An amount of an asset set aside for one or more claimants, each of whom can
+take it while their predicate holds.
+"""
+type ClaimableBalance {
+  """Balance id, as Horizon reports it (`00000000...`)."""
+  id: String!
+  """Asset held: `"XLM"` or `"CODE:ISSUER"`."""
+  asset: String!
+  """Amount held, as a decimal string."""
+  amount: String!
+  """Account sponsoring the balance's reserve."""
+  sponsor: String
+  """Where the balance stands."""
+  status: ClaimableBalanceStatus!
+  """
+  Whether the balance can be claimed now (at `ClaimableBalancePage.evaluatedAt`).
+  With a `claimant` filter: by that account. Without one: by any claimant.
+  Always false once claimed or clawed back. Null when a predicate could not
+  be read.
+  """
+  claimableNow: Boolean
+  """Everyone who may claim it, with their predicate evaluated."""
+  claimants: [ClaimableBalanceClaimant!]!
+  """Account that claimed it, when `CLAIMED`."""
+  claimedBy: String
+  """When it was claimed or clawed back (ISO-8601)."""
+  claimedAt: String
+  """Ledger it was claimed or clawed back in."""
+  claimedLedger: Int
+  """Ledger the balance was created in."""
+  createdLedger: Int!
+  """When that ledger closed (ISO-8601). `rel_before` predicates count from here."""
+  createdAt: String!
+}
+
+"""
+One claimant of a claimable balance.
+"""
+type ClaimableBalanceClaimant {
+  """Address that may claim the balance."""
+  destination: String!
+  """
+  The claim predicate, JSON-encoded as Horizon reports it (`unconditional`,
+  `abs_before`, `rel_before`, or `and` / `or` / `not` over nested predicates).
+  """
+  predicate: String!
+  """
+  Whether this claimant can claim now (at `ClaimableBalancePage.evaluatedAt`),
+  with the predicate evaluated server-side. False once the balance is claimed
+  or clawed back; null when the predicate could not be read.
+  """
+  claimableNow: Boolean
+}
+
+"""
+A page of claimable balances, newest first.
+"""
+type ClaimableBalancePage {
+  """The balances on this page."""
+  items: [ClaimableBalance!]!
+  """
+  The instant every `claimableNow` on this page was evaluated at (ISO-8601):
+  the time of the request. The network judges a claim at its ledger's close time.
+  """
+  evaluatedAt: String!
+  """Where to resume; see `PageInfo`."""
   pageInfo: PageInfo!
 }
 
