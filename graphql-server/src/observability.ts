@@ -60,6 +60,11 @@ export function samplePool(pool: Pool): void {
 
 export interface ServerHealthReport {
   status: 'ok' | 'degraded';
+  /**
+   * Service version. A release `v<version>` carries the GraphQL schema this
+   * process serves (docs/API_GUIDE.md "API Versioning").
+   */
+  version?: string;
   uptimeSeconds: number;
   database: 'ok' | 'unreachable';
   listener: 'connected' | 'disconnected' | 'not-configured';
@@ -70,6 +75,7 @@ export interface ServerHealthReport {
 export interface HealthInputs {
   pool: Pool;
   startedAt: number;
+  version?: string;
   listenerConnected?: boolean | null;
   subscriptionCount?: number;
 }
@@ -105,6 +111,7 @@ export async function buildServerHealth(inputs: HealthInputs, now = Date.now()):
 
   return {
     status: checks.every(check => check.ok) ? 'ok' : 'degraded',
+    ...(inputs.version ? { version: inputs.version } : {}),
     uptimeSeconds: Math.round((now - inputs.startedAt) / 1000),
     database,
     listener,

@@ -60,6 +60,7 @@ const CONCURRENT_MIGRATIONS = new Set([
   '015_transactions_listing_covering_index',
   '016_assets_index_review',
   '019_operations_index_review',
+  '020_claimable_balances_listing',
 ]);
 
 /**

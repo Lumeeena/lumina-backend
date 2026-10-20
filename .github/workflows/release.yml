@@ -1,0 +1,60 @@
+name: Release
+
+# Publishes each release with the GraphQL schema it serves attached, so a
+# client pinned to a backend version can fetch the matching schema and
+# regenerate its client reproducibly (issue #267).
+#
+# Cutting a release: bump every package.json to the version, add its CHANGELOG
+# section, merge, then push the tag `v<version>` (docs/RELEASING.md).
+# Re-running for an existing tag (workflow_dispatch) refreshes its assets.
+on:
+  push:
+    tags: ['v[0-9]+.[0-9]+.[0-9]+', 'v[0-9]+.[0-9]+.[0-9]+-*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing release tag to (re)publish, e.g. v1.2.3'
+        type: string
+        required: true
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.event.inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  schema:
+    name: Publish GraphQL schema
+    runs-on: ubuntu-latest
+    env:
+      TAG: ${{ github.event.inputs.tag || github.ref_name }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm ci --workspace @lumina/graphql-server
+      - name: Schema matches the committed snapshot
+        working-directory: graphql-server
+        run: npm run schema:check
+      - name: Build schema artifacts (fails unless the tag matches every package version)
+        working-directory: graphql-server
+        run: npm run schema:release -- "$TAG" "$RUNNER_TEMP/release"
+      - name: Create the release, or refresh its schema assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cd "$RUNNER_TEMP/release"
+          assets=(schema.graphql schema.introspection.json SHA256SUMS)
+          prerelease=()
+          [[ "$TAG" == *-* ]] && prerelease=(--prerelease)
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" "${assets[@]}" --clobber
+          else
+            gh release create "$TAG" "${assets[@]}" --verify-tag --title "$TAG" \
+              --notes-file RELEASE_NOTES.md "${prerelease[@]}"
+          fi

@@ -29,6 +29,11 @@ test('a server that can reach its database is healthy', async () => {
   assert.equal(serverHealthStatusCode(report), 200);
 });
 
+test('health reports the service version, so a client can fetch the matching schema release', async () => {
+  const report = await buildServerHealth({ pool: okPool, startedAt: NOW, version: '1.2.3' }, NOW);
+  assert.equal(report.version, '1.2.3');
+});
+
 test('health issues a real query rather than reporting on process liveness', async () => {
   let queried = false;
   const pool = {

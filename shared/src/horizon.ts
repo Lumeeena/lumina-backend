@@ -60,6 +60,12 @@ export interface HorizonTransaction {
   successful: boolean;
   memo_type: string;
   memo?: string;
+  /**
+   * Sequence number the transaction consumed, as a string (it exceeds 2^53).
+   * With `source_account` and the operation's index it determines a created
+   * claimable balance's id, which Horizon's operation record does not carry.
+   */
+  source_account_sequence?: string;
 }
 
 export interface HorizonOperation {

@@ -253,6 +253,7 @@ async function main() {
     buildServerHealth({
       pool,
       startedAt,
+      version: VERSION,
       listenerConnected: notifier.connected,
       subscriptionCount: notifier.subscriberCount,
     })
