@@ -313,7 +313,7 @@ were added for a feature whose query cannot use them:
 | `idx_operations_details` (GIN) | nothing queries `details` with containment (`@>`); every JSONB predicate is `->>` |
 | `idx_custom_events_fields` (GIN) | same: the filters are `fields->>'x' = $1`, which `jsonb_ops` cannot serve |
 | `idx_events_topics` (GIN) | the one query that could use it (`ev.topic`) prefers `idx_events_ledger`, which finds 20 rows in 241 |
-| `idx_transactions_created_at`, `idx_operations_created_at`, `idx_events_created_at`, `idx_ledgers_closed_at` | no application query orders by `created_at`/`closed_at`; they may serve operational queries outside this repository, which is why removing them is a separate decision from the four above |
+| `idx_transactions_created_at`, `idx_operations_created_at`, `idx_events_created_at`, `idx_ledgers_closed_at` | no application query orders by `created_at`/`closed_at`. `idx_ledgers_closed_at` serves the retention prune, not the API; that decision is measured in [LEDGERS_INDEX_REVIEW.md](LEDGERS_INDEX_REVIEW.md). Removing the others is a separate decision from the four above |
 
 ## Secondary observations
 

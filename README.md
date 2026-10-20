@@ -272,6 +272,22 @@ listing index. Replay WAL fell by 17%, and a testnet listing page went from
 1,819 buffers to 65. The measurements and the table's growth are in
 [docs/ASSETS_INDEX_REVIEW.md](docs/ASSETS_INDEX_REVIEW.md).
 
+`ledgers` is append-only: one row per closed ledger, written once per five
+seconds and read through the primary key. Its audit is SQL-only because the
+question is which index the existing queries choose, not a write replay:
+
+```bash
+psql "$DATABASE_URL" -f db/audit/ledgers.sql
+```
+
+The review found the primary key serving every API read and
+`idx_ledgers_closed_at` serving only the retention prune. It also found
+`indexerStatus` scanning the whole table to compute `MAX(indexed_at)`; that
+query now reads the tip row directly (734 ms → 0.1 ms at 2.5M rows). The
+measurements, the multi-network index that was measured and rejected, and the
+growth/retention numbers are in
+[docs/LEDGERS_INDEX_REVIEW.md](docs/LEDGERS_INDEX_REVIEW.md).
+
 ## Run with Docker
 
 ```bash

@@ -98,7 +98,7 @@ pruning code:
 
 | Table                        | Prunable | Why not                                                    |
 | ---------------------------- | -------- | ---------------------------------------------------------- |
-| `ledgers`                    | yes      |                                                              |
+| `ledgers`                    | yes      | One row per closed ledger, about 17,280/day per network. Growth and the `closed_at` index are measured in [LEDGERS_INDEX_REVIEW.md](LEDGERS_INDEX_REVIEW.md#growth). |
 | `transactions`               | yes      |                                                              |
 | `operations`                 | yes      | The fastest-growing table in the schema                     |
 | `contract_events`            | yes      |                                                              |

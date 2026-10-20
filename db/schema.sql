@@ -27,6 +27,11 @@ CREATE TABLE IF NOT EXISTS ledgers (
     CONSTRAINT ledgers_operation_count_check   CHECK (operation_count >= 0)
 );
 
+-- Serves the retention prune (`closed_at < cutoff`), not an API query. The
+-- ledger listing orders by sequence and uses the primary key, so this index has
+-- zero scans until retention is enabled; it is kept because after a backfill or
+-- reindex the prune cannot rely on physical order. See
+-- docs/LEDGERS_INDEX_REVIEW.md.
 CREATE INDEX idx_ledgers_closed_at ON ledgers (closed_at DESC);
 
 -- ─── Transactions ─────────────────────────────────────────────────────────────

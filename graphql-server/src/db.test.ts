@@ -6,6 +6,7 @@ import {
   getAccountFromDb,
   getAccounts,
   getEventsByContract,
+  getIndexedTip,
   getLedgers,
   getOperations,
   getTransactions,
@@ -301,6 +302,19 @@ test('getLedgers rejects a cursor it could not have issued', async () => {
     (err: unknown) => err instanceof InvalidCursorError
   );
   assert.equal(queries.length, 0);
+});
+
+test('getIndexedTip reads the tip row instead of aggregating the table', async () => {
+  const { pool, queries } = fakePool([
+    { sequence: '900', indexed_at: new Date('2026-05-06T10:22:14Z') },
+  ]);
+
+  const tip = await getIndexedTip(pool, 'mainnet');
+
+  assert.deepEqual(tip, { sequence: 900, indexedAt: '2026-05-06T10:22:14.000Z' });
+  assert.match(queries[0]?.sql ?? '', /SELECT sequence, indexed_at FROM ledgers WHERE network = \$1 ORDER BY sequence DESC LIMIT 1/);
+  assert.doesNotMatch(queries[0]?.sql ?? '', /MAX\(/);
+  assert.deepEqual(queries[0]?.params, ['mainnet']);
 });
 
 // ── Accounts listing ─────────────────────────────────────────────────────────

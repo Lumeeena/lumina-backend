@@ -535,13 +535,20 @@ export async function getLatestLedgerFromDb(pool: Pool, network: string) {
  * The indexed tip for one network: the highest ledger it has written and when
  * that write happened. `indexerStatus` reports it against Horizon's tip to say
  * how stale the data is — the read that question needs, in one round trip.
+ *
+ * Read the tip row rather than aggregating `MAX(sequence), MAX(indexed_at)`.
+ * The aggregate cannot use the primary key: `MAX(indexed_at)` has no index and
+ * makes the planner scan the whole table on every call, which at 2.5M ledgers
+ * measured a 734 ms parallel sequential scan. The tip row is also the correct
+ * definition of "when that write happened" — a backfill writing an old ledger
+ * updates `indexed_at`, and the two maxima need not belong to the same row.
  */
 export async function getIndexedTip(
   pool: Pool,
   network: string
 ): Promise<{ sequence: number | null; indexedAt: string | null }> {
   const { rows } = await pool.query<{ sequence: string | null; indexed_at: Date | null }>(
-    'SELECT MAX(sequence) AS sequence, MAX(indexed_at) AS indexed_at FROM ledgers WHERE network = $1',
+    'SELECT sequence, indexed_at FROM ledgers WHERE network = $1 ORDER BY sequence DESC LIMIT 1',
     [network]
   );
   const row = rows[0];
