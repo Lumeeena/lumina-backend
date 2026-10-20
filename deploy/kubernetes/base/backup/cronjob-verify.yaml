@@ -1,0 +1,82 @@
+# Weekly restore test: downloads the newest complete backup, restores it into a
+# throwaway Postgres inside the job's own pod, and fails unless every table's
+# row count matches the manifest written in the dump's snapshot. A backup that
+# has never been restored is not known to be one. See docs/BACKUPS.md.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: lumina-backup-verify
+  labels:
+    app.kubernetes.io/name: lumina-backup
+    app.kubernetes.io/component: backup-verify
+spec:
+  # Sundays, two hours after that day's backup.
+  schedule: "0 4 * * 0"
+  timeZone: Etc/UTC
+  concurrencyPolicy: Forbid
+  startingDeadlineSeconds: 3600
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      # A failed verification is a finding, not a flake to retry away.
+      backoffLimit: 0
+      activeDeadlineSeconds: 21600
+      template:
+        metadata:
+          labels:
+            app.kubernetes.io/name: lumina-backup
+            app.kubernetes.io/component: backup-verify
+        spec:
+          restartPolicy: Never
+          serviceAccountName: lumina-backup
+          automountServiceAccountToken: false
+          enableServiceLinks: false
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 70
+            runAsGroup: 70
+            fsGroup: 70
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+            - name: verify
+              image: lumina-backup
+              args: ["verify"]
+              envFrom:
+                - configMapRef:
+                    name: lumina-backup
+              # The restore is CPU-bound in index builds and runs pg_restore
+              # with one job per CPU the container sees, so CPU here is restore
+              # time saved; see the measured timings in docs/DISASTER_RECOVERY.md.
+              resources:
+                requests:
+                  cpu: "1"
+                  memory: 1Gi
+                limits:
+                  cpu: "4"
+                  memory: 4Gi
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop: ["ALL"]
+              volumeMounts:
+                - name: work
+                  mountPath: /work
+                # The scratch cluster's shared memory; the default 64Mi /dev/shm
+                # is too small for parallel index builds.
+                - name: dshm
+                  mountPath: /dev/shm
+          volumes:
+            # Holds the downloaded dump and the restored cluster: roughly the
+            # archive size plus the live database size. Size from the figures
+            # in docs/DISASTER_RECOVERY.md; a large database wants a generic
+            # ephemeral volume (PVC template) here instead of node disk.
+            - name: work
+              emptyDir:
+                sizeLimit: 50Gi
+            - name: dshm
+              emptyDir:
+                medium: Memory
+                sizeLimit: 512Mi

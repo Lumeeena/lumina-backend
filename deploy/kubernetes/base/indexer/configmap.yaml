@@ -1,0 +1,28 @@
+# Non-secret indexer configuration. Every variable is described in the README's
+# indexer environment-variable table; only the ones a cluster needs to think
+# about are set here.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: lumina-indexer
+  labels:
+    app.kubernetes.io/name: lumina-indexer
+    app.kubernetes.io/component: indexer
+data:
+  # Host, database and the least-privilege indexer role (docs/DATABASE_ROLES.md),
+  # but no password: that is read from DATABASE_PASSWORD_FILE, mounted from the
+  # lumina-indexer-db Secret. See docs/SECRETS.md.
+  DATABASE_URL: postgresql://lumina_indexer@postgres:5432/lumina
+  DATABASE_PASSWORD_FILE: /var/run/secrets/lumina/database/password
+  HORIZON_URL: https://horizon.stellar.org
+  POLL_INTERVAL_MS: "5000"
+  # Public Horizon's sustained per-IP limit is well below what a burst-only
+  # throttle allows; see the comment on the same setting in docker-compose.yml.
+  HORIZON_MIN_REQUEST_INTERVAL_MS: "1000"
+  HEALTH_PORT: "9090"
+  DB_POOL_MAX: "10"
+  LOG_LEVEL: info
+  # Keeps V8's heap below the container memory limit (512Mi), leaving room for
+  # buffers and native allocations, so pressure shows up as GC rather than an
+  # OOM kill.
+  NODE_OPTIONS: --max-old-space-size=384

@@ -30,10 +30,11 @@
  * Reads DATABASE_URL from the environment.
  */
 import { readFileSync } from 'fs';
+import { resolveDatabaseUrl } from '@lumina/shared';
 import { createPool, deleteContractSchema, loadContractSchemas, upsertContractSchema } from './db';
 import { parseContractSchema, SchemaValidationError } from './customSchema';
 
-const DATABASE_URL = process.env['DATABASE_URL'] ?? 'postgresql://localhost:5432/lumina';
+const DATABASE_URL = resolveDatabaseUrl() ?? 'postgresql://localhost:5432/lumina';
 
 function usage(): never {
   console.error(

@@ -1,0 +1,9 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: lumina
+  labels:
+    # Every workload here runs non-root, read-only, with no capabilities, so
+    # the strictest Pod Security Standard can be enforced rather than audited.
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest

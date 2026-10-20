@@ -20,6 +20,7 @@
  * docs/DATABASE_ROLES.md.
  */
 import { Pool } from 'pg';
+import { resolveDatabaseUrl } from '@lumina/shared';
 import {
   createApiKey,
   listApiKeys,
@@ -29,7 +30,7 @@ import {
   setApiKeyExportPermission,
 } from './keys';
 
-const DATABASE_URL = process.env.DATABASE_URL ?? 'postgresql://localhost:5432/lumina';
+const DATABASE_URL = resolveDatabaseUrl() ?? 'postgresql://localhost:5432/lumina';
 
 function usage(): never {
   console.error(

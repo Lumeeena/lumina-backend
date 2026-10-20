@@ -1,0 +1,133 @@
+# The indexer is a single writer, and that is a deployment constraint, not a
+# convention.
+#
+# Each polling loop keeps its cursor in memory and walks ledgers in order. Two
+# indexers against one database would each walk the same ledgers, double the
+# Horizon request rate against a per-IP limit the system is already paced for,
+# race each other's account refreshes and retention prunes, and emit every
+# NOTIFY twice — the inserts survive only because they are idempotent, nothing
+# else is designed for it. See docs/INDEXER_CONTROL_FLOW.md and
+# docs/INDEXING_GUARANTEES.md.
+#
+# Three layers keep it at one:
+#
+# 1. A StatefulSet, not a Deployment. A Deployment's ReplicaSet creates a
+#    replacement as soon as a pod starts terminating — even with the Recreate
+#    strategy — so for a moment there are two. The Kubernetes docs point to a
+#    StatefulSet for an "at most one" guarantee: lumina-indexer-0 is not
+#    recreated until the old lumina-indexer-0 is gone.
+# 2. replicas: 1 here, and no HorizontalPodAutoscaler anywhere.
+# 3. The ValidatingAdmissionPolicy in ../policy/indexer-single-replica.yaml,
+#    which rejects any change that sets replicas above 1 — `kubectl scale`, an
+#    edited manifest, an autoscaler — at the API server.
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: lumina-indexer
+  labels:
+    app.kubernetes.io/name: lumina-indexer
+    app.kubernetes.io/component: indexer
+spec:
+  serviceName: lumina-indexer
+  replicas: 1
+  podManagementPolicy: OrderedReady
+  updateStrategy:
+    type: RollingUpdate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: lumina-indexer
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: lumina-indexer
+        app.kubernetes.io/component: indexer
+    spec:
+      serviceAccountName: lumina-indexer
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      # The indexer finishes its in-flight ledger and exits within 10s of
+      # SIGTERM (indexer/src/index.ts, `shutdown`); this leaves headroom.
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000 # `node` in node:20-alpine
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: indexer
+          image: lumina-indexer
+          envFrom:
+            - configMapRef:
+                name: lumina-indexer
+          ports:
+            - name: http-metrics
+              containerPort: 9090
+          # Probes, and why each points where it does:
+          #
+          # startupProbe — /live answers as soon as the HTTP server is up, but
+          #   VALIDATE_SCHEMA_ON_STARTUP runs before that; five minutes covers it.
+          # livenessProbe — /live fails only when the loop has stopped making
+          #   progress (no ledger indexed in HEALTH_MAX_SECONDS_SINCE_INDEX, or
+          #   never within HEALTH_START_TOLERANCE_SECONDS). It ignores lag and
+          #   the database: after a restore the indexer is legitimately far
+          #   behind while it catches up, and a lag-based liveness probe would
+          #   restart it in a loop and throw that catch-up away.
+          # readinessProbe — /ready is the strict check (database reachable,
+          #   lag within HEALTH_MAX_LAG_LEDGERS). Nothing routes traffic to the
+          #   indexer, so "ready" here reads as "caught up" in `kubectl get`.
+          startupProbe:
+            httpGet:
+              path: /live
+              port: http-metrics
+            periodSeconds: 5
+            failureThreshold: 60
+          livenessProbe:
+            httpGet:
+              path: /live
+              port: http-metrics
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: http-metrics
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          # Requests sized from the indexer's steady state against mainnet
+          # (one network, public Horizon pacing); the memory limit is what
+          # NODE_OPTIONS' heap ceiling is set against.
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: "1"
+              memory: 512Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: database-credentials
+              mountPath: /var/run/secrets/lumina/database
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        # Only this pod's own password, as a file. Not an environment variable:
+        # see docs/SECRETS.md.
+        - name: database-credentials
+          secret:
+            secretName: lumina-indexer-db
+            defaultMode: 0440
+            items:
+              - key: password
+                path: password
+        - name: tmp
+          emptyDir:
+            sizeLimit: 64Mi

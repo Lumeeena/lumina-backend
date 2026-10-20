@@ -5,6 +5,7 @@
  * Invalid values cause the process to exit immediately with a clear error message.
  */
 
+import { resolveDatabaseUrl } from '@lumina/shared';
 import { subsystem } from './logger';
 import { retentionWindowConflicts, RETENTION_TABLES, unlimitedRetentionWindows, type RetentionWindows } from './retention';
 
@@ -152,6 +153,19 @@ function stringWithDefault(name: string, defaultValue: string): string {
 }
 
 /**
+ * The database URL from `DATABASE_URL_FILE`, `DATABASE_URL` and
+ * `DATABASE_PASSWORD_FILE`; see docs/SECRETS.md.
+ */
+function databaseUrlWithDefault(defaultValue: string): string {
+  try {
+    return resolveDatabaseUrl('DATABASE_URL') ?? defaultValue;
+  } catch (err) {
+    log.fatal(`Configuration error: ${err instanceof Error ? err.message : String(err)}`);
+    process.exit(1);
+  }
+}
+
+/**
  * Redacts the password from a database URL for logging.
  */
 function redactDatabaseUrl(url: string): string {
@@ -206,7 +220,7 @@ export function loadConfig(): Config {
     horizonMinRequestIntervalMs: intWithDefault('HORIZON_MIN_REQUEST_INTERVAL_MS', 100, 1),
     horizonMaxRequestIntervalMs: intWithDefault('HORIZON_MAX_REQUEST_INTERVAL_MS', 10000, 1),
     horizonTipWeightFactor: intWithDefault('HORIZON_TIP_WEIGHT_FACTOR', 2, 1),
-    databaseUrl: stringWithDefault('DATABASE_URL', 'postgresql://localhost:5432/lumina'),
+    databaseUrl: databaseUrlWithDefault('postgresql://localhost:5432/lumina'),
     pollIntervalMs: intWithDefault('POLL_INTERVAL_MS', 5000, 100),
     startLedger: optionalInt('START_LEDGER', 1),
     backfillStartLedger: optionalInt('BACKFILL_START_LEDGER', 1),

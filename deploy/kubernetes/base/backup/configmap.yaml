@@ -1,0 +1,41 @@
+# Backup configuration; every variable is described in docs/BACKUPS.md.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: lumina-backup
+  labels:
+    app.kubernetes.io/name: lumina-backup
+    app.kubernetes.io/component: backup
+data:
+  # A dedicated role holding pg_read_all_data (db/backup/backup_role.sql):
+  # pg_dump needs to read every table, which neither service role can.
+  BACKUP_DATABASE_URL: postgresql://lumina_backup@postgres:5432/lumina
+  BACKUP_DATABASE_PASSWORD_FILE: /var/run/secrets/lumina/database/password
+
+  # Any rclone destination. This one is an S3 bucket reached with the pod's own
+  # cloud identity (env_auth: the AWS SDK chain, so IRSA / Pod Identity work
+  # with no keys). For GCS, Azure or an S3-compatible store, change the
+  # RCLONE_CONFIG_S3_* remote — see docs/BACKUPS.md.
+  BACKUP_DESTINATION: s3:lumina-backups/postgres
+  RCLONE_CONFIG_S3_TYPE: s3
+  RCLONE_CONFIG_S3_PROVIDER: AWS
+  RCLONE_CONFIG_S3_ENV_AUTH: "true"
+  RCLONE_CONFIG_S3_REGION: us-east-1
+  # Server-side encryption on every object, and never create the bucket: a
+  # missing bucket is a misconfiguration to fail on, not something to paper over.
+  RCLONE_CONFIG_S3_SERVER_SIDE_ENCRYPTION: AES256
+  RCLONE_CONFIG_S3_NO_CHECK_BUCKET: "true"
+
+  BACKUP_RETENTION_DAYS: "14"
+  BACKUP_RETENTION_MIN_COUNT: "3"
+  # One day's schedule plus a day of grace: a verify run against a backup older
+  # than this fails, so a backup job that silently stopped is caught too.
+  BACKUP_VERIFY_MAX_AGE_HOURS: "48"
+
+  # Metrics for docker/observability/alerts.yml (lumina-backups group).
+  PUSHGATEWAY_URL: http://pushgateway.monitoring.svc:9091
+  BACKUP_INSTANCE: lumina
+
+  # The root filesystem is read-only; rclone and initdb get /work instead.
+  HOME: /work
+  BACKUP_WORK_DIR: /work

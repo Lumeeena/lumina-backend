@@ -1,0 +1,20 @@
+# Non-secret GraphQL server configuration. Every variable is described in the
+# README's GraphQL server environment-variable table.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: lumina-graphql
+  labels:
+    app.kubernetes.io/name: lumina-graphql
+    app.kubernetes.io/component: api
+data:
+  # The read-only role (docs/DATABASE_ROLES.md), without its password; that is
+  # read from DATABASE_PASSWORD_FILE. See docs/SECRETS.md.
+  DATABASE_URL: postgresql://lumina_graphql@postgres:5432/lumina
+  DATABASE_PASSWORD_FILE: /var/run/secrets/lumina/database/password
+  PORT: "4000"
+  # Size against Postgres max_connections: replicas x DB_POOL_MAX, plus the
+  # indexer's pool and the LISTEN connection each replica holds.
+  DB_POOL_MAX: "10"
+  LOG_LEVEL: info
+  NODE_OPTIONS: --max-old-space-size=384
