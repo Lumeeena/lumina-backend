@@ -318,53 +318,55 @@ test('asset query returns supply, holders and a matching volume series', { skip,
   }
 });
 
-test('claimableBalances evaluates claimability and hides claimed balances unless asked', { skip, timeout: TEST_TIMEOUT_MS }, async () => {
-  const claimant = 'GCLAIMABLE_INTEGRATION_CLAIMANT';
-  const ids = ['00000000cb_it_open', '00000000cb_it_later', '00000000cb_it_claimed'];
-  const insert = async (id: string, ledger: number, predicate: object, status = 'unclaimed') => {
-    const claimants = [{ destination: claimant, predicate }];
-    await pool.query(
-      `INSERT INTO claimable_balances (balance_id, asset, amount, sponsor, claimants, status, created_ledger, created_at, network)
-       VALUES ($1, 'native', 5, 'GCLAIMABLE_INTEGRATION_SPONSOR', $2, $3, $4, NOW(), 'mainnet')`,
-      [id, JSON.stringify(claimants), status, ledger]
+test('effects query filters by account and type and pages by (ledger, id)', { skip, timeout: TEST_TIMEOUT_MS }, async () => {
+  const account = 'GEFFECTS_INTEGRATION_ACCOUNT';
+  const other = 'GEFFECTS_INTEGRATION_OTHER';
+  const insert = (id: string, ledger: number, effectAccount: string, type: string, typeI: number, details: object, network = 'mainnet') =>
+    pool.query(
+      `INSERT INTO effects (id, paging_token, operation_id, ledger, account, type, type_i, created_at, details, network)
+       VALUES ($1, $1, split_part($1, '-', 1), $2, $3, $4, $5, NOW(), $6, $7)`,
+      [id, ledger, effectAccount, type, typeI, JSON.stringify(details), network]
     );
-    await pool.query(
-      `INSERT INTO claimable_balance_claimants (balance_id, destination, predicate_details, network)
-       VALUES ($1, $2, $3, 'mainnet')`,
-      [id, claimant, JSON.stringify(predicate)]
-    );
-  };
-  const clean = async () => {
-    await pool.query('DELETE FROM claimable_balance_claimants WHERE balance_id = ANY($1)', [ids]);
-    await pool.query('DELETE FROM claimable_balances WHERE balance_id = ANY($1)', [ids]);
-  };
+  const clean = () => pool.query('DELETE FROM effects WHERE account IN ($1, $2)', [account, other]);
 
   await clean();
   try {
-    await insert(ids[0]!, 9, { unconditional: true });
-    await insert(ids[1]!, 10, { not: { abs_before: '2099-01-01T00:00:00Z' } });
-    await insert(ids[2]!, 8, { unconditional: true }, 'claimed');
+    // Two ledgers; the id orders effects within one. Ledger 9 sorts before 10
+    // numerically, which a text comparison would get wrong.
+    await insert('0000000038654705665-0000000001', 9, account, 'account_credited', 2, { amount: '1.0000000', asset_type: 'native' });
+    await insert('0000000042949672961-0000000001', 10, account, 'account_debited', 3, { amount: '2.0000000', asset_type: 'native' });
+    await insert('0000000042949672961-0000000002', 10, account, 'trade', 33, {
+      seller: other, offer_id: '7', sold_amount: '2.0000000', sold_asset_type: 'native',
+      bought_amount: '1.0000000', bought_asset_type: 'credit_alphanum4', bought_asset_code: 'USDC', bought_asset_issuer: ISSUER,
+    });
+    await insert('0000000042949672961-0000000003', 10, other, 'account_credited', 2, { amount: '2.0000000', asset_type: 'native' });
+    await insert('0000000042949672961-0000000004', 10, account, 'account_credited', 2, { amount: '5.0000000', asset_type: 'native' }, 'testnet');
 
-    const open = await resolvers.Query.claimableBalances(undefined, { claimant, limit: 1 }, createContext(pool));
-    assert.deepEqual(open.items.map(b => [b.id, b.claimableNow]), [[ids[1], false]]);
-    assert.equal(open.pageInfo.hasNextPage, true);
-
-    const next = await resolvers.Query.claimableBalances(undefined, { claimant, limit: 1, cursor: open.pageInfo.cursor }, createContext(pool));
-    assert.deepEqual(next.items.map(b => [b.id, b.claimableNow, b.asset]), [[ids[0], true, 'XLM']]);
-
-    const all = await resolvers.Query.claimableBalances(undefined, { claimant, includeClaimed: true }, createContext(pool));
-    assert.deepEqual(all.items.map(b => [b.id, b.status, b.claimableNow]), [
-      [ids[1], 'UNCLAIMED', false],
-      [ids[0], 'UNCLAIMED', true],
-      [ids[2], 'CLAIMED', false],
+    const ctx = createContext(pool);
+    const first = await resolvers.Query.effects(undefined, { account, limit: 2 }, ctx);
+    assert.deepEqual(first.items.map(effect => effect.id), [
+      '0000000042949672961-0000000002',
+      '0000000042949672961-0000000001',
     ]);
+    assert.equal(first.pageInfo.hasNextPage, true);
+    assert.deepEqual(first.items[0].details, {
+      __typename: 'TradeEffectDetails',
+      seller: other,
+      offerId: '7',
+      soldAmount: '2.0000000',
+      soldAsset: 'XLM',
+      boughtAmount: '1.0000000',
+      boughtAsset: `USDC:${ISSUER}`,
+    });
 
-    const bySponsorAndAsset = await resolvers.Query.claimableBalances(
-      undefined,
-      { sponsor: 'GCLAIMABLE_INTEGRATION_SPONSOR', asset: 'XLM' },
-      createContext(pool)
-    );
-    assert.deepEqual(bySponsorAndAsset.items.map(b => b.id), [ids[1], ids[0]]);
+    const second = await resolvers.Query.effects(undefined, { account, limit: 2, cursor: first.pageInfo.cursor }, createContext(pool));
+    assert.deepEqual(second.items.map(effect => effect.id), ['0000000038654705665-0000000001']);
+    assert.equal(second.pageInfo.hasNextPage, false);
+
+    const credited = await resolvers.Query.effects(undefined, { account, type: 'ACCOUNT_CREDITED' }, createContext(pool));
+    assert.deepEqual(credited.items.map(effect => [effect.id, effect.type, effect.ledger]), [
+      ['0000000038654705665-0000000001', 'account_credited', 9],
+    ]);
   } finally {
     await clean();
   }

@@ -22,7 +22,7 @@ test('loads migrations in order and expands initial schema include', () => {
     '015_operation_decoding', '015_retry_queue_network_index', '015_transactions_listing_covering_index',
     '016_assets_index_review', '016_event_transaction_context', '017_account_state_history',
     '017_signers_sponsorship_contracts_rollups', '018_dead_letters_and_cursors',
-    '019_operations_index_review', '020_claimable_balances_listing',
+    '019_operations_index_review', '020_effects',
   ]);
   assert.match(migrations[0].sql, /CREATE TABLE IF NOT EXISTS ledgers/);
   assert.match(migrations[0].sql, /PRIMARY KEY \(id, network\)/);

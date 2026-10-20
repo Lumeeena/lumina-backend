@@ -967,3 +967,30 @@ CREATE INDEX IF NOT EXISTS idx_activity_rollups_range
 COMMENT ON TABLE activity_rollups IS
   'Rolled-up activity aggregates for network statistics (#228, #229). '
   'Updated as ledgers are indexed; read by networkStats and activityRollups queries.';
+
+-- Horizon effects, read by the `effects` GraphQL query (#225); populated by the
+-- indexer (#203). See migrations/020_effects.sql for the column notes.
+CREATE TABLE IF NOT EXISTS effects (
+    id            TEXT NOT NULL,
+    paging_token  TEXT NOT NULL,
+    operation_id  TEXT NOT NULL,
+    ledger        BIGINT NOT NULL,
+    account       TEXT NOT NULL,
+    type          TEXT NOT NULL,
+    type_i        INTEGER NOT NULL,
+    created_at    TIMESTAMPTZ NOT NULL,
+    details       JSONB NOT NULL DEFAULT '{}'::jsonb,
+    network       TEXT NOT NULL DEFAULT 'mainnet',
+    indexed_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (id, network),
+    CONSTRAINT effects_id_check   CHECK (id <> ''),
+    CONSTRAINT effects_type_check CHECK (type <> '')
+);
+
+-- effects(account): one account's feed, newest first, resumed by (ledger, id).
+CREATE INDEX IF NOT EXISTS idx_effects_account
+    ON effects (account, network, ledger DESC, id DESC);
+
+-- effects(account, type): the same feed narrowed to one effect type.
+CREATE INDEX IF NOT EXISTS idx_effects_account_type
+    ON effects (account, type, network, ledger DESC, id DESC);

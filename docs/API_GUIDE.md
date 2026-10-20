@@ -325,37 +325,50 @@ query ListOperations($account: String, $type: OperationType, $asset: String) {
 
 The asset filter matches operations where the asset appears as a payment asset or either side of a trade.
 
-### What can this account claim?
+### Build an account activity feed from effects
 
-`claimableBalances(claimant:)` returns the balances an account is a claimant
-of, newest first. Predicates are evaluated server-side, at the time of the
-request (`evaluatedAt`): `claimableNow` says whether the account can claim the
-balance right now, and each claimant's own `claimableNow` sits beside the raw
-`predicate`. Claimed and clawed-back balances are left out unless
-`includeClaimed: true`.
+`effects` returns what each operation did to one account, newest first. Each
+effect's `details` is typed by its effect type, so select the members you
+render with inline fragments; types with no fields of their own have
+`details: null`, and a type newer than the server comes through as
+`UnrecognizedEffectDetails` with Horizon's raw JSON.
 
 ```graphql
-query Claimable($account: String!, $cursor: String) {
-  claimableBalances(claimant: $account, limit: 20, cursor: $cursor) {
-    evaluatedAt
+query ActivityFeed($account: String!, $cursor: String) {
+  effects(account: $account, limit: 20, cursor: $cursor) {
     items {
       id
-      asset
-      amount
-      sponsor
-      claimableNow
-      claimants { destination predicate claimableNow }
+      type
+      createdAt
+      operationId
+      details {
+        __typename
+        ... on AccountBalanceEffectDetails { amount asset }
+        ... on TradeEffectDetails { soldAmount soldAsset boughtAmount boughtAsset }
+        ... on TrustlineEffectDetails { asset limit }
+        ... on SignerEffectDetails { publicKey weight }
+        ... on UnrecognizedEffectDetails { raw }
+      }
     }
     pageInfo { hasNextPage cursor }
   }
 }
 ```
 
-Filter by `sponsor` or `asset` (`"XLM"` or `"CODE:ISSUER"`) as well, or
-instead; at least one of `claimant`, `sponsor` and `asset` is required.
-A predicate the server cannot read gives `claimableNow: null` rather than a
-guess. The network judges a claim at its ledger's close time, so a balance
-whose deadline is seconds away may be claimable here and expired on chain.
+Narrow to one type with `type`, e.g. only incoming payments:
+
+```graphql
+{
+  effects(account: "GA...", type: ACCOUNT_CREDITED) {
+    items { createdAt details { ... on AccountBalanceEffectDetails { amount asset } } }
+    pageInfo { hasNextPage cursor }
+  }
+}
+```
+
+Pass `pageInfo.cursor` back as `cursor` for the next page (see
+[Pagination](#pagination)). `account` is required: effects are read per
+account, through the `(account, network, ledger, id)` index.
 
 ### Fetch asset detail with supply and volume series
 

@@ -494,31 +494,26 @@ type Query {
   ): TradePage!
 
   """
-  Claimable balances, newest first. Pass `claimant` to answer "what can this
-  account claim": each balance says whether it is claimable right now, with
-  every claimant's predicate evaluated server-side (`claimableNow`) rather
-  than only returned raw. Claimed and clawed-back balances are left out
-  unless `includeClaimed` is true.
+  Effects on one account, newest first: what each operation actually did to
+  it (credited, debited, trustline created, signer added, ...). One operation
+  can produce several effects, on several accounts, which makes this the
+  basis for an account activity feed. Populated from Horizon's /effects.
 
-  At least one of `claimant`, `sponsor` or `asset` is required.
+  Each effect's `details` is typed by its effect type; see `EffectDetails`.
   Pass `pageInfo.cursor` back as `cursor` for the next page; see `PageInfo`.
   """
-  claimableBalances(
+  effects(
     """Network to read; defaults to the primary network configured for this deployment."""
     network: Network
-    """Balances this address is a claimant of."""
-    claimant: String
-    """Balances whose reserve this address sponsors."""
-    sponsor: String
-    """Balances of this asset: `"XLM"` or `"CODE:ISSUER"`."""
-    asset: String
-    """Also return balances that have been claimed or clawed back."""
-    includeClaimed: Boolean = false
+    """Address whose effects to return."""
+    account: String!
+    """Only effects of this type."""
+    type: EffectType
     """Maximum page size is 100. Larger limits are rejected."""
     limit: Int = 20
     """Opaque cursor from a previous page's `pageInfo`; see `PageInfo`."""
     cursor: String
-  ): ClaimableBalancePage!
+  ): EffectPage!
 }
 
 """
@@ -1444,88 +1439,399 @@ type TradePage {
   pageInfo: PageInfo!
 }
 
-# ─── Claimable balances (#224) ───────────────────────────────────────────────
+# ─── Effects (#225) ──────────────────────────────────────────────────────────
 
 """
-Where a claimable balance stands.
-"""
-enum ClaimableBalanceStatus {
-  """On the ledger and claimable, subject to its claimants' predicates."""
-  UNCLAIMED
-  """Claimed by one of its claimants; no longer on the ledger."""
-  CLAIMED
-  """Taken back by the asset issuer; no longer on the ledger."""
-  CLAWED_BACK
-}
+One change an operation made to one account, as Horizon's /effects reports it.
 
+Amounts are decimal strings and assets are one string, `"XLM"` for native or
+`"CODE:ISSUER"`, the same conventions as `Operation`.
 """
-An amount of an asset set aside for one or more claimants, each of whom can
-take it while their predicate holds.
-"""
-type ClaimableBalance {
-  """Balance id, as Horizon reports it (`00000000...`)."""
+type Effect {
+  """Horizon's effect id, `<operation id>-<order>`; unique within its network."""
   id: String!
-  """Asset held: `"XLM"` or `"CODE:ISSUER"`."""
-  asset: String!
-  """Amount held, as a decimal string."""
-  amount: String!
-  """Account sponsoring the balance's reserve."""
-  sponsor: String
-  """Where the balance stands."""
-  status: ClaimableBalanceStatus!
+  """Horizon's paging token for this effect."""
+  pagingToken: String!
+  """Account the effect happened to."""
+  account: String!
   """
-  Whether the balance can be claimed now (at `ClaimableBalancePage.evaluatedAt`).
-  With a `claimant` filter: by that account. Without one: by any claimant.
-  Always false once claimed or clawed back. Null when a predicate could not
-  be read.
+  Horizon's effect type name, e.g. `account_credited`. A plain string rather
+  than `EffectType` so a type newer than this server still comes through;
+  filter with `effects(type:)`.
   """
-  claimableNow: Boolean
-  """Everyone who may claim it, with their predicate evaluated."""
-  claimants: [ClaimableBalanceClaimant!]!
-  """Account that claimed it, when `CLAIMED`."""
-  claimedBy: String
-  """When it was claimed or clawed back (ISO-8601)."""
-  claimedAt: String
-  """Ledger it was claimed or clawed back in."""
-  claimedLedger: Int
-  """Ledger the balance was created in."""
-  createdLedger: Int!
-  """When that ledger closed (ISO-8601). `rel_before` predicates count from here."""
+  type: String!
+  """Horizon's numeric code for `type`."""
+  typeId: Int!
+  """The operation that produced this effect."""
+  operationId: String!
+  """Ledger the operation closed in."""
+  ledger: Int!
+  """When that ledger closed (ISO-8601)."""
   createdAt: String!
+  """
+  The type-specific fields, typed per effect type. Null for the types Horizon
+  gives no fields of their own: `account_removed`,
+  `account_inflation_destination_updated` and the `offer_*` types.
+  """
+  details: EffectDetails
 }
 
 """
-One claimant of a claimable balance.
+A page of effects, newest first.
 """
-type ClaimableBalanceClaimant {
-  """Address that may claim the balance."""
-  destination: String!
-  """
-  The claim predicate, JSON-encoded as Horizon reports it (`unconditional`,
-  `abs_before`, `rel_before`, or `and` / `or` / `not` over nested predicates).
-  """
-  predicate: String!
-  """
-  Whether this claimant can claim now (at `ClaimableBalancePage.evaluatedAt`),
-  with the predicate evaluated server-side. False once the balance is claimed
-  or clawed back; null when the predicate could not be read.
-  """
-  claimableNow: Boolean
-}
-
-"""
-A page of claimable balances, newest first.
-"""
-type ClaimableBalancePage {
-  """The balances on this page."""
-  items: [ClaimableBalance!]!
-  """
-  The instant every `claimableNow` on this page was evaluated at (ISO-8601):
-  the time of the request. The network judges a claim at its ledger's close time.
-  """
-  evaluatedAt: String!
+type EffectPage {
+  """The effects on this page."""
+  items: [Effect!]!
   """Where to resume; see `PageInfo`."""
   pageInfo: PageInfo!
+}
+
+"""
+An effect type, Horizon's name upper-cased (`account_credited` is `ACCOUNT_CREDITED`).
+"""
+enum EffectType {
+  """A new account was created and funded."""
+  ACCOUNT_CREATED
+  """The account was merged away."""
+  ACCOUNT_REMOVED
+  """The account received an asset."""
+  ACCOUNT_CREDITED
+  """The account sent an asset."""
+  ACCOUNT_DEBITED
+  """The account's signature thresholds changed."""
+  ACCOUNT_THRESHOLDS_UPDATED
+  """The account's home domain changed."""
+  ACCOUNT_HOME_DOMAIN_UPDATED
+  """The account's authorization flags changed."""
+  ACCOUNT_FLAGS_UPDATED
+  """The account's inflation destination changed (inflation is retired)."""
+  ACCOUNT_INFLATION_DESTINATION_UPDATED
+  """A signer was added to the account."""
+  SIGNER_CREATED
+  """A signer was removed from the account."""
+  SIGNER_REMOVED
+  """A signer's weight changed."""
+  SIGNER_UPDATED
+  """The account added a trustline."""
+  TRUSTLINE_CREATED
+  """The account removed a trustline."""
+  TRUSTLINE_REMOVED
+  """A trustline's limit changed."""
+  TRUSTLINE_UPDATED
+  """The issuer authorized a trustline (legacy effect)."""
+  TRUSTLINE_AUTHORIZED
+  """The issuer deauthorized a trustline (legacy effect)."""
+  TRUSTLINE_DEAUTHORIZED
+  """The issuer authorized a trustline to maintain liabilities only (legacy effect)."""
+  TRUSTLINE_AUTHORIZED_TO_MAINTAIN_LIABILITIES
+  """The issuer changed a trustline's flags."""
+  TRUSTLINE_FLAGS_UPDATED
+  """An offer was created (Horizon no longer emits this)."""
+  OFFER_CREATED
+  """An offer was removed (Horizon no longer emits this)."""
+  OFFER_REMOVED
+  """An offer was updated (Horizon no longer emits this)."""
+  OFFER_UPDATED
+  """An offer was crossed on the DEX."""
+  TRADE
+  """A data entry was added."""
+  DATA_CREATED
+  """A data entry was removed."""
+  DATA_REMOVED
+  """A data entry's value changed."""
+  DATA_UPDATED
+  """The account's sequence number was bumped."""
+  SEQUENCE_BUMPED
+  """A claimable balance was created."""
+  CLAIMABLE_BALANCE_CREATED
+  """The account was named a claimant of a claimable balance."""
+  CLAIMABLE_BALANCE_CLAIMANT_CREATED
+  """The account claimed a claimable balance."""
+  CLAIMABLE_BALANCE_CLAIMED
+  """The issuer clawed back a claimable balance."""
+  CLAIMABLE_BALANCE_CLAWED_BACK
+  """The account's reserve became sponsored."""
+  ACCOUNT_SPONSORSHIP_CREATED
+  """The account's reserve sponsor changed."""
+  ACCOUNT_SPONSORSHIP_UPDATED
+  """The account's reserve is no longer sponsored."""
+  ACCOUNT_SPONSORSHIP_REMOVED
+  """A trustline's reserve became sponsored."""
+  TRUSTLINE_SPONSORSHIP_CREATED
+  """A trustline's reserve sponsor changed."""
+  TRUSTLINE_SPONSORSHIP_UPDATED
+  """A trustline's reserve is no longer sponsored."""
+  TRUSTLINE_SPONSORSHIP_REMOVED
+  """A data entry's reserve became sponsored."""
+  DATA_SPONSORSHIP_CREATED
+  """A data entry's reserve sponsor changed."""
+  DATA_SPONSORSHIP_UPDATED
+  """A data entry's reserve is no longer sponsored."""
+  DATA_SPONSORSHIP_REMOVED
+  """A claimable balance's reserve became sponsored."""
+  CLAIMABLE_BALANCE_SPONSORSHIP_CREATED
+  """A claimable balance's reserve sponsor changed."""
+  CLAIMABLE_BALANCE_SPONSORSHIP_UPDATED
+  """A claimable balance's reserve is no longer sponsored."""
+  CLAIMABLE_BALANCE_SPONSORSHIP_REMOVED
+  """A signer's reserve became sponsored."""
+  SIGNER_SPONSORSHIP_CREATED
+  """A signer's reserve sponsor changed."""
+  SIGNER_SPONSORSHIP_UPDATED
+  """A signer's reserve is no longer sponsored."""
+  SIGNER_SPONSORSHIP_REMOVED
+  """The account deposited into a liquidity pool."""
+  LIQUIDITY_POOL_DEPOSITED
+  """The account withdrew from a liquidity pool."""
+  LIQUIDITY_POOL_WITHDREW
+  """A liquidity pool was traded against."""
+  LIQUIDITY_POOL_TRADE
+  """A liquidity pool was created."""
+  LIQUIDITY_POOL_CREATED
+  """A liquidity pool was removed."""
+  LIQUIDITY_POOL_REMOVED
+  """The issuer revoked the account's pool shares."""
+  LIQUIDITY_POOL_REVOKED
+  """A contract received an asset (Stellar Asset Contract)."""
+  CONTRACT_CREDITED
+  """A contract sent an asset (Stellar Asset Contract)."""
+  CONTRACT_DEBITED
+}
+
+"""
+The type-specific fields of an effect, one member per shape. Effect types
+with the same fields share a member (`account_credited` and `account_debited`
+are both `AccountBalanceEffectDetails`); read `Effect.type` for which one.
+A type this server does not map yet comes through as `UnrecognizedEffectDetails`.
+Fields Horizon left out are null.
+"""
+union EffectDetails =
+    AccountCreatedEffectDetails
+  | AccountBalanceEffectDetails
+  | ContractBalanceEffectDetails
+  | AccountThresholdsEffectDetails
+  | AccountHomeDomainEffectDetails
+  | AccountFlagsEffectDetails
+  | SignerEffectDetails
+  | TrustlineEffectDetails
+  | TrustlineAuthorizationEffectDetails
+  | TradeEffectDetails
+  | DataEffectDetails
+  | SequenceBumpedEffectDetails
+  | ClaimableBalanceEffectDetails
+  | SponsorshipEffectDetails
+  | LiquidityPoolEffectDetails
+  | UnrecognizedEffectDetails
+
+"""`account_created`."""
+type AccountCreatedEffectDetails {
+  """XLM the new account was funded with, as a decimal string."""
+  startingBalance: String
+}
+
+"""`account_credited`, `account_debited`."""
+type AccountBalanceEffectDetails {
+  """Amount moved, as a decimal string."""
+  amount: String
+  """Asset moved; null for a liquidity pool share."""
+  asset: String
+}
+
+"""`contract_credited`, `contract_debited`."""
+type ContractBalanceEffectDetails {
+  """Contract the asset moved to or from."""
+  contract: String
+  """Amount moved, as a decimal string."""
+  amount: String
+  """Asset moved."""
+  asset: String
+}
+
+"""`account_thresholds_updated`."""
+type AccountThresholdsEffectDetails {
+  """New low threshold."""
+  lowThreshold: Int
+  """New medium threshold."""
+  medThreshold: Int
+  """New high threshold."""
+  highThreshold: Int
+}
+
+"""`account_home_domain_updated`."""
+type AccountHomeDomainEffectDetails {
+  """New home domain; empty when it was cleared."""
+  homeDomain: String
+}
+
+"""`account_flags_updated`. Only the flags the operation changed are set."""
+type AccountFlagsEffectDetails {
+  """New `auth_required` value."""
+  authRequired: Boolean
+  """New `auth_revocable` value."""
+  authRevocable: Boolean
+  """New `auth_immutable` value."""
+  authImmutable: Boolean
+  """New `auth_clawback_enabled` value."""
+  authClawbackEnabled: Boolean
+}
+
+"""`signer_created`, `signer_removed`, `signer_updated`."""
+type SignerEffectDetails {
+  """Signer's public key."""
+  publicKey: String
+  """Signer key as Horizon reports it (same as `publicKey` for ed25519 signers)."""
+  key: String
+  """Signer weight after the change; 0 when removed."""
+  weight: Int
+}
+
+"""`trustline_created`, `trustline_removed`, `trustline_updated`."""
+type TrustlineEffectDetails {
+  """Asset the trustline is for; null for a liquidity pool share."""
+  asset: String
+  """Trustline limit, as a decimal string."""
+  limit: String
+  """Pool, when the trustline is for liquidity pool shares."""
+  liquidityPoolId: String
+}
+
+"""
+`trustline_flags_updated`, and the legacy `trustline_authorized`,
+`trustline_deauthorized` and `trustline_authorized_to_maintain_liabilities`.
+The legacy types report through their name what they set; it is filled in here.
+"""
+type TrustlineAuthorizationEffectDetails {
+  """Account whose trustline changed."""
+  trustor: String
+  """Asset of the trustline."""
+  asset: String
+  """Whether the trustline is now authorized; null when unchanged."""
+  authorized: Boolean
+  """Whether it may now only maintain liabilities; null when unchanged."""
+  authorizedToMaintainLiabilities: Boolean
+  """Whether clawback is now enabled on it; null when unchanged."""
+  clawbackEnabled: Boolean
+}
+
+"""`trade`: one offer crossed, from this account's side."""
+type TradeEffectDetails {
+  """Account on the other side of the trade."""
+  seller: String
+  """Offer that was crossed."""
+  offerId: String
+  """Amount this account sold, as a decimal string."""
+  soldAmount: String
+  """Asset this account sold."""
+  soldAsset: String
+  """Amount this account bought, as a decimal string."""
+  boughtAmount: String
+  """Asset this account bought."""
+  boughtAsset: String
+}
+
+"""`data_created`, `data_removed`, `data_updated`."""
+type DataEffectDetails {
+  """Data entry name."""
+  name: String
+  """Data entry value, base64-encoded; null when removed."""
+  value: String
+}
+
+"""`sequence_bumped`."""
+type SequenceBumpedEffectDetails {
+  """New sequence number, as a string (it can exceed 2^53)."""
+  newSequence: String
+}
+
+"""
+`claimable_balance_created`, `claimable_balance_claimant_created`,
+`claimable_balance_claimed`, `claimable_balance_clawed_back`.
+"""
+type ClaimableBalanceEffectDetails {
+  """Claimable balance id."""
+  balanceId: String
+  """Asset held by the balance."""
+  asset: String
+  """Amount, as a decimal string."""
+  amount: String
+  """
+  `claimable_balance_claimant_created`: the claim predicate, JSON-encoded as
+  Horizon reports it (a predicate nests `and` / `or` / `not` arbitrarily deep).
+  """
+  predicate: String
+}
+
+"""
+Every `*_sponsorship_created`, `*_sponsorship_updated` and
+`*_sponsorship_removed` type. `Effect.type` says what is sponsored; the
+matching field names it.
+"""
+type SponsorshipEffectDetails {
+  """Sponsor, on a `_created` effect."""
+  sponsor: String
+  """Previous sponsor, on an `_updated` or `_removed` effect."""
+  formerSponsor: String
+  """New sponsor, on an `_updated` effect."""
+  newSponsor: String
+  """Signer whose reserve is sponsored (`signer_sponsorship_*`)."""
+  signer: String
+  """Data entry whose reserve is sponsored (`data_sponsorship_*`)."""
+  dataName: String
+  """Trustline asset whose reserve is sponsored (`trustline_sponsorship_*`)."""
+  asset: String
+  """Pool-share trustline whose reserve is sponsored (`trustline_sponsorship_*`)."""
+  liquidityPoolId: String
+  """Claimable balance whose reserve is sponsored (`claimable_balance_sponsorship_*`)."""
+  balanceId: String
+}
+
+"""An asset and an amount of it."""
+type EffectAssetAmount {
+  """Asset."""
+  asset: String
+  """Amount, as a decimal string."""
+  amount: String
+  """`liquidity_pool_revoked`: claimable balance the revoked reserve was moved into."""
+  claimableBalanceId: String
+}
+
+"""
+`liquidity_pool_deposited`, `_withdrew`, `_trade`, `_created`, `_removed`,
+`_revoked`. Pool state (`feeBp`, `totalShares`, `reserves`) is after the effect.
+"""
+type LiquidityPoolEffectDetails {
+  """Pool id."""
+  liquidityPoolId: String
+  """Pool fee in basis points."""
+  feeBp: Int
+  """Total pool shares, as a decimal string."""
+  totalShares: String
+  """Number of trustlines to the pool's shares."""
+  totalTrustlines: String
+  """Pool reserves."""
+  reserves: [EffectAssetAmount!]
+  """`_deposited`: reserves this account put in."""
+  reservesDeposited: [EffectAssetAmount!]
+  """`_withdrew`: reserves this account took out."""
+  reservesReceived: [EffectAssetAmount!]
+  """`_revoked`: reserves moved out of the pool when the shares were revoked."""
+  reservesRevoked: [EffectAssetAmount!]
+  """`_deposited`: shares received, as a decimal string."""
+  sharesReceived: String
+  """`_withdrew`: shares redeemed, as a decimal string."""
+  sharesRedeemed: String
+  """`_revoked`: shares revoked, as a decimal string."""
+  sharesRevoked: String
+  """`_trade`: what the pool sold."""
+  sold: EffectAssetAmount
+  """`_trade`: what the pool bought."""
+  bought: EffectAssetAmount
+}
+
+"""An effect type this server does not map yet, with Horizon's fields as they are."""
+type UnrecognizedEffectDetails {
+  """Horizon's type-specific fields, JSON-encoded."""
+  raw: String!
 }
 
 # ─── Signers & Sponsorship (#226) ────────────────────────────────────────────
