@@ -61,7 +61,7 @@ export const ERROR_CODE_TAXONOMY: Readonly<Record<ErrorCode, ErrorCodeDefinition
   BAD_USER_INPUT: {
     category: ERROR_CATEGORIES.INVALID_INPUT,
     description:
-      'A query, argument or filter value the server cannot use: an unknown network, a page size out of range, a malformed asset, a non-integer value for a numeric event field.',
+      'A query, argument or filter value the server cannot use: an unknown network, a page size or aggregate limit out of range, a time range wider than its query allows, a malformed asset, a non-integer value for a numeric event field.',
   },
   INVALID_CURSOR: {
     category: ERROR_CATEGORIES.INVALID_INPUT,

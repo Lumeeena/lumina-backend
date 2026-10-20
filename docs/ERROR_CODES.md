@@ -36,7 +36,7 @@ what happened and whether retrying can help.
 
 | Code | Meaning |
 | --- | --- |
-| `BAD_USER_INPUT` | An unknown `network`, a page size that is not a positive integer or exceeds the maximum, a malformed asset filter, a filter on a field or operator a custom-event schema does not define, or a value that does not match the declared type. |
+| `BAD_USER_INPUT` | An unknown `network`, a page size that is not a positive integer or exceeds the maximum, an aggregate `limit` above its ceiling, a time range wider than its query allows, a malformed asset filter, a filter on a field or operator a custom-event schema does not define, or a value that does not match the declared type. |
 | `INVALID_CURSOR` | A pagination cursor the server did not issue, issued for a different query, or that no longer decodes. Cursors are opaque — pass back the one the previous page returned. |
 | `QUERY_TOO_DEEP` | The operation nests deeper than the deployment's `GRAPHQL_MAX_DEPTH`. |
 | `QUERY_TOO_COMPLEX` | The operation costs more than the deployment's `GRAPHQL_MAX_COMPLEXITY`. Lower `limit` arguments or drop nested lists. |

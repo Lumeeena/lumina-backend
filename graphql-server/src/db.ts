@@ -1057,7 +1057,8 @@ export async function getAccountSigners(
 export async function getSponsoredAccounts(
   pool: Pool,
   network: string,
-  sponsorAddress: string
+  sponsorAddress: string,
+  limit: number
 ): Promise<ReturnType<typeof mapAccount>[]> {
   const { rows } = await pool.query(
     `SELECT a.address, a.network, a.sequence, a.subentry_count, a.last_modified_ledger,
@@ -1065,8 +1066,9 @@ export async function getSponsoredAccounts(
      FROM accounts a
      JOIN sponsorships s ON s.sponsored_id = a.address AND s.network = a.network
      WHERE s.sponsor = $1 AND s.network = $2
-     ORDER BY a.address ASC`,
-    [network, sponsorAddress]
+     ORDER BY a.address ASC
+     LIMIT $3`,
+    [sponsorAddress, network, limit]
   );
   return rows.map((row) =>
     mapAccount({
@@ -1165,7 +1167,8 @@ export async function getNetworkStats(
   network: string,
   startTime: string,
   endTime: string,
-  granularity: string
+  granularity: string,
+  limit: number
 ): Promise<NetworkStatsBucketRow[]> {
   const { rows } = await pool.query<NetworkStatsBucketRow>(
     `SELECT
@@ -1177,8 +1180,9 @@ export async function getNetworkStats(
      FROM activity_rollups
      WHERE network = $1 AND granularity = $2
        AND bucket_start >= $3 AND bucket_start < $4
-     ORDER BY bucket_start ASC`,
-    [network, granularity, startTime, endTime]
+     ORDER BY bucket_start ASC
+     LIMIT $5`,
+    [network, granularity, startTime, endTime, limit]
   );
   return rows;
 }
@@ -1200,7 +1204,8 @@ export async function getActivityRollups(
   network: string,
   granularity: string,
   startTime: string,
-  endTime: string
+  endTime: string,
+  limit: number
 ): Promise<ActivityRollupRow[]> {
   const { rows } = await pool.query<ActivityRollupRow>(
     `SELECT
@@ -1210,8 +1215,9 @@ export async function getActivityRollups(
      FROM activity_rollups
      WHERE network = $1 AND granularity = $2
        AND bucket_start >= $3 AND bucket_start < $4
-     ORDER BY bucket_start ASC`,
-    [network, granularity, startTime, endTime]
+     ORDER BY bucket_start ASC
+     LIMIT $5`,
+    [network, granularity, startTime, endTime, limit]
   );
   return rows;
 }

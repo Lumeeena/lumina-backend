@@ -29,7 +29,16 @@ import {
   mapAccount,
   type AccountOrder,
 } from './db';
-import { DEFAULT_PAGE_LIMIT, KEYSETS, pageInfo, getPageSize, type PaginationDirection } from './pagination';
+import {
+  DEFAULT_PAGE_LIMIT,
+  KEYSETS,
+  MAX_AGGREGATE_ROWS,
+  getAggregateLimit,
+  assertRangeWithinLimit,
+  pageInfo,
+  getPageSize,
+  type PaginationDirection,
+} from './pagination';
 import { createLoaders, type RequestLoaders } from './loaders';
 import { getAccount as getAccountFromHorizon, getLatestLedger as getLatestLedgerFromHorizon } from './horizon';
 import { createSubscriptionResolvers } from './subscriptions';
@@ -723,11 +732,12 @@ export const resolvers = {
     },
     async sponsoredAccounts(
       _: unknown,
-      args: { network?: string | null; sponsorAddress: string },
+      args: { network?: string | null; sponsorAddress: string; limit?: number | null },
       ctx: Context
     ) {
       const network = networkArgument(args, ctx);
-      return getSponsoredAccounts(ctx.pool, network.name, args.sponsorAddress);
+      const limit = getAggregateLimit(args.limit, MAX_AGGREGATE_ROWS);
+      return getSponsoredAccounts(ctx.pool, network.name, args.sponsorAddress, limit);
     },
 
     // ─── #227: Contracts & Deployments ───────────────────────────────────
@@ -767,17 +777,20 @@ export const resolvers = {
     // ─── #228: Network Statistics ────────────────────────────────────────
     async networkStats(
       _: unknown,
-      args: { network?: string | null; startTime: string; endTime: string; granularity?: string },
+      args: { network?: string | null; startTime: string; endTime: string; granularity?: string; limit?: number | null },
       ctx: Context
     ) {
       const network = networkArgument(args, ctx);
       const granularity = args.granularity === 'day' ? 'day' : 'hour';
+      const limit = getAggregateLimit(args.limit, MAX_AGGREGATE_ROWS);
+      assertRangeWithinLimit(args.startTime, args.endTime, granularity, limit);
       const rows = await getNetworkStats(
         ctx.pool,
         network.name,
         args.startTime,
         args.endTime,
-        granularity
+        granularity,
+        limit
       );
       return rows.map((row) => ({
         bucketStart: row.bucket_start,
@@ -796,17 +809,21 @@ export const resolvers = {
         granularity?: string;
         startTime: string;
         endTime: string;
+        limit?: number | null;
       },
       ctx: Context
     ) {
       const network = networkArgument(args, ctx);
       const granularity = args.granularity === 'day' ? 'day' : 'hour';
+      const limit = getAggregateLimit(args.limit, MAX_AGGREGATE_ROWS);
+      assertRangeWithinLimit(args.startTime, args.endTime, granularity, limit);
       const rows = await getActivityRollups(
         ctx.pool,
         network.name,
         granularity,
         args.startTime,
-        args.endTime
+        args.endTime,
+        limit
       );
       return rows.map((row) => ({
         bucketStart: row.bucket_start,

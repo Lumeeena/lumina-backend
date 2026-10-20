@@ -98,6 +98,20 @@ the selected direction.
 - **Default limit:** 20 items per page; nested account lists default to 10
 - **Maximum limit:** 100 items. Larger limits are rejected with `BAD_USER_INPUT`.
 
+### Aggregate limits
+
+A few queries return a whole result set rather than a paginated page, so they
+carry a row ceiling instead of a cursor: `networkStats`, `activityRollups`, and
+`sponsoredAccounts`. Each accepts a `limit` (default and maximum 1000) and
+rejects anything larger with `BAD_USER_INPUT`. The two time-series queries also
+reject a range that *spans* more buckets than the limit — a truncated series
+would be indistinguishable from a complete one — so a wider range must be
+requested at `granularity: "day"` or split into smaller windows.
+
+The ceiling exists because a response is assembled in memory before it is sent:
+without it, memory would grow with the request rather than staying flat. See
+[`docs/RESPONSE_MEMORY.md`](RESPONSE_MEMORY.md) for the measured ceiling.
+
 ## Common Queries
 
 ### Fetch recent transactions

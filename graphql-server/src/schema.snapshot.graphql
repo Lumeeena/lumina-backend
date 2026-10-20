@@ -1512,7 +1512,15 @@ extend type Query {
   """
   Accounts sponsored by the given address (#226).
   """
-  sponsoredAccounts(sponsorAddress: String!): [Account!]!
+  sponsoredAccounts(
+    """Issuing address whose sponsored accounts to list."""
+    sponsorAddress: String!
+    """
+    Maximum accounts to return. Capped at 1000 so a single sponsor cannot force
+    an unbounded response; use a narrower sponsor rather than raising this.
+    """
+    limit: Int = 1000
+  ): [Account!]!
 
   """
   Resolve a contract ID to its deployment details (#227).
@@ -1528,18 +1536,35 @@ extend type Query {
   Network statistics for a time period, computed from rollups (#228).
   """
   networkStats(
+    """Start of the range (ISO 8601), inclusive."""
     startTime: String!
+    """End of the range (ISO 8601), exclusive."""
     endTime: String!
+    """Bucket width: `hour` or `day`."""
     granularity: String = "hour"
+    """
+    Maximum buckets to return, capped at 1000. A range that would exceed the
+    cap returns an error rather than a silently truncated series.
+    """
+    limit: Int = 1000
   ): [NetworkStatsBucket!]!
 
   """
   Rolled-up activity aggregates (#229).
   """
   activityRollups(
+    """Network whose rollups to read."""
     network: String!
+    """Bucket width: `hour` or `day`."""
     granularity: String = "hour"
+    """Start of the range (ISO 8601), inclusive."""
     startTime: String!
+    """End of the range (ISO 8601), exclusive."""
     endTime: String!
+    """
+    Maximum buckets to return, capped at 1000. A range that would exceed the
+    cap returns an error rather than a silently truncated series.
+    """
+    limit: Int = 1000
   ): [ActivityRollup!]!
 }
