@@ -1,0 +1,134 @@
+# Selections shared by the operations in this directory.
+
+fragment PageInfoFields on PageInfo {
+  hasNextPage
+  hasPreviousPage
+  startCursor
+  endCursor
+  cursor
+  totalCount {
+    value
+    precision
+    isEstimate
+  }
+}
+
+fragment LedgerFields on Ledger {
+  sequence
+  closedAt
+  transactionCount
+  operationCount
+  baseFee
+  baseReserve
+}
+
+fragment TransactionFields on Transaction {
+  hash
+  ledger
+  createdAt
+  sourceAccount
+  feeCharged
+  operationCount
+  successful
+  memoType
+  memo
+}
+
+fragment OperationFields on Operation {
+  id
+  type
+  createdAt
+  transactionHash
+  sourceAccount
+  from
+  to
+  amount
+  asset
+  startingBalance
+  funder
+  createdAccount
+  mergeDestination
+  offerId
+  price
+  selling
+  buying
+  bumpSequence
+  dataName
+  dataValue
+}
+
+fragment AccountFields on Account {
+  address
+  sequence
+  subentryCount
+  lastModifiedLedger
+  numSponsored
+  numSponsoring
+  balances {
+    assetType
+    assetCode
+    assetIssuer
+    balance
+    limit
+    buyingLiabilities
+    sellingLiabilities
+  }
+  flags {
+    authRequired
+    authRevocable
+    authImmutable
+    authClawbackEnabled
+  }
+  thresholds {
+    lowThreshold
+    medThreshold
+    highThreshold
+  }
+}
+
+fragment ContractEventFields on ContractEvent {
+  id
+  type
+  contractId
+  ledger
+  createdAt
+  pagingToken
+  topics
+  value
+  transactionHash
+}
+
+fragment TradeFields on Trade {
+  id
+  pagingToken
+  ledgerCloseTime
+  tradeType
+  baseAccount
+  baseAmount
+  baseAssetType
+  baseAssetCode
+  baseAssetIssuer
+  baseOfferId
+  counterAccount
+  counterAmount
+  counterAssetType
+  counterAssetCode
+  counterAssetIssuer
+  counterOfferId
+  baseIsSeller
+  price
+  priceNumerator
+  priceDenominator
+}
+
+fragment AssetFields on Asset {
+  code
+  issuer
+  holderCount
+  firstSeenLedger
+  lastActivityLedger
+  recentVolume
+  issuerHomeDomain
+  issuerMetadata
+  isLookalike
+}

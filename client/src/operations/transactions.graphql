@@ -1,0 +1,52 @@
+query Transactions(
+  $network: Network
+  $limit: Int
+  $cursor: String
+  $direction: PaginationDirection
+  $order: LedgerOrder
+  $successful: Boolean
+  $from: String
+  $to: String
+  $sourceAccount: String
+  $includeTotalCount: Boolean
+) {
+  transactions(
+    network: $network
+    limit: $limit
+    cursor: $cursor
+    direction: $direction
+    order: $order
+    successful: $successful
+    from: $from
+    to: $to
+    sourceAccount: $sourceAccount
+    includeTotalCount: $includeTotalCount
+  ) {
+    items {
+      ...TransactionFields
+    }
+    pageInfo {
+      ...PageInfoFields
+    }
+  }
+}
+
+query Transaction($network: Network, $hash: String!) {
+  transaction(network: $network, hash: $hash) {
+    ...TransactionFields
+    operations {
+      ...OperationFields
+    }
+  }
+}
+
+query SearchTransactions($network: Network, $query: String!, $limit: Int, $cursor: String) {
+  search(network: $network, query: $query, limit: $limit, cursor: $cursor) {
+    items {
+      ...TransactionFields
+    }
+    pageInfo {
+      ...PageInfoFields
+    }
+  }
+}

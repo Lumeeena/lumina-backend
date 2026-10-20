@@ -1,0 +1,35 @@
+{
+  "name": "@lumina/client",
+  "version": "0.1.0",
+  "description": "Typed TypeScript client for the Lumina GraphQL API, generated from its schema.",
+  "license": "MIT",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": [
+    "dist",
+    "schema.graphql"
+  ],
+  "scripts": {
+    "generate": "graphql-codegen --config codegen.ts && node scripts/copy-schema.js",
+    "check": "npm run generate && git diff --exit-code -- src/generated schema.graphql",
+    "build": "tsc -p tsconfig.json",
+    "test": "tsc -p tsconfig.test.json --noEmit && node --require ts-node/register --test test/client.test.ts",
+    "prepublishOnly": "npm run build"
+  },
+  "dependencies": {
+    "@graphql-typed-document-node/core": "^3.2.0"
+  },
+  "devDependencies": {
+    "@graphql-codegen/add": "^7.1.1",
+    "@graphql-codegen/cli": "^7.4.6",
+    "@graphql-codegen/typed-document-node": "^7.2.0",
+    "@graphql-codegen/typescript-operations": "^6.1.10",
+    "@types/node": "^20.0.0",
+    "graphql": "^16.0.0",
+    "ts-node": "^10.0.0",
+    "typescript": "^5.0.0"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

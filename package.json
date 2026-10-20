@@ -6,12 +6,14 @@
   "workspaces": [
     "graphql-server",
     "indexer",
-    "shared"
+    "shared",
+    "client"
   ],
   "scripts": {
-    "build": "npm run build:shared && npm run build:graphql && npm run build:indexer",
+    "build": "npm run build:shared && npm run build:graphql && npm run build:indexer && npm run build:client",
     "build:graphql": "cd graphql-server && npm run build",
     "build:indexer": "cd indexer && npm run build",
+    "build:client": "cd client && npm run build",
     "test": "npm run test:indexer && npm run test:graphql",
     "explain": "ts-node-transpile-only --project db/explain/tsconfig.json db/explain/run.ts capture",
     "explain:seed": "ts-node-transpile-only --project db/explain/tsconfig.json db/explain/run.ts seed",

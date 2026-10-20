@@ -1,0 +1,26 @@
+query ContractEvents(
+  $network: Network
+  $contractId: String!
+  $topic: String
+  $limit: Int
+  $cursor: String
+  $direction: PaginationDirection
+  $order: LedgerOrder
+) {
+  events(
+    network: $network
+    contractId: $contractId
+    topic: $topic
+    limit: $limit
+    cursor: $cursor
+    direction: $direction
+    order: $order
+  ) {
+    items {
+      ...ContractEventFields
+    }
+    pageInfo {
+      ...PageInfoFields
+    }
+  }
+}

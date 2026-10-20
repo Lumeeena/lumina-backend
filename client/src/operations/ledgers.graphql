@@ -1,0 +1,34 @@
+query Ledgers($network: Network, $limit: Int, $cursor: String, $includeTotalCount: Boolean) {
+  ledgers(network: $network, limit: $limit, cursor: $cursor, includeTotalCount: $includeTotalCount) {
+    items {
+      ...LedgerFields
+    }
+    pageInfo {
+      ...PageInfoFields
+    }
+  }
+}
+
+query Ledger($network: Network, $sequence: Int!) {
+  ledger(network: $network, sequence: $sequence) {
+    ...LedgerFields
+  }
+}
+
+query LatestLedger($network: Network) {
+  latestLedger(network: $network) {
+    ...LedgerFields
+  }
+}
+
+query IndexerStatus($network: Network) {
+  indexerStatus(network: $network) {
+    network
+    latestIndexedLedger
+    latestIndexedAt
+    horizonLedger
+    lagLedgers
+    stale
+    checkedAt
+  }
+}

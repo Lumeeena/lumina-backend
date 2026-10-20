@@ -1,0 +1,27 @@
+query Account($network: Network, $address: String!, $asOfLedger: Int) {
+  account(network: $network, address: $address, asOfLedger: $asOfLedger) {
+    ...AccountFields
+  }
+}
+
+query AccountBalanceHistory($network: Network, $address: String!, $asset: String, $from: String, $to: String) {
+  accountBalanceHistory(network: $network, address: $address, asset: $asset, from: $from, to: $to) {
+    address
+    asset
+    from
+    to
+    snapshots {
+      timestamp
+      balance
+      operationId
+    }
+  }
+}
+
+query AccountSigners($address: String!) {
+  accountSigners(address: $address) {
+    key
+    type
+    weight
+  }
+}

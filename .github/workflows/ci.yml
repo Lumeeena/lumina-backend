@@ -50,6 +50,25 @@ jobs:
       - run: npm run build
       - run: npm test
 
+  client:
+    name: TypeScript client (@lumina/client)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: client
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm ci --workspace @lumina/client
+        working-directory: .
+      # Regenerates from graphql-server/src/schema.graphql and fails when the
+      # committed client differs: a schema change must ship with its client.
+      - run: npm run check
+      - run: npm run build
+      - run: npm test
+
   db-lint:
     name: Validate SQL Schema
     runs-on: ubuntu-latest

@@ -1,0 +1,30 @@
+query Operations(
+  $network: Network
+  $account: String
+  $type: OperationType
+  $asset: String
+  $limit: Int
+  $cursor: String
+  $direction: PaginationDirection
+  $order: LedgerOrder
+  $includeTotalCount: Boolean
+) {
+  operations(
+    network: $network
+    account: $account
+    type: $type
+    asset: $asset
+    limit: $limit
+    cursor: $cursor
+    direction: $direction
+    order: $order
+    includeTotalCount: $includeTotalCount
+  ) {
+    items {
+      ...OperationFields
+    }
+    pageInfo {
+      ...PageInfoFields
+    }
+  }
+}

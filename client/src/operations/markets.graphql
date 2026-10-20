@@ -1,0 +1,58 @@
+query Trades(
+  $network: Network
+  $baseAsset: TradeAssetInput
+  $counterAsset: TradeAssetInput
+  $account: String
+  $limit: Int
+  $cursor: String
+  $includeTotalCount: Boolean
+) {
+  trades(
+    network: $network
+    baseAsset: $baseAsset
+    counterAsset: $counterAsset
+    account: $account
+    limit: $limit
+    cursor: $cursor
+    includeTotalCount: $includeTotalCount
+  ) {
+    items {
+      ...TradeFields
+    }
+    pageInfo {
+      ...PageInfoFields
+    }
+  }
+}
+
+# The assets resolver fills in only `hasNextPage` and `cursor` of its PageInfo;
+# selecting the other (non-null) fields fails the whole query with
+# "Cannot return null for non-nullable field PageInfo.hasPreviousPage".
+query Assets($network: Network, $sortBy: AssetSort, $search: String, $limit: Int, $cursor: String) {
+  assets(network: $network, sortBy: $sortBy, search: $search, limit: $limit, cursor: $cursor) {
+    items {
+      ...AssetFields
+    }
+    pageInfo {
+      hasNextPage
+      cursor
+    }
+  }
+}
+
+query AssetDetail($network: Network, $asset: String!, $from: String, $to: String, $bucketSeconds: Int) {
+  asset(network: $network, asset: $asset, from: $from, to: $to, bucketSeconds: $bucketSeconds) {
+    asset
+    code
+    issuer
+    native
+    supply
+    holders
+    series {
+      bucketStart
+      bucketEnd
+      volume
+      operationCount
+    }
+  }
+}

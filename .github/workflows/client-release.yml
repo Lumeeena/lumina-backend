@@ -1,0 +1,79 @@
+name: Client release
+
+# Regenerates, verifies and ships the TypeScript client (@lumina/client) for
+# each release tag, so the client a consumer installs for vX.Y.Z is generated
+# from exactly that version's schema (issue #266). See docs/CLIENT_SDK.md.
+on:
+  push:
+    tags: ['v[0-9]+.[0-9]+.[0-9]+', 'v[0-9]+.[0-9]+.[0-9]+-*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing release tag to (re)build the client for, e.g. v1.2.3'
+        type: string
+        required: true
+
+permissions:
+  contents: write
+
+concurrency:
+  group: client-release-${{ github.event.inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  client:
+    name: Build and ship @lumina/client
+    runs-on: ubuntu-latest
+    env:
+      TAG: ${{ github.event.inputs.tag || github.ref_name }}
+    defaults:
+      run:
+        working-directory: client
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          registry-url: https://registry.npmjs.org
+      - run: npm ci --workspace @lumina/client
+        working-directory: .
+      - name: Client version matches the tag
+        run: |
+          version="$(node -p "require('./package.json').version")"
+          if [ "v$version" != "$TAG" ]; then
+            echo "::error::client/package.json is $version but the tag is $TAG; bump it with the service (docs/CLIENT_SDK.md)."
+            exit 1
+          fi
+      - name: Regenerate from the tagged schema (fails if the committed client is stale)
+        run: npm run check
+      - run: npm run build
+      - run: npm test
+      - name: Pack
+        id: pack
+        run: echo "tarball=$(npm pack --silent)" >> "$GITHUB_OUTPUT"
+      - name: Attach the package to the GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TARBALL: ${{ steps.pack.outputs.tarball }}
+        run: |
+          prerelease=()
+          [[ "$TAG" == *-* ]] && prerelease=(--prerelease)
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" "$TARBALL" --clobber
+          else
+            gh release create "$TAG" "$TARBALL" --verify-tag --title "$TAG" --generate-notes "${prerelease[@]}"
+          fi
+      - name: Publish to npm (only when an NPM_TOKEN secret is configured)
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          TARBALL: ${{ steps.pack.outputs.tarball }}
+        run: |
+          if [ -z "$NODE_AUTH_TOKEN" ]; then
+            echo "::notice::NPM_TOKEN is not set; the client is attached to the GitHub release only."
+            exit 0
+          fi
+          tag=latest
+          [[ "$TAG" == *-* ]] && tag=next
+          npm publish "$TARBALL" --access public --tag "$tag"
