@@ -36,9 +36,6 @@ import {
 import {
   horizonRequestDuration,
   horizonRequests,
-  horizonThrottleInterval,
-  horizonQueuedRequests,
-  horizonWaitTime,
   horizonEndpointRequests,
 } from './metrics';
 import { subsystem } from './logger';
@@ -49,6 +46,7 @@ import { subsystem } from './logger';
  * constant.
  */
 export { PAGE_LIMIT } from '@lumina/shared';
+
 export type {
   HorizonAccount,
   HorizonBalance,
@@ -98,9 +96,6 @@ export function initializeHorizonClient(config: HorizonClientConfig): void {
       requestsTotal: horizonRequests,
       endpointRequests: horizonEndpointRequests,
       requestDuration: horizonRequestDuration,
-      currentInterval: horizonThrottleInterval,
-      queuedRequests: horizonQueuedRequests,
-      waitTime: horizonWaitTime,
     },
     logger: subsystem('horizon'),
   });
@@ -162,7 +157,7 @@ export function getLedgerOperations(
  * error. Transient failures (429, 5xx) throw so queued refreshes can retry.
  */
 export function getAccount(horizonUrl: HorizonEndpoint, address: string): Promise<HorizonAccount | null> {
-  return client.getAccount(address, horizonUrl);
+  return client.getAccountOrThrow(address, horizonUrl);
 }
 
 /**

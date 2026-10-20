@@ -103,10 +103,18 @@ test('getAccount returns null when Horizon reports an unknown account', async ()
 });
 
 test('getAccount throws on transient HTTP failures so queued refreshes can retry', async () => {
-  mockFetchSequence([{ ok: false, status: 429, body: {} }]);
+  // The client honours the retry budget internally (three attempts by
+  // default), so every attempt must be rate-limited for the failure to
+  // surface. The rejection is what tells the refresh queue to defer the
+  // request; a null would complete it and drop the refresh.
+  mockFetchSequence([
+    { ok: false, status: 429, body: {} },
+    { ok: false, status: 429, body: {} },
+    { ok: false, status: 429, body: {} },
+  ]);
   await assert.rejects(
     () => getAccount('https://horizon.example.com', 'G-rate-limited'),
-    /429/
+    /request failed \(429\)/
   );
 });
 

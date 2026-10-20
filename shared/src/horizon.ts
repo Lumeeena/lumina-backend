@@ -214,6 +214,14 @@ export interface HorizonClient {
   getLedgerTransactions(sequence: number, baseUrl?: HorizonEndpoint): Promise<HorizonTransaction[]>;
   getLedgerOperations(sequence: number, baseUrl?: HorizonEndpoint): Promise<HorizonOperation[]>;
   getAccount(address: string, baseUrl?: HorizonEndpoint): Promise<HorizonAccount | null>;
+  /**
+   * Account fetch for callers that must tell "does not exist" apart from
+   * "Horizon is down": a 404 returns `null`, but a transient failure (429,
+   * 5xx, connect error) throws. The indexer's refresh queue treats a
+   * rejection as "retry later" and a `null` as "account is gone", so a
+   * swallowed outage would complete the refresh and drop it.
+   */
+  getAccountOrThrow(address: string, baseUrl?: HorizonEndpoint): Promise<HorizonAccount | null>;
   getRecentTransactions(limit?: number, baseUrl?: HorizonEndpoint): Promise<HorizonTransaction[]>;
   getAccountTransactions(
     address: string,
@@ -294,19 +302,28 @@ export function createHorizonClient(options: HorizonClientOptions = {}): Horizon
   }
 
   /**
-   * Both call styles, one pipeline.
+   * All call styles, one pipeline.
    *
    * `throw` is for the indexer, whose ledger walk must not silently index
    * nothing; `null` is for the GraphQL server's read-through fallback, where a
    * Horizon outage has to degrade to "not indexed yet" rather than fail the
-   * query. A 404 is a statement about the ledger or account, not a failure, so
-   * neither style retries it.
+   * query; `null_on_404` is the middle ground for the indexer's account
+   * refreshes, where "no such account" is data but an outage must surface as a
+   * rejection so the queue retries instead of completing against a `null`. A
+   * 404 is a statement about the ledger or account, not a failure, so only
+   * `throw` treats it as an error.
    */
   async function request<T>(target: string, mode: 'throw', check?: BodyCheck, baseUrl?: HorizonEndpoint): Promise<T>;
   async function request<T>(target: string, mode: 'null', check?: BodyCheck, baseUrl?: HorizonEndpoint): Promise<T | null>;
   async function request<T>(
     target: string,
-    mode: 'throw' | 'null',
+    mode: 'null_on_404',
+    check?: BodyCheck,
+    baseUrl?: HorizonEndpoint
+  ): Promise<T | null>;
+  async function request<T>(
+    target: string,
+    mode: 'throw' | 'null' | 'null_on_404',
     check?: BodyCheck,
     baseUrl?: HorizonEndpoint
   ): Promise<T | null> {
@@ -378,7 +395,7 @@ export function createHorizonClient(options: HorizonClientOptions = {}): Horizon
         continue;
       }
 
-      if (mode === 'throw') {
+      if (mode !== 'null') {
         if (res.status < 500 || res.status === 429) {
           throw new Error(`${name} request failed (${res.status}): ${targetUrl}`);
         }
@@ -394,7 +411,7 @@ export function createHorizonClient(options: HorizonClientOptions = {}): Horizon
           await sleep(backoffMs(attempt));
           continue;
         }
-        if (mode === 'throw') throw new HorizonUnavailableError(configuredEndpoints);
+        if (mode !== 'null') throw new HorizonUnavailableError(configuredEndpoints);
         return null;
       }
     }
@@ -456,6 +473,13 @@ export function createHorizonClient(options: HorizonClientOptions = {}): Horizon
       );
     },
 
+    /** A 404 is `null`; a transient failure throws so the caller can retry. */
+    getAccountOrThrow(address: string, baseUrl?: HorizonEndpoint): Promise<HorizonAccount | null> {
+      return request<HorizonAccount>(url(`/accounts/${address}`, endpoints(baseUrl)[0]!), 'null_on_404', body =>
+        checkRecord(body, ACCOUNT_SPEC, 'response'), baseUrl
+      );
+    },
+
     async getRecentTransactions(limit = 20, baseUrl?: HorizonEndpoint): Promise<HorizonTransaction[]> {
       const page = await request<HorizonPage<HorizonTransaction>>(
         url(`/transactions?order=desc&limit=${limit}`, endpoints(baseUrl)[0]!),
@@ -498,8 +522,8 @@ export function createHorizonClient(options: HorizonClientOptions = {}): Horizon
       if (params.offer_id) q.set('offer_id', params.offer_id);
       const qs = q.toString();
       const path = `/trades${qs ? `?${qs}` : ''}`;
-      const page = await request<HorizonPage<HorizonTrade>>(url(path, baseUrl), 'null', body =>
-        checkPage(body, TRADE_SPEC)
+      const page = await request<HorizonPage<HorizonTrade>>(url(path, endpoints(baseUrl)[0]!), 'null', body =>
+        checkPage(body, TRADE_SPEC), baseUrl
       );
       return page?._embedded?.records ?? [];
     },

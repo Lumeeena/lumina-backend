@@ -166,7 +166,7 @@ test('repairLedgerGaps detects and repairs gaps and reports count', async () => 
   } as any;
 
   const repairedLedgers: number[] = [];
-  const result = await repairLedgerGaps(fakePool, 'testnet', async (seq) => {
+  const result = await repairLedgerGaps({ read: fakePool, write: fakePool }, 'testnet', async (seq) => {
     repairedLedgers.push(seq);
     gapCount--;
     return true;
@@ -175,5 +175,31 @@ test('repairLedgerGaps detects and repairs gaps and reports count', async () => 
   assert.equal(result.detected, 2);
   assert.equal(result.repaired, 2);
   assert.deepEqual(repairedLedgers, [102, 105]);
+});
+
+test('gap scans run on the read pool, so a long read cannot starve the write path', async () => {
+  const readQueries: string[] = [];
+  const writeQueries: string[] = [];
+  const readPool = {
+    query: async (sql: string) => {
+      readQueries.push(sql);
+      // Report one gap so the scan and the follow-up recount both run.
+      if (sql.includes('COUNT(')) return { rows: [{ count: '1' }] };
+      if (sql.includes('seq_gaps')) return { rows: [{ sequence: '10' }] };
+      return { rows: [] };
+    },
+  } as any;
+  const writePool = {
+    query: async (sql: string) => {
+      writeQueries.push(sql);
+      return { rows: [] };
+    },
+  } as any;
+
+  await repairLedgerGaps({ read: readPool, write: writePool }, 'testnet', async () => true);
+
+  assert.ok(readQueries.length >= 2, 'gap counts should be issued to the read pool');
+  assert.ok(readQueries.every(sql => sql.includes('COUNT(') || sql.includes('seq_gaps')));
+  assert.deepEqual(writeQueries, [], 'the gap scans themselves must not touch the write pool');
 });
 

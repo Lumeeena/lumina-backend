@@ -27,9 +27,10 @@ import {
   processSetOptionsOperation,
   getSignerChangesForAccount,
   getThresholdChangesForAccount,
+  samplePoolSaturation,
 } from './db';
 import type { ContractStorageEntry } from './soroban';
-import { indexerPoolErrors } from './metrics';
+import { indexerPoolErrors, registry } from './metrics';
 import { makeAccount, makeContractEvent, makeLedger, makeOperation, makeTransaction } from '../../shared/test-factories';
 
 type SqlInput = string | { text: string; values?: unknown[] };
@@ -45,11 +46,37 @@ function sqlParams(sql: SqlInput, params?: unknown[]): unknown[] {
 
 test('createPool logs and counts idle client errors instead of leaving them unhandled', async () => {
   const pool = createPool('postgresql://localhost:5432/lumina');
-  const before = (await indexerPoolErrors.get()).values[0]?.value ?? 0;
+  const before = (await indexerPoolErrors.get()).values.find(v => v.labels['pool'] === 'write')?.value ?? 0;
   pool.emit('error', new Error('simulated idle client error'));
-  const after = (await indexerPoolErrors.get()).values[0]?.value ?? 0;
+  const after = (await indexerPoolErrors.get()).values.find(v => v.labels['pool'] === 'write')?.value ?? 0;
   assert.equal(after, before + 1);
   await pool.end();
+});
+
+test('pool errors are labelled by pool, so read-pool failures are distinguishable', async () => {
+  const pool = createPool('postgresql://localhost:5432/lumina', undefined, 'read');
+  const before = (await indexerPoolErrors.get()).values.find(v => v.labels['pool'] === 'read')?.value ?? 0;
+  pool.emit('error', new Error('simulated idle client error'));
+  const after = (await indexerPoolErrors.get()).values.find(v => v.labels['pool'] === 'read')?.value ?? 0;
+  assert.equal(after, before + 1);
+  await pool.end();
+});
+
+test('samplePoolSaturation publishes per-pool totals, idles and waiters', async () => {
+  const poolOf = (total: number, idle: number, waiting: number) =>
+    ({ totalCount: total, idleCount: idle, waitingCount: waiting }) as unknown as Pool;
+
+  samplePoolSaturation({ write: poolOf(5, 2, 0), read: poolOf(3, 0, 2) });
+
+  const valueFor = async (name: string, pool: string): Promise<number> => {
+    const metric = await registry.getSingleMetric(name)?.get();
+    return metric?.values.find(v => v.labels['pool'] === pool)?.value ?? 0;
+  };
+
+  assert.equal(await valueFor('lumina_indexer_db_pool_connections_total', 'write'), 5);
+  assert.equal(await valueFor('lumina_indexer_db_pool_connections_total', 'read'), 3);
+  assert.equal(await valueFor('lumina_indexer_db_pool_connections_idle', 'write'), 2);
+  assert.equal(await valueFor('lumina_indexer_db_pool_waiting', 'read'), 2);
 });
 
 function makeFakeClient(opts: { failOn?: string } = {}) {
@@ -92,7 +119,10 @@ test('indexLedger writes ledger, transactions, and operations inside one commit'
     'ledgers',
     'transactions',
     'operations',
+    'SAVEPOINT operation_processing',
+    'RELEASE SAVEPOINT operation_processing',
     'failed_ledgers',
+    'indexer_cursors',
     'SELECT pg_notify($1, $2)',
     'COMMIT',
     'RELEASE',
@@ -262,8 +292,11 @@ test('indexLedger queues account refreshes in the ledger transaction', async () 
     'ledgers',
     'transactions',
     'operations',
+    'SAVEPOINT operation_processing',
+    'RELEASE SAVEPOINT operation_processing',
     'account_refresh_queue',
     'failed_ledgers',
+    'indexer_cursors',
     'SELECT pg_notify($1, $2)',
     'COMMIT',
     'RELEASE',
@@ -285,6 +318,8 @@ test('a failed refresh enqueue rolls the ledger transaction back for restart rec
     'ledgers',
     'transactions',
     'operations',
+    'SAVEPOINT operation_processing',
+    'RELEASE SAVEPOINT operation_processing',
     'account_refresh_queue',
     'ROLLBACK',
     'RELEASE',
@@ -418,6 +453,7 @@ test('every insert conflicts on the composite key, so two chains can share a led
     // no inference clause at all, so its entry is undefined rather than a key.
     undefined,
     'network, address',
+    'network, purpose',
     'id, network',
   ]);
 

@@ -82,9 +82,45 @@ export const sorobanRequestDuration = new Histogram({
   registers: [registry],
 });
 
+/**
+ * Labelled by pool (`write` / `read`) because the two pools fail and saturate
+ * independently — an error spike on the read pool says nothing about the write
+ * path, and vice versa.
+ */
 export const indexerPoolErrors = new Counter({
   name: 'lumina_indexer_db_pool_errors_total',
-  help: 'Unexpected idle PostgreSQL pool client errors.',
+  help: 'Unexpected idle PostgreSQL pool client errors, by pool.',
+  labelNames: ['pool'] as const,
+  registers: [registry],
+});
+
+/**
+ * Pool saturation, per pool.
+ *
+ * Queries queue invisibly once every connection in a pool is checked out:
+ * latency climbs with no error to point at. With separate write and read
+ * pools these gauges are also the proof that a long read saturating the read
+ * pool is not starving the write path — the write pool's waiting series stays
+ * at zero while the read pool's climbs.
+ */
+export const dbPoolConnectionsTotal = new Gauge({
+  name: 'lumina_indexer_db_pool_connections_total',
+  help: 'Connections currently held by the pool, by pool.',
+  labelNames: ['pool'] as const,
+  registers: [registry],
+});
+
+export const dbPoolConnectionsIdle = new Gauge({
+  name: 'lumina_indexer_db_pool_connections_idle',
+  help: 'Idle connections in the pool, by pool.',
+  labelNames: ['pool'] as const,
+  registers: [registry],
+});
+
+export const dbPoolWaiting = new Gauge({
+  name: 'lumina_indexer_db_pool_waiting',
+  help: 'Requests queued waiting for a pool connection, by pool.',
+  labelNames: ['pool'] as const,
   registers: [registry],
 });
 

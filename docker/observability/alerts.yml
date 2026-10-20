@@ -59,6 +59,20 @@ groups:
         annotations:
           summary: "Indexer PostgreSQL pool is replacing failed clients"
 
+      - alert: IndexerDatabasePoolWaiting
+        # The failure the pool split exists to catch: work is queuing for a
+        # connection instead of running. On the write pool that means ledger
+        # indexing is stalled behind someone else's checkout; on the read pool a
+        # gap scan or integrity check has saturated its own budget — which is
+        # exactly why it can no longer take connections from the write pool.
+        expr: lumina_indexer_db_pool_waiting > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Indexer {{ $labels.pool }} pool: queries are queuing for a connection"
+          runbook: "Find the long query holding the {{ $labels.pool }} pool (pg_stat_activity), or raise DB_WRITE_POOL_MAX / DB_READ_POOL_MAX. Sustained queueing on the write pool stalls indexing even while reads keep landing."
+
   - name: lumina-graphql
     rules:
       - alert: DatabasePoolExhausted

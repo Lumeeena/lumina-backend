@@ -22,7 +22,14 @@ export interface Config {
   startLedger: number | undefined;
   backfillStartLedger: number | undefined;
   backfillEndLedger: number | undefined;
-  dbPoolMax: number | undefined;
+  /**
+   * Maximum connections in the write pool (ledger indexing, events, trades,
+   * retries, retention). `DB_POOL_MAX` remains the shared fallback for both
+   * pools; unset on either level falls through to pg's default of 10.
+   */
+  dbWritePoolMax: number | undefined;
+  /** Maximum connections in the read pool (gap scans, cursor probes, schema loads). */
+  dbReadPoolMax: number | undefined;
   dbPoolIdleTimeoutMs: number | undefined;
   dbPoolConnectionTimeoutMs: number | undefined;
   sorobanRpcUrl: string | undefined;
@@ -189,6 +196,10 @@ export function parseRetentionWindows(): RetentionWindows {
  * Throws an error and exits if any configuration is invalid.
  */
 export function loadConfig(): Config {
+  // DB_POOL_MAX remains the shared fallback for both pools: a deployment that
+  // sets only it keeps its existing sizing, while DB_WRITE_POOL_MAX and
+  // DB_READ_POOL_MAX let each pool be sized on its own.
+  const sharedPoolMax = optionalInt('DB_POOL_MAX', 1);
   const config: Config = {
     horizonUrl: stringWithDefault('HORIZON_URL', 'https://horizon.stellar.org'),
     horizonAuthToken: optionalString('HORIZON_AUTH_TOKEN'),
@@ -200,7 +211,8 @@ export function loadConfig(): Config {
     startLedger: optionalInt('START_LEDGER', 1),
     backfillStartLedger: optionalInt('BACKFILL_START_LEDGER', 1),
     backfillEndLedger: optionalInt('BACKFILL_END_LEDGER', 1),
-    dbPoolMax: optionalInt('DB_POOL_MAX', 1),
+    dbWritePoolMax: optionalInt('DB_WRITE_POOL_MAX', 1) ?? sharedPoolMax,
+    dbReadPoolMax: optionalInt('DB_READ_POOL_MAX', 1) ?? sharedPoolMax,
     dbPoolIdleTimeoutMs: optionalInt('DB_POOL_IDLE_TIMEOUT', 1000),
     dbPoolConnectionTimeoutMs: optionalInt('DB_POOL_CONNECTION_TIMEOUT', 0),
     sorobanRpcUrl: optionalString('SOROBAN_RPC_URL'),
@@ -312,7 +324,8 @@ export function loadConfig(): Config {
       startLedger: config.startLedger,
       backfillStartLedger: config.backfillStartLedger,
       backfillEndLedger: config.backfillEndLedger,
-      dbPoolMax: config.dbPoolMax,
+      dbWritePoolMax: config.dbWritePoolMax,
+      dbReadPoolMax: config.dbReadPoolMax,
       dbPoolIdleTimeoutMs: config.dbPoolIdleTimeoutMs,
       dbPoolConnectionTimeoutMs: config.dbPoolConnectionTimeoutMs,
       sorobanRpcUrl: config.sorobanRpcUrl,

@@ -232,6 +232,10 @@ async function main(): Promise<void> {
   }
 }
 
+// Only run when invoked as a CLI (`ts-node src/validateSchema.ts` or
+// `node dist/validateSchema.js`). index.ts imports `validateDatabaseSchema`
+// from this module, and running main() on import would connect to the live
+// database — and exit the process — in any consumer, including tests.
 if (require.main === module) {
   main().catch(err => {
     console.error(err instanceof Error ? err.message : err);

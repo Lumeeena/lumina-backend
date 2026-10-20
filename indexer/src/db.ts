@@ -3,7 +3,7 @@ import type { HorizonAccount, HorizonLedger, HorizonOperation, HorizonTransactio
 import type { ContractEvent, ContractStorageEntry } from './soroban';
 import { notifyIndexed } from './notify';
 import { subsystem } from './logger';
-import { indexerPoolErrors } from './metrics';
+import { dbPoolConnectionsIdle, dbPoolConnectionsTotal, dbPoolWaiting, indexerPoolErrors } from './metrics';
 import { configurePoolWithPreparedStatements, PREPARED_STATEMENTS } from './preparedStatements';
 
 const log = subsystem('db');
@@ -63,20 +63,71 @@ function bigintReplacer(_key: string, value: unknown): unknown {
 }
 
 /**
+ * Which of the two indexer pools a query runs on.
+ *
+ * `write` carries every mutating statement — ledger indexing, events, trades,
+ * the retry queue, retention. `read` carries the standalone reads: cursor
+ * probes, schema loads, and the long scans (gap detection, integrity checks)
+ * whose whole point is that they can take their time.
+ */
+export type DbPoolRole = 'write' | 'read';
+
+/**
+ * The indexer's two database pools, sized independently.
+ *
+ * They exist so a long-running read — a gap scan over the whole `ledgers`
+ * table, an integrity check — cannot occupy the connections the write path
+ * needs. Before this split, one pool served both, and a slow read stalled
+ * indexing for a reason that had nothing to do with writing. Both pools point
+ * at the same database; the separation is one of connection budget, not of
+ * data source.
+ */
+export interface Pools {
+  write: Pool;
+  read: Pool;
+}
+
+/**
  * Pool factory with the idle-client error handled.
  *
  * Postgres emits `error` on the pool when a client dies while idle. With no
  * listener that is an unhandled `'error'` event — the process dies — so the
  * handler logs it and counts it; the pool replaces the client itself.
+ *
+ * The `role` labels that counter and decides whether the hot-path write
+ * prepared statements are installed on new connections — a read-pool
+ * connection never runs them, and preparing them there would only make
+ * checkout slower.
  */
-export function createPool(databaseUrl: string, options?: PoolConfig): Pool {
+export function createPool(databaseUrl: string, options?: PoolConfig, role: DbPoolRole = 'write'): Pool {
   const pool = new Pool({ connectionString: databaseUrl, ...options });
   pool.on('error', err => {
-    indexerPoolErrors.inc();
-    log.error({ err: err.message }, 'unexpected PostgreSQL pool client error; pool will replace the client');
+    indexerPoolErrors.inc({ pool: role });
+    log.error({ pool: role, err: err.message }, 'unexpected PostgreSQL pool client error; pool will replace the client');
   });
-  configurePoolWithPreparedStatements(pool);
+  if (role === 'write') {
+    configurePoolWithPreparedStatements(pool);
+  }
   return pool;
+}
+
+/**
+ * Sample both pools' saturation into the per-pool gauges.
+ *
+ * Called at scrape time rather than on a timer, so the numbers in a scrape
+ * are the numbers at scrape time and there is no background interval to leak.
+ * `waiting` above zero on the write pool means indexing work is queued for a
+ * connection; the same on only the read pool means the long reads are
+ * saturating their own budget and nothing else.
+ */
+export function samplePoolSaturation(pools: Pools): void {
+  for (const [name, pool] of [['write', pools.write], ['read', pools.read]] as const) {
+    // These are documented pg.Pool properties but not in every @types/pg version.
+    const stats = pool as unknown as { totalCount?: number; idleCount?: number; waitingCount?: number };
+    dbPoolConnectionsTotal.set({ pool: name }, stats.totalCount ?? 0);
+    dbPoolConnectionsIdle.set({ pool: name }, stats.idleCount ?? 0);
+    dbPoolWaiting.set({ pool: name }, stats.waitingCount ?? 0);
+  }
 }
 
 /**
@@ -846,10 +897,14 @@ export async function upsertContractStorageEntries(
 }
 
 /**
- * Append a contract storage entry change to the history table.
+ * Append this batch to the contract storage change history.
  *
- * The history table is an append-only log of value changes; the live table
- * (`contract_storage_entries`) only carries the current value and state.
+ * `contract_storage_entries` holds only the current value; this table is the
+ * append-only timeline behind it (db/migrations/010_contract_storage_history.sql).
+ * One row per observed state, keyed by the ledger it was observed at —
+ * `ON CONFLICT DO NOTHING` because the storage poll re-fetches overlapping
+ * ranges, and a re-observed unchanged state is the same history row, not a
+ * second one.
  */
 export async function recordContractStorageHistory(
   pool: Pool,

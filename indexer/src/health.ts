@@ -15,6 +15,7 @@ import { createServer, type Server } from 'http';
 import type { Pool } from 'pg';
 import type { Config } from './config';
 import type { RetentionWindows } from './retention';
+import { samplePoolSaturation, type Pools } from './db';
 import { metricsContentType, renderMetrics } from './metrics';
 import { subsystem } from './logger';
 
@@ -123,7 +124,8 @@ export interface DebugConfiguration {
     horizonUrl: string | null;
     pollIntervalMs: number;
     startLedger: number | null;
-    dbPoolMax: number | null;
+    dbWritePoolMax: number | null;
+    dbReadPoolMax: number | null;
     dbPoolIdleTimeoutMs: number | null;
     dbPoolConnectionTimeoutMs: number | null;
     sorobanRpcUrl: string | null;
@@ -182,7 +184,8 @@ export function buildDebugConfiguration(
       horizonUrl: redactEndpoint(config.horizonUrl),
       pollIntervalMs: config.pollIntervalMs,
       startLedger: config.startLedger ?? null,
-      dbPoolMax: config.dbPoolMax ?? null,
+      dbWritePoolMax: config.dbWritePoolMax ?? null,
+      dbReadPoolMax: config.dbReadPoolMax ?? null,
       dbPoolIdleTimeoutMs: config.dbPoolIdleTimeoutMs ?? null,
       dbPoolConnectionTimeoutMs: config.dbPoolConnectionTimeoutMs ?? null,
       sorobanRpcUrl: redactEndpoint(config.sorobanRpcUrl),
@@ -376,7 +379,16 @@ export interface HealthServerOptions {
   port: number;
   getState: () => IndexerState;
   getDebugConfiguration: () => DebugConfiguration;
+  /**
+   * The pool the database reachability probe runs against — the write pool,
+   * because a process that cannot write is not indexing.
+   */
   pool: Pool | null;
+  /**
+   * Both pools, sampled into the per-pool saturation gauges at scrape time.
+   * Absent in tests and tools that serve no metrics.
+   */
+  pools?: Pools | null;
   thresholds?: HealthThresholds;
 }
 
@@ -385,6 +397,7 @@ export function startHealthServer(options: HealthServerOptions): Server {
     const url = (req.url ?? '/').split('?')[0];
 
     if (url === '/metrics') {
+      if (options.pools) samplePoolSaturation(options.pools);
       renderMetrics()
         .then(body => {
           res.writeHead(200, { 'Content-Type': metricsContentType() });

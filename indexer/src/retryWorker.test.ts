@@ -15,11 +15,11 @@ import { RetryWorker } from './retryWorker';
 // ── helpers ───────────────────────────────────────────────────────────────────
 
 /**
- * A minimal pool stub.
+ * A minimal pool stub, used for both the read and write pool.
  *
- * `getPendingRetries` uses `pool.query` to SELECT from `ledger_retry_queue`;
- * `removeLedgerFromRetryQueue` uses it to DELETE. The stub records all calls
- * and returns configurable results.
+ * `getPendingRetries` (read pool) uses `pool.query` to SELECT from
+ * `ledger_retry_queue`; `removeLedgerFromRetryQueue` (write pool) uses it to
+ * DELETE. The stub records all calls and returns configurable results.
  */
 function makePoolStub(pendingByCall: number[][]): {
   pool: Pool;
@@ -52,7 +52,7 @@ test('a ledger that succeeds on retry is removed from the queue', async () => {
   const indexed: number[] = [];
 
   const worker = new RetryWorker({
-    pool,
+    pools: { read: pool, write: pool },
     network: 'testnet',
     indexOne: async (seq) => {
       indexed.push(seq);
@@ -78,7 +78,7 @@ test('a ledger that fails on retry stays in the queue', async () => {
   const { pool, queries } = makePoolStub([[55], [55]]);
 
   const worker = new RetryWorker({
-    pool,
+    pools: { read: pool, write: pool },
     network: 'testnet',
     indexOne: async () => false, // always fails
     pollIntervalMs: 1,
@@ -98,7 +98,7 @@ test('an indexOne that throws does not crash the worker', async () => {
 
   let cycles = 0;
   const worker = new RetryWorker({
-    pool,
+    pools: { read: pool, write: pool },
     network: 'testnet',
     indexOne: async () => {
       cycles++;
@@ -150,7 +150,7 @@ test('the worker is a no-op when the queue is empty', async () => {
   let indexOneCalled = false;
 
   const worker = new RetryWorker({
-    pool,
+    pools: { read: pool, write: pool },
     network: 'testnet',
     indexOne: async () => {
       indexOneCalled = true;
@@ -176,7 +176,7 @@ test('multiple pending ledgers in one cycle are each retried', async () => {
   const indexed: number[] = [];
 
   const worker = new RetryWorker({
-    pool,
+    pools: { read: pool, write: pool },
     network: 'mainnet',
     indexOne: async (seq) => {
       indexed.push(seq);
@@ -205,7 +205,7 @@ test('stop() prevents new cycles from starting', async () => {
   } as unknown as Pool;
 
   const worker = new RetryWorker({
-    pool,
+    pools: { read: pool, write: pool },
     network: 'mainnet',
     indexOne: async () => true,
     pollIntervalMs: 5,
@@ -235,7 +235,7 @@ test('network is passed to the database query', async () => {
   } as unknown as Pool;
 
   const worker = new RetryWorker({
-    pool,
+    pools: { read: pool, write: pool },
     network: 'futurenet',
     indexOne: async () => true,
     pollIntervalMs: 1,

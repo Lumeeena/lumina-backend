@@ -36,7 +36,7 @@ test('refreshAccountQueueBatch fetches stale accounts and commits state with que
   let fetchedAddress = '';
 
   const result = await refreshAccountQueueBatch(
-    pool,
+    { read: pool, write: pool },
     network,
     horizonUrl,
     async (_url, address) => {
@@ -61,7 +61,7 @@ test('refreshAccountQueueBatch stores account history inside the same transactio
   ]]);
 
   await refreshAccountQueueBatch(
-    pool,
+    { read: pool, write: pool },
     network,
     horizonUrl,
     async (_url, address) => makeAccount({ account_id: address }),
@@ -82,7 +82,7 @@ test('refreshAccountQueueBatch skips a snapshot that already covers its request'
   let fetches = 0;
 
   const result = await refreshAccountQueueBatch(
-    pool,
+    { read: pool, write: pool },
     network,
     horizonUrl,
     async () => {
@@ -103,7 +103,7 @@ test('refreshAccountQueueBatch retains transient failures for a later retry', as
   ]]);
 
   const result = await refreshAccountQueueBatch(
-    pool,
+    { read: pool, write: pool },
     network,
     horizonUrl,
     async () => { throw new Error('temporary Horizon failure'); },

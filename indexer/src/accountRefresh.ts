@@ -1,8 +1,8 @@
-import type { Pool } from 'pg';
 import {
   completeAccountRefreshes,
   deferAccountRefreshes,
   getPendingAccountRefreshes,
+  type Pools,
 } from './db';
 import { getAccount, type HorizonAccount } from './horizon';
 import type { HorizonEndpoint } from '@lumina/shared';
@@ -25,13 +25,15 @@ export interface AccountRefreshBatchResult {
 type FetchAccount = (horizonUrl: HorizonEndpoint, address: string) => Promise<HorizonAccount | null>;
 
 export async function refreshAccountQueueBatch(
-  pool: Pool,
+  pools: Pools,
   network: string,
   horizonUrl: HorizonEndpoint,
   fetchAccount: FetchAccount = getAccount,
   batchSize = 100
 ): Promise<AccountRefreshBatchResult> {
-  const requests = await getPendingAccountRefreshes(pool, network, batchSize);
+  // Queue reads go to the read pool; the completions and deferrals are writes
+  // and take connections from the write pool only.
+  const requests = await getPendingAccountRefreshes(pools.read, network, batchSize);
   if (requests.length === 0) {
     return { requested: 0, skipped: 0, failures: [], hasMore: false };
   }
@@ -74,8 +76,8 @@ export async function refreshAccountQueueBatch(
     }
   });
 
-  await completeAccountRefreshes(pool, network, completed);
-  await deferAccountRefreshes(pool, network, deferred);
+  await completeAccountRefreshes(pools.write, network, completed);
+  await deferAccountRefreshes(pools.write, network, deferred);
 
   return {
     requested: toFetch.length,
