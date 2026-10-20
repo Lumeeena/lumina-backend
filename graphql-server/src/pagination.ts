@@ -198,6 +198,7 @@ export const KEYSETS = {
   customEvents: { query: 'customEvents', columns: ['ledger', 'event_id'], types: ['bigint', 'text'] },
   search: { query: 'search', columns: ['rank', 'ledger', 'hash'], types: ['real', 'bigint', 'text'] },
   trades: { query: 'trades', columns: ['ledger_close_time', 'id'], types: ['timestamptz', 'text'] },
+  effects: { query: 'effects', columns: ['ledger', 'id'], types: ['bigint', 'text'] },
 } as const satisfies Record<string, Keyset>;
 
 /** The keyset for a paginated query, by its GraphQL field name. */

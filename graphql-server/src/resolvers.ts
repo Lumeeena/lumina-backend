@@ -52,6 +52,7 @@ import { ANONYMOUS_CALLER, type ApiCaller } from './auth';
 import { computeBalanceHistory } from './balanceHistory';
 import { parseAsOfLedger } from './accountHistory';
 import { memoizeRequestQuery } from './requestMemo';
+import { getEffects } from './effects';
 
 export interface BaseContext {
   pool: Pool;
@@ -627,6 +628,35 @@ export const resolvers = {
       });
     },
 
+    async effects(
+      _: unknown,
+      args: {
+        network?: string | null;
+        account: string;
+        type?: string | null;
+        limit?: number;
+        cursor?: string | null;
+      },
+      ctx: Context
+    ) {
+      return memoizeRequestQuery(ctx.queryMemo, 'effects', args, async () => {
+        const limit = getPageSize(args.limit);
+        const network = networkArgument(args, ctx);
+        const items = await getEffects(ctx.pool, {
+          network: network.name,
+          account: args.account,
+          // The enum is Horizon's type name upper-cased; the table stores it as Horizon sent it.
+          type: args.type ? args.type.toLowerCase() : null,
+          limit,
+          cursor: args.cursor ?? null,
+        });
+        return {
+          items,
+          pageInfo: pageInfo(KEYSETS.effects, items, limit, effect => [effect.ledger, effect.id], 'FORWARD', Boolean(args.cursor)),
+        };
+      });
+    },
+
     async asset(
       _: unknown,
       args: {
@@ -915,6 +945,13 @@ export const resolvers = {
     },
     async account(parent: { sourceAccount: string; network?: string }, _: unknown, ctx: Context) {
       return resolveAccount(parent.sourceAccount, ctx, networkForParent(ctx, parent.network));
+    },
+  },
+
+  EffectDetails: {
+    // effects.ts tags each detail object with the member type it was mapped to.
+    __resolveType(details: { __typename: string }) {
+      return details.__typename;
     },
   },
 };

@@ -325,6 +325,51 @@ query ListOperations($account: String, $type: OperationType, $asset: String) {
 
 The asset filter matches operations where the asset appears as a payment asset or either side of a trade.
 
+### Build an account activity feed from effects
+
+`effects` returns what each operation did to one account, newest first. Each
+effect's `details` is typed by its effect type, so select the members you
+render with inline fragments; types with no fields of their own have
+`details: null`, and a type newer than the server comes through as
+`UnrecognizedEffectDetails` with Horizon's raw JSON.
+
+```graphql
+query ActivityFeed($account: String!, $cursor: String) {
+  effects(account: $account, limit: 20, cursor: $cursor) {
+    items {
+      id
+      type
+      createdAt
+      operationId
+      details {
+        __typename
+        ... on AccountBalanceEffectDetails { amount asset }
+        ... on TradeEffectDetails { soldAmount soldAsset boughtAmount boughtAsset }
+        ... on TrustlineEffectDetails { asset limit }
+        ... on SignerEffectDetails { publicKey weight }
+        ... on UnrecognizedEffectDetails { raw }
+      }
+    }
+    pageInfo { hasNextPage cursor }
+  }
+}
+```
+
+Narrow to one type with `type`, e.g. only incoming payments:
+
+```graphql
+{
+  effects(account: "GA...", type: ACCOUNT_CREDITED) {
+    items { createdAt details { ... on AccountBalanceEffectDetails { amount asset } } }
+    pageInfo { hasNextPage cursor }
+  }
+}
+```
+
+Pass `pageInfo.cursor` back as `cursor` for the next page (see
+[Pagination](#pagination)). `account` is required: effects are read per
+account, through the `(account, network, ledger, id)` index.
+
 ### Fetch asset detail with supply and volume series
 
 One query returns everything a detail page needs — no separate supply, holder and chart round trips:

@@ -51,6 +51,7 @@ This document is the authoritative data dictionary for the Lumina PostgreSQL dat
 23. [account_signer_changes](#23-account_signer_changes)
 24. [account_threshold_changes](#24-account_threshold_changes)
 25. [account_state_history](#25-account_state_history)
+26. [effects](#26-effects)
 
 ---
 
@@ -464,3 +465,22 @@ Stored copies of an account, one per observed last-modified ledger. Written by t
 | `flags` | `JSONB` | No | `'{}'` | JSONB Object | Horizon (`flags`) | Authorization flags at that state. |
 | `thresholds` | `JSONB` | No | `'{}'` | JSONB Object | Horizon (`thresholds`) | Signing thresholds at that state. |
 | `recorded_at` | `TIMESTAMPTZ` | No | `NOW()` | ISO 8601 UTC | Internal | Wall-clock time the copy was stored. Retention prunes on this column. |
+
+---
+
+### 26. `effects`
+Horizon effects: what each operation did to each account it touched (one payment is an `account_debited` on the sender and an `account_credited` on the recipient). Read by the `effects` query (#225); populated per ledger by the indexer (#203). The API maps `details` to a typed GraphQL shape per `type`.
+
+| Column | Type | Nullable | Default | Units / Format | Source | Description |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| `id` | `TEXT` | No (PK) | None | `<operation id>-<order>`, zero-padded | Horizon (`id`) | Effect id; sorts in chain order within a ledger. |
+| `paging_token` | `TEXT` | No | None | Opaque string | Horizon (`paging_token`) | Horizon's paging token for the effect. |
+| `operation_id` | `TEXT` | No | None | String Integer | Horizon (`id`, first half) | Operation that produced the effect. |
+| `ledger` | `BIGINT` | No | None | Ledger sequence | Derived from `operation_id` | Ledger the operation closed in; with `id`, the keyset the API pages by. |
+| `account` | `TEXT` | No | None | Stellar address | Horizon (`account`) | Account the effect happened to. |
+| `type` | `TEXT` | No | None | Horizon effect type name | Horizon (`type`) | e.g. `account_credited`, `trade`. |
+| `type_i` | `INTEGER` | No | None | Integer code | Horizon (`type_i`) | Horizon's numeric code for `type`. |
+| `created_at` | `TIMESTAMPTZ` | No | None | ISO 8601 UTC | Horizon (`created_at`) | When the ledger closed. |
+| `details` | `JSONB` | No | `'{}'` | JSONB Object | Horizon (type-specific fields) | The effect's type-specific fields, verbatim (amounts as decimal strings). |
+| `network` | `TEXT` | No (PK) | `'mainnet'` | Text name | Internal | Network identifier. |
+| `indexed_at` | `TIMESTAMPTZ` | No | `NOW()` | ISO 8601 UTC | Internal | Wall-clock time the row was written. |
