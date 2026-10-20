@@ -788,9 +788,56 @@ Every query, argument, type field and enum value in the schema is documented, so
 
 ## API Versioning
 
-The GraphQL schema is a public interface. Version changes are tracked via git tags and a changelog in the repository. Consumers should check the repository for breaking changes before upgrading.
+The GraphQL schema is the public interface, versioned with the service under
+the policy in [CHANGELOG.md](../CHANGELOG.md): breaking schema changes take a
+major version, additions a minor one.
 
-For the currently running version, check the startup logs or query the server's version endpoint (if available).
+### Fetching the schema for a version
+
+Every release `vX.Y.Z` on
+[GitHub Releases](https://github.com/Lumeeena/lumina-backend/releases) carries
+the exact schema that version serves:
+
+| Asset | What it is |
+| :--- | :--- |
+| `schema.graphql` | The schema in SDL, with every description. |
+| `schema.introspection.json` | The same schema as an introspection result (`{ "__schema": ... }`), for tools that read introspection rather than SDL. |
+| `SHA256SUMS` | Checksums of both, in `sha256sum -c` format. |
+
+Each asset has a stable URL per version, so old releases stay fetchable:
+
+```bash
+# A specific version (pin this in a generated client's build)
+curl -fLO https://github.com/Lumeeena/lumina-backend/releases/download/v1.2.3/schema.graphql
+
+# The latest release
+curl -fLO https://github.com/Lumeeena/lumina-backend/releases/latest/download/schema.graphql
+
+# With the GitHub CLI, including the checksums, then verify
+gh release download v1.2.3 -R Lumeeena/lumina-backend -p 'schema.*' -p SHA256SUMS
+sha256sum -c SHA256SUMS
+```
+
+A code generator can read the pinned URL directly, e.g. in a GraphQL Code
+Generator `codegen.yml`:
+
+```yaml
+schema: https://github.com/Lumeeena/lumina-backend/releases/download/v1.2.3/schema.graphql
+```
+
+### Which version is a server running?
+
+`GET /health` reports it as `version`; fetch the release with that tag. The
+startup log line carries it as well.
+
+```bash
+curl -s https://<host>/health | jq -r .version   # e.g. 1.2.3 -> release v1.2.3
+```
+
+A version without a release (anything built from an untagged commit) has no
+published schema; the schema at any commit is `graphql-server/src/schema.graphql`
+in the repository at that commit. Maintainers: cutting a release is described
+in [RELEASING.md](RELEASING.md).
 
 ## Support
 

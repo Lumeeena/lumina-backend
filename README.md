@@ -14,6 +14,9 @@ Every error carries a stable `extensions.code`; the taxonomy is in
 [docs/ERROR_CODES.md](docs/ERROR_CODES.md).
 Bulk-export consumers: [docs/EXPORT_FORMATS.md](docs/EXPORT_FORMATS.md)
 documents every exported column and its unit, with a worked example.
+Each release carries its GraphQL schema (`schema.graphql`, plus an
+introspection JSON) as release assets, for generating a client pinned to a
+version; see [API Versioning](docs/API_GUIDE.md#api-versioning).
 
 Contributors: the reasoning behind the design — why subscriptions run over
 Postgres `LISTEN`/`NOTIFY` rather than a broker, why decoded contract events
