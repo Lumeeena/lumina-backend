@@ -160,5 +160,38 @@
       ]
     },
     "_links": {}
+  },
+  "effect": {
+    "id": "223456789504897-1",
+    "paging_token": "223456789504897-1",
+    "operation_id": "223456789504897",
+    "type": "account_debited",
+    "type_i": 47,
+    "created_at": "2026-05-06T10:22:14Z",
+    "account": "GBBD47UZQ2RRULJ3UISD3HX2E7E5B57ONDST4NYUAOK5RYSOFSHMARTY",
+    "details": {
+      "amount": "100.0000000",
+      "asset_type": "native"
+    }
+  },
+  "effectPage": {
+    "_embedded": {
+      "records": [
+        {
+          "id": "223456789504897-1",
+          "paging_token": "223456789504897-1",
+          "operation_id": "223456789504897",
+          "type": "account_debited",
+          "type_i": 47,
+          "created_at": "2026-05-06T10:22:14Z",
+          "account": "GBBD47UZQ2RRULJ3UISD3HX2E7E5B57ONDST4NYUAOK5RYSOFSHMARTY",
+          "details": {
+            "amount": "100.0000000",
+            "asset_type": "native"
+          }
+        }
+      ]
+    },
+    "_links": {}
   }
 }

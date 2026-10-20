@@ -32,6 +32,7 @@ export interface IndexedNotification {
   transactions?: number | undefined;
   operations?: number | undefined;
   events?: number | undefined;
+  effects?: number | undefined;
 }
 
 /**
@@ -54,6 +55,7 @@ export function parseNotification(payload: string | undefined): IndexedNotificat
       transactions: numberOrUndefined(parsed.transactions),
       operations: numberOrUndefined(parsed.operations),
       events: numberOrUndefined(parsed.events),
+      effects: numberOrUndefined(parsed.effects),
     };
   } catch {
     return null;

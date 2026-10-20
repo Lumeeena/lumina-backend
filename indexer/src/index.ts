@@ -103,7 +103,7 @@ import {
 import { initErrorTracking, captureException, shutdownErrorTracking } from './errorTracking';
 import { LeaderLock } from './leaderLock';
 import { getRetentionInfo, getContractStorageEntries } from './soroban';
-import { getLatestLedgerSequence, getLedger, getLedgerOperations, getLedgerTransactions, getTrades, initializeHorizonClient } from './horizon';
+import { getLatestLedgerSequence, getLedger, getLedgerOperations, getLedgerTransactions, getLedgerEffects, getTrades, initializeHorizonClient } from './horizon';
 import { getActiveContracts, resolveRegistryConfigs, type RegistryConfig } from './registry';
 import { getEvents, getLatestLedgerSequence as getLatestRpcLedgerSequence, type ContractEvent } from './soroban';
 import { resolveNetworks, type NetworkConfig } from './networks';
@@ -312,10 +312,11 @@ async function fetchAndIndexLedger(loop: NetworkLoop, sequence: number, isBackfi
   const name = loop.network.name;
   log.debug({ network: name, ledger: sequence, isBackfill: isBackfillMode }, 'indexing ledger');
 
-  const [ledger, transactions, operations] = await Promise.all([
+  const [ledger, transactions, operations, effects] = await Promise.all([
     getLedger(loop.network.horizonUrl, sequence),
     getLedgerTransactions(loop.network.horizonUrl, sequence),
     getLedgerOperations(loop.network.horizonUrl, sequence),
+    getLedgerEffects(loop.network.horizonUrl, sequence),
   ]);
 
   const addresses = new Set<string>();
@@ -330,7 +331,7 @@ async function fetchAndIndexLedger(loop: NetworkLoop, sequence: number, isBackfi
   });
   const addressesToFetch = await getAccountsNeedingRefresh(readPool, name, expiredAddresses, sequence);
   const stopTimer = ledgerIndexDuration.startTimer();
-  await indexLedger(writePool, name, ledger, transactions, operations, addressesToFetch);
+  await indexLedger(writePool, name, ledger, transactions, operations, effects, addressesToFetch);
   stopTimer();
 
   for (const address of expiredAddresses) {
@@ -346,7 +347,7 @@ async function fetchAndIndexLedger(loop: NetworkLoop, sequence: number, isBackfi
   if (isBackfillMode) {
     recordBackfillLedger(name, sequence, transactions.length, operations.length);
     routine.success(
-      { network: name, ledger: sequence, transactions: transactions.length, operations: operations.length, mode: 'backfill' },
+      { network: name, ledger: sequence, transactions: transactions.length, operations: operations.length, effects: effects.length, mode: 'backfill' },
       'historical ledger backfilled'
     );
   } else {
@@ -356,7 +357,7 @@ async function fetchAndIndexLedger(loop: NetworkLoop, sequence: number, isBackfi
     loop.state.lastIndexedAt = Date.now();
     recordIndexedLedger(name, sequence, transactions.length, operations.length);
     routine.success(
-      { network: name, ledger: sequence, transactions: transactions.length, operations: operations.length },
+      { network: name, ledger: sequence, transactions: transactions.length, operations: operations.length, effects: effects.length },
       'ledger indexed'
     );
   }

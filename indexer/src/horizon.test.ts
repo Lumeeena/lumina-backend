@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { getLatestLedgerSequence, getLedger, getLedgerTransactions, getLedgerOperations, getAccount, getTrades, PAGE_LIMIT, initializeHorizonClient } from './horizon';
+import { getLatestLedgerSequence, getLedger, getLedgerTransactions, getLedgerOperations, getLedgerEffects, getAccount, getTrades, PAGE_LIMIT, initializeHorizonClient } from './horizon';
 // @ts-expect-error - JSON file imports are enabled at runtime for this test fixture.
 import fixtures from './__fixtures__/horizon.json' assert { type: 'json' };
 
@@ -148,6 +148,39 @@ test('getLedgerOperations stops after a single short page', async () => {
   ]);
   const ops = await getLedgerOperations('https://horizon.example.com', 52481234);
   assert.equal(ops.length, 1);
+});
+
+test('getLedgerEffects parses recorded Horizon response shape', async () => {
+  mockFetchSequence([{ ok: true, body: fixtures.effectPage }]);
+  const effects = await getLedgerEffects('https://horizon.example.com', 52481234);
+  assert.equal(effects.length, 1);
+  assert.equal(effects[0].id, '223456789504897-1');
+  assert.equal(effects[0].type, 'account_debited');
+  assert.equal(effects[0].account, fixtures.effect.account);
+  assert.equal(effects[0].operation_id, '223456789504897');
+});
+
+test('getLedgerEffects follows pagination when a page is full', async () => {
+  const fullPage = Array.from({ length: PAGE_LIMIT }, (_, i) => ({
+    ...fixtures.effect,
+    id: `effect-${i}`,
+  }));
+  mockFetchSequence([
+    { ok: true, body: { _embedded: { records: fullPage }, _links: { next: { href: 'page2' } } } },
+    { ok: true, body: { _embedded: { records: [fixtures.effect] }, _links: {} } },
+  ]);
+  const effects = await getLedgerEffects('https://horizon.example.com', 52481234);
+  assert.equal(effects.length, PAGE_LIMIT + 1);
+  assert.equal(effects[0].id, 'effect-0');
+  assert.equal(effects.at(-1)?.id, fixtures.effect.id);
+});
+
+test('getLedgerEffects stops after a single short page', async () => {
+  mockFetchSequence([
+    { ok: true, body: { _embedded: { records: [fixtures.effect] }, _links: {} } },
+  ]);
+  const effects = await getLedgerEffects('https://horizon.example.com', 52481234);
+  assert.equal(effects.length, 1);
 });
 
 test('getTrades parses recorded Horizon response shape', async () => {

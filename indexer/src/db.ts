@@ -1,5 +1,5 @@
 import { Pool, PoolClient, type PoolConfig } from 'pg';
-import type { HorizonAccount, HorizonLedger, HorizonOperation, HorizonTransaction, HorizonTrade } from './horizon';
+import type { HorizonAccount, HorizonEffect, HorizonLedger, HorizonOperation, HorizonTransaction, HorizonTrade } from './horizon';
 import type { ContractEvent, ContractStorageEntry } from './soroban';
 import { notifyIndexed } from './notify';
 import { subsystem } from './logger';
@@ -444,7 +444,7 @@ export async function setIndexerCursor(
 }
 
 /**
- * Writes a ledger, transactions, operations, and account refresh intents in a
+ * Writes a ledger, transactions, operations, effects, and account refresh intents in a
  * single transaction. If it rolls back, the ledger is retried; after commit,
  * the outbox survives a crash and the account worker resumes it on startup.
  */
@@ -454,6 +454,7 @@ export async function indexLedger(
   ledger: HorizonLedger,
   transactions: HorizonTransaction[],
   operations: HorizonOperation[],
+  effects: HorizonEffect[],
   accountAddresses: string[] = []
 ): Promise<void> {
   // A created claimable balance's id is derived from its transaction.
@@ -589,6 +590,41 @@ export async function indexLedger(
       }
     }
 
+    // Insert effects
+    if (effects.length > 0) {
+      for (let i = 0; i < effects.length; i += BATCH_CHUNK_SIZE) {
+        const chunk = effects.slice(i, i + BATCH_CHUNK_SIZE);
+        const values: unknown[] = [];
+        const rows: string[] = [];
+
+        chunk.forEach((effect, rowIdx) => {
+          const offset = rowIdx * 10;
+          rows.push(
+            `($${offset + 1}, $${offset + 2}, $${offset + 3}, $${offset + 4}, $${offset + 5}, $${offset + 6}, $${offset + 7}, $${offset + 8}, $${offset + 9}, $${offset + 10})`
+          );
+          values.push(
+            effect.id,
+            effect.paging_token,
+            effect.operation_id,
+            ledger.sequence,
+            effect.account,
+            effect.type,
+            effect.type_i,
+            effect.created_at,
+            JSON.stringify(effect.details ?? {}),
+            network
+          );
+        });
+
+        await client.query(
+          `INSERT INTO effects (id, paging_token, operation_id, ledger, account, type, type_i, created_at, details, network)
+           VALUES ${rows.join(', ')}
+           ON CONFLICT (id, network) DO NOTHING`,
+          values
+        );
+      }
+    }
+
     if (accountAddresses.length > 0) {
       await client.query(
         `INSERT INTO account_refresh_queue (network, address, last_requested_ledger)
@@ -613,12 +649,13 @@ export async function indexLedger(
       ledger: ledger.sequence,
       transactions: transactions.length,
       operations: operations.length,
+      effects: effects.length,
     });
 
     await client.query('COMMIT');
   } catch (err) {
     await client.query('ROLLBACK');
-    logCheckViolation({ network, ledger: ledger.sequence, transactions: transactions.length, operations: operations.length }, err);
+    logCheckViolation({ network, ledger: ledger.sequence, transactions: transactions.length, operations: operations.length, effects: effects.length }, err);
     throw err;
   } finally {
     client.release();

@@ -29,6 +29,7 @@ import {
   ShapeProblem,
   TRADE_SPEC,
   TRANSACTION_SPEC,
+  EFFECT_SPEC,
   checkPage,
   checkRecord,
   type RecordSpec,
@@ -74,6 +75,18 @@ export interface HorizonOperation {
   transaction_hash: string;
   created_at: string;
   source_account: string;
+  [key: string]: unknown;
+}
+
+export interface HorizonEffect {
+  id: string;
+  paging_token: string;
+  operation_id: string;
+  type: string;
+  type_i: number;
+  created_at: string;
+  account: string;
+  details: Record<string, unknown>;
   [key: string]: unknown;
 }
 
@@ -219,6 +232,7 @@ export interface HorizonClient {
   getLedger(sequence: number, baseUrl?: HorizonEndpoint): Promise<HorizonLedger>;
   getLedgerTransactions(sequence: number, baseUrl?: HorizonEndpoint): Promise<HorizonTransaction[]>;
   getLedgerOperations(sequence: number, baseUrl?: HorizonEndpoint): Promise<HorizonOperation[]>;
+  getLedgerEffects(sequence: number, baseUrl?: HorizonEndpoint): Promise<HorizonEffect[]>;
   getAccount(address: string, baseUrl?: HorizonEndpoint): Promise<HorizonAccount | null>;
   /**
    * Account fetch for callers that must tell "does not exist" apart from
@@ -469,6 +483,13 @@ export function createHorizonClient(options: HorizonClientOptions = {}): Horizon
       return fetchAllPages<HorizonOperation>(
         url(`/ledgers/${sequence}/operations?order=asc&limit=${PAGE_LIMIT}`, endpoints(baseUrl)[0]!),
         OPERATION_SPEC, baseUrl
+      );
+    },
+
+    getLedgerEffects(sequence: number, baseUrl?: HorizonEndpoint): Promise<HorizonEffect[]> {
+      return fetchAllPages<HorizonEffect>(
+        url(`/ledgers/${sequence}/effects?order=asc&limit=${PAGE_LIMIT}`, endpoints(baseUrl)[0]!),
+        EFFECT_SPEC, baseUrl
       );
     },
 

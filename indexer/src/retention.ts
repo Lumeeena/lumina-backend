@@ -121,7 +121,8 @@ export type RetentionTable =
   | 'contract_events'
   | 'custom_events'
   | 'ledgers'
-  | 'account_state_history';
+  | 'account_state_history'
+  | 'effects';
 
 /** How to prune one table: its name and the chain-time column the cutoff applies to. */
 export interface RetentionSpec {
@@ -133,14 +134,15 @@ export interface RetentionSpec {
 /**
  * Prune order. Children before parents, because `operations` and `transactions`
  * carry foreign keys into each other and `transactions` into `ledgers`:
- * deleting a parent row first fails the FK. `contract_events` and
- * `custom_events` are independent leaves.
+ * deleting a parent row first fails the FK. `contract_events`, `custom_events`,
+ * and `effects` are independent leaves.
  */
 export const RETENTION_SPECS: readonly RetentionSpec[] = [
   { table: 'operations', timeColumn: 'created_at' },
   { table: 'transactions', timeColumn: 'created_at' },
   { table: 'contract_events', timeColumn: 'created_at' },
   { table: 'custom_events', timeColumn: 'created_at' },
+  { table: 'effects', timeColumn: 'created_at' },
   { table: 'ledgers', timeColumn: 'closed_at' },
   // No foreign keys reference or leave it, so its place in the order is free.
   // Wall-clock: see the module comment on chain time.
@@ -185,6 +187,7 @@ export function unlimitedRetentionWindows(): RetentionWindows {
     transactions: 0,
     contract_events: 0,
     custom_events: 0,
+    effects: 0,
     ledgers: 0,
     account_state_history: 0,
   };
