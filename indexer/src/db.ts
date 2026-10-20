@@ -157,15 +157,26 @@ export async function updateBackfillProgress(
   endLedger: number,
   currentLedger: number
 ): Promise<void> {
-  const completed = currentLedger < startLedger;
-  await pool.query(
-    `UPDATE backfill_progress
-     SET current_ledger = $4,
-         completed_at = CASE WHEN $5 THEN NOW() ELSE completed_at END,
-         updated_at = NOW()
-     WHERE network = $1 AND start_ledger = $2 AND end_ledger = $3`,
-    [network, startLedger, endLedger, currentLedger, completed]
-  );
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const completed = currentLedger < startLedger;
+    await client.query(
+      `UPDATE backfill_progress
+       SET current_ledger = $4,
+           completed_at = CASE WHEN $5 THEN NOW() ELSE completed_at END,
+           updated_at = NOW()
+       WHERE network = $1 AND start_ledger = $2 AND end_ledger = $3`,
+      [network, startLedger, endLedger, currentLedger, completed]
+    );
+    await setIndexerCursor(client, network, 'backfill', currentLedger);
+    await client.query('COMMIT');
+  } catch (err) {
+    await client.query('ROLLBACK');
+    throw err;
+  } finally {
+    client.release();
+  }
 }
 
 /**
@@ -301,6 +312,80 @@ export async function deferAccountRefreshes(
 
 export const BATCH_CHUNK_SIZE = 500;
 
+export async function recordDeadLetterOperation(
+  client: Pool | PoolClient,
+  network: string,
+  ledger: number,
+  operation: HorizonOperation,
+  error: unknown
+): Promise<void> {
+  await client.query(
+    `INSERT INTO dead_letter_operations (network, ledger, operation_id, payload, error)
+     VALUES ($1, $2, $3, $4::jsonb, $5)`,
+    [network, ledger, operation.id ?? null, JSON.stringify(operation, bigintReplacer), error instanceof Error ? error.message : String(error)]
+  );
+}
+
+export async function countPendingDeadLetters(pool: Pool, network?: string): Promise<number> {
+  const result = await pool.query<{ count: string }>(
+    network
+      ? `SELECT COUNT(*)::text AS count FROM dead_letter_operations WHERE network = $1 AND status = 'pending'`
+      : `SELECT COUNT(*)::text AS count FROM dead_letter_operations WHERE status = 'pending'`,
+    network ? [network] : []
+  );
+  return Number(result.rows[0]?.count ?? 0);
+}
+
+export async function reprocessDeadLetter(
+  pool: Pool,
+  id: number,
+  process: (operation: HorizonOperation) => Promise<void>
+): Promise<void> {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const { rows } = await client.query<{ payload: HorizonOperation }>(
+      `SELECT payload FROM dead_letter_operations WHERE id = $1 AND status = 'pending' FOR UPDATE`,
+      [id]
+    );
+    if (!rows[0]) throw new Error(`pending dead letter ${id} was not found`);
+    await process(rows[0].payload);
+    await client.query(
+      `UPDATE dead_letter_operations SET status = 'processed', processed_at = NOW(), updated_at = NOW()
+       WHERE id = $1`,
+      [id]
+    );
+    await client.query('COMMIT');
+  } catch (err) {
+    await client.query('ROLLBACK');
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
+export async function getIndexerCursor(pool: Pool, network: string, purpose: 'forward' | 'backfill' | 'events'): Promise<number | null> {
+  const { rows } = await pool.query<{ cursor: string }>(
+    'SELECT cursor FROM indexer_cursors WHERE network = $1 AND purpose = $2',
+    [network, purpose]
+  );
+  return rows[0] ? Number(rows[0].cursor) : null;
+}
+
+export async function setIndexerCursor(
+  client: Pool | PoolClient,
+  network: string,
+  purpose: 'forward' | 'backfill' | 'events',
+  cursor: number
+): Promise<void> {
+  await client.query(
+    `INSERT INTO indexer_cursors (network, purpose, cursor)
+     VALUES ($1, $2, $3)
+     ON CONFLICT (network, purpose) DO UPDATE SET cursor = EXCLUDED.cursor, updated_at = NOW()`,
+    [network, purpose, cursor]
+  );
+}
+
 /**
  * Writes a ledger, transactions, operations, and account refresh intents in a
  * single transaction. If it rolls back, the ledger is retried; after commit,
@@ -414,7 +499,9 @@ export async function indexLedger(
 
       for (const op of operations) {
         // Process asset-related operations for trustlines, assets, and volume tracking
-        await processAssetOperation(client, network, ledger.sequence, op);
+        await client.query('SAVEPOINT operation_processing');
+        try {
+          await processAssetOperation(client, network, ledger.sequence, op);
 
         // Process liquidity pools, claimable balances, path payments, and set_options operations
         await processLiquidityPoolOperation(client, network, ledger.sequence, op);
@@ -432,7 +519,14 @@ export async function indexLedger(
         await processSorobanTTLOperation(client, network, ledger.sequence, op);
 
         // Process contract interface extraction (Issue #263)
-        await processContractInterfaceOperation(client, network, ledger.sequence, op);
+          await processContractInterfaceOperation(client, network, ledger.sequence, op);
+          await client.query('RELEASE SAVEPOINT operation_processing');
+        } catch (err) {
+          await client.query('ROLLBACK TO SAVEPOINT operation_processing');
+          await client.query('RELEASE SAVEPOINT operation_processing');
+          await recordDeadLetterOperation(client, network, ledger.sequence, op, err);
+          log.error({ network, ledger: ledger.sequence, operation: op.id, err: err instanceof Error ? err.message : String(err) }, 'operation was retained in dead letter table');
+        }
       }
     }
 
@@ -449,6 +543,7 @@ export async function indexLedger(
 
     // Clear any failure records for this ledger now that it has landed
     await clearLedgerFailures(client, network, ledger.sequence);
+    await setIndexerCursor(client, network, 'forward', ledger.sequence);
 
     // Queued inside the transaction on purpose: Postgres delivers notifications
     // at commit, so a rolled-back ledger announces nothing and no subscriber is

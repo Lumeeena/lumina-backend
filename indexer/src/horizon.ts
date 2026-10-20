@@ -32,6 +32,7 @@ import {
   type HorizonTrade,
   type HorizonTradePrice,
   type HorizonTradesFilter,
+  type HorizonEndpoint,
 } from '@lumina/shared';
 import {
   horizonRequestDuration,
@@ -39,6 +40,7 @@ import {
   horizonThrottleInterval,
   horizonQueuedRequests,
   horizonWaitTime,
+  horizonEndpointRequests,
 } from './metrics';
 import { subsystem } from './logger';
 
@@ -141,6 +143,7 @@ export function initializeHorizonClient(config: HorizonClientConfig): void {
     validateResponses: true,
     metrics: {
       requestsTotal: horizonRequests,
+      endpointRequests: horizonEndpointRequests,
       requestDuration: horizonRequestDuration,
       currentInterval: horizonThrottleInterval,
       queuedRequests: horizonQueuedRequests,
@@ -157,7 +160,7 @@ export function initializeHorizonClient(config: HorizonClientConfig): void {
  * Returns `0` when Horizon has no records (an empty network or a misconfigured
  * URL).
  */
-export function getLatestLedgerSequence(horizonUrl: string): Promise<number> {
+export function getLatestLedgerSequence(horizonUrl: HorizonEndpoint): Promise<number> {
   return client.getLatestLedgerSequence(horizonUrl);
 }
 
@@ -167,7 +170,7 @@ export function getLatestLedgerSequence(horizonUrl: string): Promise<number> {
  * Throws on a non-OK response (e.g. 404 for a ledger that does not exist yet)
  * because the indexer's ledger walk must not silently skip a missing ledger.
  */
-export function getLedger(horizonUrl: string, sequence: number): Promise<HorizonLedger> {
+export function getLedger(horizonUrl: HorizonEndpoint, sequence: number): Promise<HorizonLedger> {
   return client.getLedger(sequence, horizonUrl);
 }
 
@@ -178,7 +181,7 @@ export function getLedger(horizonUrl: string, sequence: number): Promise<Horizon
  * `PAGE_LIMIT` records) stops pagination without an extra round-trip.
  */
 export function getLedgerTransactions(
-  horizonUrl: string,
+  horizonUrl: HorizonEndpoint,
   sequence: number,
 ): Promise<HorizonTransaction[]> {
   return client.getLedgerTransactions(sequence, horizonUrl);
@@ -192,7 +195,7 @@ export function getLedgerTransactions(
  * details are all accessible without a union type per operation type.
  */
 export function getLedgerOperations(
-  horizonUrl: string,
+  horizonUrl: HorizonEndpoint,
   sequence: number,
 ): Promise<HorizonOperation[]> {
   return client.getLedgerOperations(sequence, horizonUrl);
@@ -205,7 +208,7 @@ export function getLedgerOperations(
  * so the indexer can treat "not found" as "not yet created" rather than an
  * error. Transient failures (429, 5xx) throw so queued refreshes can retry.
  */
-export function getAccount(horizonUrl: string, address: string): Promise<HorizonAccount | null> {
+export function getAccount(horizonUrl: HorizonEndpoint, address: string): Promise<HorizonAccount | null> {
   return client.getAccount(address, horizonUrl);
 }
 
@@ -214,7 +217,7 @@ export function getAccount(horizonUrl: string, address: string): Promise<Horizon
  * cursor. Returns an empty array when no trades match.
  */
 export function getTrades(
-  horizonUrl: string,
+  horizonUrl: HorizonEndpoint,
   params?: HorizonTradesFilter
 ): Promise<HorizonTrade[]> {
   return client.getTrades(params, horizonUrl);

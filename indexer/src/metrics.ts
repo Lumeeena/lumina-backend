@@ -102,6 +102,27 @@ export const indexingErrors = new Counter({
   registers: [registry],
 });
 
+export const deadLetterQueueSize = new Gauge({
+  name: 'lumina_dead_letter_queue_size',
+  help: 'Pending permanently unprocessable operations retained for reprocessing.',
+  labelNames: ['network'] as const,
+  registers: [registry],
+});
+
+export const horizonEndpointRequests = new Counter({
+  name: 'lumina_horizon_endpoint_requests_total',
+  help: 'Outbound Horizon requests by endpoint and HTTP status.',
+  labelNames: ['endpoint', 'status'] as const,
+  registers: [registry],
+});
+
+export const horizonPaused = new Gauge({
+  name: 'lumina_horizon_paused',
+  help: 'Whether indexing is paused because every Horizon endpoint is unavailable.',
+  labelNames: ['network'] as const,
+  registers: [registry],
+});
+
 /**
  * The three gauges below are labelled `network`.
  *

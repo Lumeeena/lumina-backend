@@ -100,7 +100,7 @@ export class NetworkConfigError extends Error {
 export interface NetworkConfig {
   /** Lowercase declared name — the value stored in the `network` column. */
   name: string;
-  horizonUrl: string;
+  horizonUrl: string | string[];
   /** Unset means Soroban event indexing is disabled for this network. */
   sorobanRpcUrl?: string;
   /** Passphrase transactions are signed against for this network. */
@@ -183,10 +183,15 @@ function optional(env: Env, key: string): string | undefined {
   return value === undefined || value.trim() === '' ? undefined : value.trim();
 }
 
+function endpointValue(value: string): string | string[] {
+  const endpoints = value.split(',').map(endpoint => endpoint.trim()).filter(Boolean);
+  return endpoints.length <= 1 ? endpoints[0]! : endpoints;
+}
+
 function buildNetwork(env: Env, name: string, prefix: string): NetworkConfig {
   const network: NetworkConfig = {
     name,
-    horizonUrl: required(env, `${prefix}_HORIZON_URL`, name),
+    horizonUrl: endpointValue(required(env, `${prefix}_HORIZON_URL`, name)),
     networkPassphrase: optional(env, `${prefix}_NETWORK_PASSPHRASE`) ?? defaultPassphrase(name),
   };
   const sorobanRpcUrl = optional(env, `${prefix}_SOROBAN_RPC_URL`);
@@ -224,7 +229,7 @@ export function resolveNetworks(env: Env = process.env): NetworkRegistry {
 
     const network: NetworkConfig = {
       name,
-      horizonUrl: optional(env, 'HORIZON_URL') ?? DEFAULT_HORIZON_URL,
+      horizonUrl: endpointValue(optional(env, 'HORIZON_URL') ?? DEFAULT_HORIZON_URL),
       networkPassphrase: optional(env, 'NETWORK_PASSPHRASE') ?? defaultPassphrase(name),
     };
     const sorobanRpcUrl = optional(env, 'SOROBAN_RPC_URL');

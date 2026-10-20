@@ -10,6 +10,7 @@
 
 export interface ThrottleMetrics {
   requestsTotal: { inc: (labels: Record<string, string | number>) => void };
+  endpointRequests?: { inc: (labels: Record<string, string | number>) => void };
   requestDuration?: { startTimer: () => () => void };
 }
 

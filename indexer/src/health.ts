@@ -52,6 +52,7 @@ export interface NetworkState {
   latestHorizonLedger: number;
   /** Unix ms of the last successful index on this network, or null if none yet. */
   lastIndexedAt: number | null;
+  horizonPaused?: boolean;
 }
 
 export interface IndexerState {
@@ -77,6 +78,7 @@ export interface NetworkHealth {
   latestHorizonLedger: number;
   lagLedgers: number;
   secondsSinceLastIndex: number | null;
+  horizonPaused: boolean;
 }
 
 export interface HealthReport {
@@ -150,13 +152,14 @@ export interface DebugConfiguration {
 }
 
 export type DebugNetworkInput = Omit<DebugNetworkConfiguration, 'horizonUrl' | 'sorobanRpcUrl'> & {
-  horizonUrl: string;
+  horizonUrl: string | string[];
   sorobanRpcUrl: string | undefined;
 };
 
 /** Expose operational configuration without returning URL credentials or opaque tokens. */
-export function redactEndpoint(value: string | undefined): string | null {
+export function redactEndpoint(value: string | string[] | undefined): string | null {
   if (!value) return null;
+  if (Array.isArray(value)) return value.map(endpoint => redactEndpoint(endpoint)).filter(Boolean).join(', ');
   try {
     const parsed = new URL(value);
     const path = parsed.pathname !== '/' ? '/[redacted]' : '';
@@ -293,6 +296,12 @@ export async function buildHealthReport(
     state.lastIndexedAt === null ? null : (now - state.lastIndexedAt) / 1000;
 
   const lagLedgers = Math.max(0, state.latestHorizonLedger - state.latestIndexedLedger);
+  const paused = state.networks?.some(entry => entry.horizonPaused) ?? false;
+  checks.push({
+    name: 'horizon-availability',
+    ok: !paused,
+    detail: paused ? 'all configured Horizon endpoints are unavailable; indexing is paused' : undefined,
+  });
 
   const uptimeSeconds = (now - state.startedAt) / 1000;
   const startingTolerance = uptimeSeconds <= thresholds.startToleranceSeconds;
@@ -335,6 +344,7 @@ export async function buildHealthReport(
       latestHorizonLedger: entry.latestHorizonLedger,
       lagLedgers: Math.max(0, entry.latestHorizonLedger - entry.latestIndexedLedger),
       secondsSinceLastIndex: age,
+      horizonPaused: entry.horizonPaused ?? false,
     };
   });
 

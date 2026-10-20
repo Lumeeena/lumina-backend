@@ -163,7 +163,7 @@ export interface HorizonClientOptions {
   /** Label used in error messages and log lines. */
   name?: string;
   /** Base URL for calls that do not pass one explicitly. */
-  baseUrl?: string;
+  baseUrl?: HorizonEndpoint;
   /** Minimum spacing between outbound requests. */
   minIntervalMs?: number;
   /** Attempts per URL, including the first. */
@@ -188,6 +188,19 @@ export interface HorizonClientOptions {
   sleep?: (ms: number) => Promise<void>;
 }
 
+export type HorizonEndpoint = string | readonly string[];
+
+export class HorizonUnavailableError extends Error {
+  readonly endpoints: string[];
+
+  constructor(endpoints: string[], cause?: unknown) {
+    super(`all Horizon endpoints are unavailable: ${endpoints.join(', ')}`);
+    this.name = 'HorizonUnavailableError';
+    this.endpoints = endpoints;
+    this.cause = cause;
+  }
+}
+
 /**
  * Every method takes the base URL of the network it is asking about, because a
  * deployment serves more than one chain: falling back to the primary network's
@@ -196,19 +209,19 @@ export interface HorizonClientOptions {
  * which is the single-network deployment's default.
  */
 export interface HorizonClient {
-  getLatestLedgerSequence(baseUrl?: string): Promise<number>;
-  getLedger(sequence: number, baseUrl?: string): Promise<HorizonLedger>;
-  getLedgerTransactions(sequence: number, baseUrl?: string): Promise<HorizonTransaction[]>;
-  getLedgerOperations(sequence: number, baseUrl?: string): Promise<HorizonOperation[]>;
-  getAccount(address: string, baseUrl?: string): Promise<HorizonAccount | null>;
-  getRecentTransactions(limit?: number, baseUrl?: string): Promise<HorizonTransaction[]>;
+  getLatestLedgerSequence(baseUrl?: HorizonEndpoint): Promise<number>;
+  getLedger(sequence: number, baseUrl?: HorizonEndpoint): Promise<HorizonLedger>;
+  getLedgerTransactions(sequence: number, baseUrl?: HorizonEndpoint): Promise<HorizonTransaction[]>;
+  getLedgerOperations(sequence: number, baseUrl?: HorizonEndpoint): Promise<HorizonOperation[]>;
+  getAccount(address: string, baseUrl?: HorizonEndpoint): Promise<HorizonAccount | null>;
+  getRecentTransactions(limit?: number, baseUrl?: HorizonEndpoint): Promise<HorizonTransaction[]>;
   getAccountTransactions(
     address: string,
     limit?: number,
-    baseUrl?: string
+    baseUrl?: HorizonEndpoint
   ): Promise<HorizonTransaction[]>;
-  getLatestLedger(baseUrl?: string): Promise<HorizonLatestLedger | null>;
-  getTrades(params?: HorizonTradesFilter, baseUrl?: string): Promise<HorizonTrade[]>;
+  getLatestLedger(baseUrl?: HorizonEndpoint): Promise<HorizonLatestLedger | null>;
+  getTrades(params?: HorizonTradesFilter, baseUrl?: HorizonEndpoint): Promise<HorizonTrade[]>;
 }
 
 /** Checks a decoded body; throws `ShapeProblem` when it does not match. */
@@ -260,10 +273,24 @@ export function createHorizonClient(options: HorizonClientOptions = {}): Horizon
 
   const backoffMs = (attempt: number) => baseBackoffMs * 2 ** (attempt - 1);
 
-  function url(path: string, baseUrl?: string): string {
-    const base = baseUrl ?? defaultBaseUrl;
-    if (!base) throw new Error(`${name} client has no base URL: pass one or configure baseUrl`);
-    return `${base.replace(/\/+$/, '')}${path}`;
+  const demotedUntil = new Map<string, number>();
+  const demotionMs = 30_000;
+
+  function endpoints(baseUrl?: HorizonEndpoint): string[] {
+    const configured = baseUrl ?? defaultBaseUrl;
+    const values = typeof configured === 'string' ? configured.split(',') : configured ?? [];
+    const result = values.map(value => value.trim()).filter(Boolean);
+    if (result.length === 0) throw new Error(`${name} client has no base URL: pass one or configure baseUrl`);
+    const now = Date.now();
+    return [...result].sort((a, b) => {
+      const aDemoted = (demotedUntil.get(a) ?? 0) > now;
+      const bDemoted = (demotedUntil.get(b) ?? 0) > now;
+      return Number(aDemoted) - Number(bDemoted) || result.indexOf(a) - result.indexOf(b);
+    });
+  }
+
+  function url(path: string, endpoint: string): string {
+    return `${endpoint.replace(/\/+$/, '')}${path}`;
   }
 
   /**
@@ -275,14 +302,26 @@ export function createHorizonClient(options: HorizonClientOptions = {}): Horizon
    * query. A 404 is a statement about the ledger or account, not a failure, so
    * neither style retries it.
    */
-  async function request<T>(target: string, mode: 'throw', check?: BodyCheck): Promise<T>;
-  async function request<T>(target: string, mode: 'null', check?: BodyCheck): Promise<T | null>;
+  async function request<T>(target: string, mode: 'throw', check?: BodyCheck, baseUrl?: HorizonEndpoint): Promise<T>;
+  async function request<T>(target: string, mode: 'null', check?: BodyCheck, baseUrl?: HorizonEndpoint): Promise<T | null>;
   async function request<T>(
     target: string,
     mode: 'throw' | 'null',
-    check?: BodyCheck
+    check?: BodyCheck,
+    baseUrl?: HorizonEndpoint
   ): Promise<T | null> {
+    const configuredEndpoints = endpoints(baseUrl);
     for (let attempt = 1; attempt <= maxRetries; attempt += 1) {
+      let endpointFailures = 0;
+      for (const endpoint of configuredEndpoints) {
+        let path = target;
+        try {
+          const parsed = new URL(target);
+          path = parsed.pathname + parsed.search;
+        } catch {
+          // Tests and some proxies return a relative pagination link.
+        }
+        const targetUrl = url(path, endpoint);
       await throttle();
 
       const stopTimer = metrics?.requestDuration?.startTimer();
@@ -291,23 +330,22 @@ export function createHorizonClient(options: HorizonClientOptions = {}): Horizon
 
       let res: Response;
       try {
-        res = await doFetch(target, { signal: controller.signal });
+        res = await doFetch(targetUrl, { signal: controller.signal });
       } catch (err) {
         clearTimeout(timeout);
         stopTimer?.();
         metrics?.requestsTotal.inc({ status: 'error' });
+        metrics?.endpointRequests?.inc({ endpoint, status: 'error' });
 
-        if (attempt < maxRetries) {
-          await sleep(backoffMs(attempt));
-          continue;
-        }
-        log?.warn({ url: target, attempts: attempt }, `${name} request failed to connect`);
-        if (mode === 'throw') throw err;
-        return null;
+        endpointFailures++;
+        demotedUntil.set(endpoint, Date.now() + demotionMs);
+        log?.warn({ url: targetUrl, attempts: attempt }, `${name} request failed to connect; endpoint demoted`);
+        continue;
       }
       clearTimeout(timeout);
       stopTimer?.();
       metrics?.requestsTotal.inc({ status: String(res.status) });
+      metrics?.endpointRequests?.inc({ endpoint, status: String(res.status) });
 
       if (res.ok) {
         const body: unknown = await res.json();
@@ -315,13 +353,14 @@ export function createHorizonClient(options: HorizonClientOptions = {}): Horizon
           const problem = runCheck(check, body);
           if (problem) {
             const raw = rawBody(body);
-            log?.warn({ url: target, field: problem.field, raw }, `${name} response failed validation`);
+            log?.warn({ url: targetUrl, field: problem.field, raw }, `${name} response failed validation`);
             // Always a throw, whatever the mode: `null` means "not found", and a
             // malformed body is not that. A caller that treated it as absent
             // would mark the work done and drop the data.
-            throw new HorizonResponseError(target, problem.field, problem.problem, raw);
+            throw new HorizonResponseError(targetUrl, problem.field, problem.problem, raw);
           }
         }
+        demotedUntil.delete(endpoint);
         return body as T;
       }
 
@@ -334,16 +373,30 @@ export function createHorizonClient(options: HorizonClientOptions = {}): Horizon
         // proxy's placeholder) is worse than no header at all: obeying it as
         // `NaN` waits zero milliseconds and turns a rate limit into a burst.
         const delay = Number.isFinite(parsed) && parsed > 0 ? parsed * 1000 : backoffMs(attempt);
-        log?.warn({ url: target, attempt, delay }, `${name} rate limit, retrying after a pause`);
+        log?.warn({ url: targetUrl, attempt, delay }, `${name} rate limit, retrying after a pause`);
         await sleep(delay);
         continue;
       }
 
       if (mode === 'throw') {
-        throw new Error(`${name} request failed (${res.status}): ${target}`);
+        if (res.status < 500 || res.status === 429) {
+          throw new Error(`${name} request failed (${res.status}): ${targetUrl}`);
+        }
+        endpointFailures++;
+        if (res.status >= 500) demotedUntil.set(endpoint, Date.now() + demotionMs);
+        continue;
       }
-      log?.warn({ url: target, status: res.status }, `${name} request failed`);
+      log?.warn({ url: targetUrl, status: res.status }, `${name} request failed`);
       return null;
+      }
+      if (endpointFailures === configuredEndpoints.length) {
+        if (attempt < maxRetries) {
+          await sleep(backoffMs(attempt));
+          continue;
+        }
+        if (mode === 'throw') throw new HorizonUnavailableError(configuredEndpoints);
+        return null;
+      }
     }
 
     // Unreachable: `maxRetries` is clamped to at least one attempt, and every
@@ -351,14 +404,14 @@ export function createHorizonClient(options: HorizonClientOptions = {}): Horizon
     return null;
   }
 
-  async function fetchAllPages<T>(target: string, spec: RecordSpec): Promise<T[]> {
+  async function fetchAllPages<T>(target: string, spec: RecordSpec, baseUrl?: HorizonEndpoint): Promise<T[]> {
     const records: T[] = [];
     let next: string | undefined = target;
     const check: BodyCheck = body => checkPage(body, spec);
     while (next) {
       // Annotated rather than inferred: `next` is reassigned from `page` below,
       // and the two would otherwise be circular.
-      const page: HorizonPage<T> = await request<HorizonPage<T>>(next, 'throw', check);
+      const page: HorizonPage<T> = await request<HorizonPage<T>>(next, 'throw', check, baseUrl);
       records.push(...page._embedded.records);
       next = page._embedded.records.length === PAGE_LIMIT ? page._links.next?.href : undefined;
     }
@@ -366,46 +419,47 @@ export function createHorizonClient(options: HorizonClientOptions = {}): Horizon
   }
 
   return {
-    async getLatestLedgerSequence(baseUrl?: string): Promise<number> {
+    async getLatestLedgerSequence(baseUrl?: HorizonEndpoint): Promise<number> {
       const page = await request<HorizonPage<HorizonLedger>>(
-        url('/ledgers?order=desc&limit=1', baseUrl),
+        url('/ledgers?order=desc&limit=1', endpoints(baseUrl)[0]!),
         'throw',
         body => checkPage(body, LEDGER_SPEC)
+        , baseUrl
       );
       return page._embedded.records[0]?.sequence ?? 0;
     },
 
-    getLedger(sequence: number, baseUrl?: string): Promise<HorizonLedger> {
-      return request<HorizonLedger>(url(`/ledgers/${sequence}`, baseUrl), 'throw', body =>
-        checkRecord(body, LEDGER_SPEC, 'response')
+    getLedger(sequence: number, baseUrl?: HorizonEndpoint): Promise<HorizonLedger> {
+      return request<HorizonLedger>(      url(`/ledgers/${sequence}`, endpoints(baseUrl)[0]!), 'throw', body =>
+      checkRecord(body, LEDGER_SPEC, 'response'), baseUrl
       );
     },
 
-    getLedgerTransactions(sequence: number, baseUrl?: string): Promise<HorizonTransaction[]> {
+    getLedgerTransactions(sequence: number, baseUrl?: HorizonEndpoint): Promise<HorizonTransaction[]> {
       return fetchAllPages<HorizonTransaction>(
-        url(`/ledgers/${sequence}/transactions?order=asc&limit=${PAGE_LIMIT}`, baseUrl),
-        TRANSACTION_SPEC
+        url(`/ledgers/${sequence}/transactions?order=asc&limit=${PAGE_LIMIT}`, endpoints(baseUrl)[0]!),
+        TRANSACTION_SPEC, baseUrl
       );
     },
 
-    getLedgerOperations(sequence: number, baseUrl?: string): Promise<HorizonOperation[]> {
+    getLedgerOperations(sequence: number, baseUrl?: HorizonEndpoint): Promise<HorizonOperation[]> {
       return fetchAllPages<HorizonOperation>(
-        url(`/ledgers/${sequence}/operations?order=asc&limit=${PAGE_LIMIT}`, baseUrl),
-        OPERATION_SPEC
+        url(`/ledgers/${sequence}/operations?order=asc&limit=${PAGE_LIMIT}`, endpoints(baseUrl)[0]!),
+        OPERATION_SPEC, baseUrl
       );
     },
 
     /** `null` rather than an exception for accounts that don't exist or were merged away. */
-    getAccount(address: string, baseUrl?: string): Promise<HorizonAccount | null> {
-      return request<HorizonAccount>(url(`/accounts/${address}`, baseUrl), 'null', body =>
-        checkRecord(body, ACCOUNT_SPEC, 'response')
+    getAccount(address: string, baseUrl?: HorizonEndpoint): Promise<HorizonAccount | null> {
+      return request<HorizonAccount>(url(`/accounts/${address}`, endpoints(baseUrl)[0]!), 'null', body =>
+        checkRecord(body, ACCOUNT_SPEC, 'response'), baseUrl
       );
     },
 
-    async getRecentTransactions(limit = 20, baseUrl?: string): Promise<HorizonTransaction[]> {
+    async getRecentTransactions(limit = 20, baseUrl?: HorizonEndpoint): Promise<HorizonTransaction[]> {
       const page = await request<HorizonPage<HorizonTransaction>>(
-        url(`/transactions?order=desc&limit=${limit}`, baseUrl),
-        'null'
+        url(`/transactions?order=desc&limit=${limit}`, endpoints(baseUrl)[0]!),
+        'null', undefined, baseUrl
       );
       return page?._embedded?.records ?? [];
     },
@@ -413,24 +467,24 @@ export function createHorizonClient(options: HorizonClientOptions = {}): Horizon
     async getAccountTransactions(
       address: string,
       limit = 10,
-      baseUrl?: string
+      baseUrl?: HorizonEndpoint
     ): Promise<HorizonTransaction[]> {
       const page = await request<HorizonPage<HorizonTransaction>>(
-        url(`/accounts/${address}/transactions?order=desc&limit=${limit}`, baseUrl),
-        'null'
+        url(`/accounts/${address}/transactions?order=desc&limit=${limit}`, endpoints(baseUrl)[0]!),
+        'null', undefined, baseUrl
       );
       return page?._embedded?.records ?? [];
     },
 
-    async getLatestLedger(baseUrl?: string): Promise<HorizonLatestLedger | null> {
+    async getLatestLedger(baseUrl?: HorizonEndpoint): Promise<HorizonLatestLedger | null> {
       const page = await request<HorizonPage<HorizonLatestLedger>>(
-        url('/ledgers?order=desc&limit=1', baseUrl),
-        'null'
+        url('/ledgers?order=desc&limit=1', endpoints(baseUrl)[0]!),
+        'null', undefined, baseUrl
       );
       return page?._embedded?.records?.[0] ?? null;
     },
 
-    async getTrades(params: HorizonTradesFilter = {}, baseUrl?: string): Promise<HorizonTrade[]> {
+    async getTrades(params: HorizonTradesFilter = {}, baseUrl?: HorizonEndpoint): Promise<HorizonTrade[]> {
       const q = new URLSearchParams();
       if (params.cursor) q.set('cursor', params.cursor);
       if (params.order) q.set('order', params.order);

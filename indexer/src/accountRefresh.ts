@@ -5,6 +5,7 @@ import {
   getPendingAccountRefreshes,
 } from './db';
 import { getAccount, type HorizonAccount } from './horizon';
+import type { HorizonEndpoint } from '@lumina/shared';
 import { accountFetchDecisions } from './metrics';
 
 const ACCOUNT_REFRESH_CONCURRENCY = 10;
@@ -21,12 +22,12 @@ export interface AccountRefreshBatchResult {
   hasMore: boolean;
 }
 
-type FetchAccount = (horizonUrl: string, address: string) => Promise<HorizonAccount | null>;
+type FetchAccount = (horizonUrl: HorizonEndpoint, address: string) => Promise<HorizonAccount | null>;
 
 export async function refreshAccountQueueBatch(
   pool: Pool,
   network: string,
-  horizonUrl: string,
+  horizonUrl: HorizonEndpoint,
   fetchAccount: FetchAccount = getAccount,
   batchSize = 100
 ): Promise<AccountRefreshBatchResult> {

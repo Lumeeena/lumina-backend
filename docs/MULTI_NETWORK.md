@@ -20,7 +20,7 @@ PRIMARY_NETWORK=testnet
 | Variable | Meaning |
 |---|---|
 | `NETWORKS` | Comma-separated names, in declaration order. Known names: `mainnet`, `testnet`, `futurenet` |
-| `<NAME>_HORIZON_URL` | Required for every declared network |
+| `<NAME>_HORIZON_URL` | Required for every declared network; comma-separated endpoints are tried in order with failed endpoints temporarily demoted |
 | `<NAME>_SOROBAN_RPC_URL` | Optional; unset means no contract-event indexing for that network |
 | `<NAME>_NETWORK_PASSPHRASE` | Optional; defaults by network name |
 | `<NAME>_INDEXED_CONTRACT_IDS` | Optional; overrides the shared `INDEXED_CONTRACT_IDS` for that network (indexer only) |
