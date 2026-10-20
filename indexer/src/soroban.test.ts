@@ -10,6 +10,7 @@ import {
   parseLedgerKey,
   decodeScVal,
   getRetentionInfo,
+  getTransactions,
   GET_LEDGER_ENTRIES_MAX_KEYS,
   GET_EVENTS_MAX_CONTRACT_IDS,
 } from './soroban';
@@ -27,6 +28,17 @@ function mockFetchOnce(body: unknown, ok = true) {
     json: async () => body,
   })) as unknown as typeof fetch;
 }
+
+test('every RPC call is bounded by a timeout, so a node that never answers cannot hold the indexer loop', async () => {
+  let signal: AbortSignal | null | undefined;
+  (global as unknown as { fetch: typeof fetch }).fetch = (async (_url: unknown, init?: RequestInit) => {
+    signal = init?.signal;
+    return { ok: true, status: 200, json: async () => ({ result: { sequence: 7 } }) };
+  }) as unknown as typeof fetch;
+  assert.equal(await getLatestLedgerSequence('https://rpc.example.com'), 7);
+  assert.ok(signal instanceof AbortSignal, 'the request carries an abort signal');
+  assert.equal(signal.aborted, false);
+});
 
 test('getEvents returns latestLedger=startLedger without making a request when no contract IDs are given', async () => {
   let called = false;
@@ -68,6 +80,87 @@ test('getEvents decodes ScVal topics and values from a real RPC response shape',
   assert.equal(events[0].ledger, 100);
   assert.deepEqual(events[0].topics, ['"swap"']);
   assert.deepEqual(events[0].value, { amount: '1000' });
+});
+
+test('getEvents resolves event transaction context through getTransactions', async () => {
+  const methods: string[] = [];
+  (global as unknown as { fetch: typeof fetch }).fetch = (async (_url: unknown, init?: RequestInit) => {
+    const request = JSON.parse(String(init?.body)) as { method: string };
+    methods.push(request.method);
+    const result = request.method === 'getEvents'
+      ? {
+          latestLedger: 105,
+          events: [{
+            type: 'contract', ledger: 100, ledgerClosedAt: '2026-01-01T00:00:00Z',
+            contractId: 'CABC', id: 'evt1', pagingToken: 'token1',
+            topic: [SWAP_TOPIC_XDR], value: AMOUNT_VALUE_XDR, transactionIndex: 2,
+          }],
+        }
+      : {
+          latestLedger: 105,
+          transactions: [{
+            status: 'SUCCESS', txHash: 'a'.repeat(64), ledger: 100,
+            createdAt: '2026-01-01T00:00:00Z', applicationOrder: 2,
+          }],
+        };
+    return { ok: true, json: async () => ({ jsonrpc: '2.0', id: 1, result }) } as Response;
+  }) as typeof fetch;
+
+  const { events } = await getEvents('https://rpc.example.com', ['CABC'], 100, 5000);
+  assert.deepEqual(methods, ['getEvents', 'getTransactions']);
+  assert.equal(events[0]?.transactionHash, 'a'.repeat(64));
+});
+
+test('getEvents keeps an event when transaction context is unavailable', async () => {
+  let call = 0;
+  (global as unknown as { fetch: typeof fetch }).fetch = (async () => {
+    call++;
+    if (call === 1) {
+      return {
+        ok: true,
+        json: async () => ({ result: {
+          latestLedger: 105,
+          events: [{
+            type: 'contract', ledger: 100, ledgerClosedAt: '2026-01-01T00:00:00Z',
+            contractId: 'CABC', id: 'evt1', pagingToken: 'token1',
+            topic: [SWAP_TOPIC_XDR], value: AMOUNT_VALUE_XDR,
+            txHash: 'b'.repeat(64),
+          }],
+        } }),
+      } as Response;
+    }
+    return { ok: false, status: 503, json: async () => ({}) } as Response;
+  }) as typeof fetch;
+
+  const { events } = await getEvents('https://rpc.example.com', ['CABC'], 100, 5000);
+  assert.equal(events.length, 1);
+  assert.equal(events[0]?.transactionHash, 'b'.repeat(64));
+});
+
+test('getTransactions follows RPC pagination and preserves transaction ordering', async () => {
+  const requests: Array<{ startLedger?: number; endLedger?: number; cursor?: string }> = [];
+  (global as unknown as { fetch: typeof fetch }).fetch = (async (_url: unknown, init?: RequestInit) => {
+    const request = JSON.parse(String(init?.body)) as { params: { startLedger: number; endLedger: number; pagination: { cursor?: string } } };
+    requests.push({
+      ...(request.params.startLedger !== undefined && { startLedger: request.params.startLedger }),
+      ...(request.params.endLedger !== undefined && { endLedger: request.params.endLedger }),
+      ...(request.params.pagination.cursor !== undefined && { cursor: request.params.pagination.cursor }),
+    });
+    const page = requests.length === 1
+      ? [{ status: 'SUCCESS', txHash: 'c'.repeat(64), ledger: 100, createdAt: '2026-01-01T00:00:00Z', applicationOrder: 1 }]
+      : [{ status: 'FAILED', txHash: 'd'.repeat(64), ledger: 101, createdAt: '2026-01-01T00:00:06Z', applicationOrder: 1 }];
+    return {
+      ok: true,
+      json: async () => ({ result: { latestLedger: 110, transactions: page, cursor: requests.length === 1 ? 'next' : undefined } }),
+    } as Response;
+  }) as typeof fetch;
+
+  const result = await getTransactions('https://rpc.example.com', 100, 102, 400);
+  assert.deepEqual(requests, [
+    { startLedger: 100, endLedger: 102 },
+    { cursor: 'next' },
+  ]);
+  assert.deepEqual(result.transactions.map(transaction => transaction.txHash), ['c'.repeat(64), 'd'.repeat(64)]);
 });
 
 test('getEvents returns [] events (but a real latestLedger) when the RPC result has none', async () => {

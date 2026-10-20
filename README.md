@@ -10,6 +10,8 @@ Part of the Lumina project, split across three repos:
 
 API consumers: start with [docs/API_GUIDE.md](docs/API_GUIDE.md), and see
 [docs/AUTHENTICATION.md](docs/AUTHENTICATION.md) for API keys and rate limits.
+Every error carries a stable `extensions.code`; the taxonomy is in
+[docs/ERROR_CODES.md](docs/ERROR_CODES.md).
 Bulk-export consumers: [docs/EXPORT_FORMATS.md](docs/EXPORT_FORMATS.md)
 documents every exported column and its unit, with a worked example.
 
@@ -231,6 +233,81 @@ correct plan, so a CI-sized database would report exactly the queries this is
 meant to catch as healthy. The recorded findings, and the indexes that would fix
 them, are in [docs/QUERY_PLANS.md](docs/QUERY_PLANS.md).
 
+### Index audits
+
+Plan baselines show whether a query uses its index. They can't show whether an
+index is paid for and never read. Indexes cost something on every write, and
+the indexer's write path is the bottleneck. So a table's indexes are reviewed
+against measured usage, and every index must name the query that reads it.
+
+`db/audit/` measures this for `trustlines`. It replays real mainnet operations
+through the indexer's own write path and reports index scans, HOT updates, WAL
+and growth:
+
+```bash
+npm run audit:trustlines -- fetch 400   # cache mainnet operations from Horizon (once)
+npm run audit:trustlines -- replay      # apply them to an empty scratch database
+npm run audit:trustlines -- report      # read-only stats; safe on a deployment
+psql $DATABASE_URL -f db/audit/trustlines.sql   # the same report, without Node
+```
+
+Point `replay` at a scratch database with `AUDIT_DATABASE_URL`. It refuses a
+non-empty `trustlines` table. The first review dropped all four secondary
+indexes on `trustlines`: HOT updates went from 0% to 97% and WAL fell by half.
+The measurements, and how the table grows, are in
+[docs/TRUSTLINES_INDEX_REVIEW.md](docs/TRUSTLINES_INDEX_REVIEW.md).
+
+`assets` has API reads as well as indexer writes, so its audit also seeds real
+mainnet and testnet asset populations and runs the API's own `getAssets` and
+`getAssetByKey` against them:
+
+```bash
+npm run audit:assets -- fetch 400       # the same operation cache as audit:trustlines
+npm run audit:assets -- fetch-assets 4  # cache asset populations from Horizon (once)
+npm run audit:assets -- run <label>     # seed, replay, read and EXPLAIN on a scratch database
+npm run audit:assets -- report          # read-only stats; safe on a deployment
+psql $DATABASE_URL -f db/audit/assets.sql       # the same report, without Node
+```
+
+That review dropped four unused indexes and moved `network` to the front of the
+listing index. Replay WAL fell by 17%, and a testnet listing page went from
+1,819 buffers to 65. The measurements and the table's growth are in
+[docs/ASSETS_INDEX_REVIEW.md](docs/ASSETS_INDEX_REVIEW.md).
+
+`ledgers` is append-only: one row per closed ledger, written once per five
+seconds and read through the primary key. Its audit is SQL-only because the
+question is which index the existing queries choose, not a write replay:
+
+```bash
+psql "$DATABASE_URL" -f db/audit/ledgers.sql
+```
+
+The review found the primary key serving every API read and
+`idx_ledgers_closed_at` serving only the retention prune. It also found
+`indexerStatus` scanning the whole table to compute `MAX(indexed_at)`; that
+query now reads the tip row directly (734 ms → 0.1 ms at 2.5M rows). The
+measurements, the multi-network index that was measured and rejected, and the
+growth/retention numbers are in
+[docs/LEDGERS_INDEX_REVIEW.md](docs/LEDGERS_INDEX_REVIEW.md).
+
+`operations` is the table the indexer writes most and the API reads most. Its
+audit replays real mainnet ledgers through `indexLedger`, runs every API query
+over the table, and measures a retention round:
+
+```bash
+npm run audit:operations -- fetch 1000     # cache mainnet ledgers from Horizon (once)
+npm run audit:operations -- run <label>    # replay, read, prune and EXPLAIN on a scratch database
+npm run audit:operations -- report         # read-only stats; safe on a deployment
+psql $DATABASE_URL -f db/audit/operations.sql   # the same report, without Node
+```
+
+That review replaced nine secondary indexes with seven (migration 019): the
+indexer's WAL fell 54% and the table's indexes 65%, and the operations listing
+went from a sequential scan to 134 buffers. It also found that at its defaults
+the retention prune removes fewer operations an hour than mainnet adds. The
+measurements and the growth numbers are in
+[docs/OPERATIONS_INDEX_REVIEW.md](docs/OPERATIONS_INDEX_REVIEW.md).
+
 ## Run with Docker
 
 ```bash
@@ -286,10 +363,12 @@ network, exactly as before.
 | `<NAME>_SOROBAN_RPC_URL`          | unset                                | Per-network Soroban RPC; unset disables contract events for that network                                                                                                                                                                            |
 | `<NAME>_NETWORK_PASSPHRASE`       | per network name                     | Passphrase the network's transactions are signed against                                                                                                                                                                                            |
 | `<NAME>_INDEXED_CONTRACT_IDS`     | `INDEXED_CONTRACT_IDS`               | Per-network override of the shared contract list                                                                                                                                                                                                    |
-| `HORIZON_URL`                     | `https://horizon.stellar.org`        | Single-network deployments: the one Horizon base URL (ignored when `NETWORKS` is set)                                                                                                                                                               |
+| `HORIZON_URL`                     | `https://horizon.stellar.org`        | Single-network deployments: one or more comma-separated Horizon base URLs in failover order (ignored when `NETWORKS` is set)                                                                                                                        |
 | `HISTORY_ARCHIVE_URL`              | unset                                | Optional Stellar history archive root for single-network historical backfill; see [`docs/HISTORY_ARCHIVE_BACKFILL.md`](docs/HISTORY_ARCHIVE_BACKFILL.md)                                                                                           |
 | `DATABASE_URL`                    | `postgresql://localhost:5432/lumina` |                                                                                                                                                                                                                                                     |
-| `DB_POOL_MAX`                     | `10`                                 | Database connection pool size. Postgres caps total connections via `max_connections` (default 100). The combined pool size of all indexer and graphql-server replicas plus other clients must stay under this.                                      |
+| `DB_WRITE_POOL_MAX`               | `10`                                 | Maximum connections in the write pool (ledger writes, events, trades, retries, retention). Falls back to `DB_POOL_MAX`, then to pg's default. Written work keeps its own connections, so a long-running read cannot starve it.                         |
+| `DB_READ_POOL_MAX`                | `10`                                 | Maximum connections in the read pool (gap scans, integrity checks, schema loads, queue reads). Falls back to `DB_POOL_MAX`, then to pg's default; a long-running read can only exhaust this pool.                                                     |
+| `DB_POOL_MAX`                     | unset                                | Shared fallback for both indexer pools when the per-pool variable above is unset. Both pools point at `DATABASE_URL` (no separate replica is assumed), so one instance's connection budget is write + read; the combined pool size of all indexer and graphql-server replicas plus other clients must stay under Postgres `max_connections` (default 100). |
 | `DB_POOL_IDLE_TIMEOUT`            | `10000`                              | Milliseconds before an idle connection is closed                                                                                                                                                                                                    |
 | `DB_POOL_CONNECTION_TIMEOUT`      | `0`                                  | Milliseconds to wait for a connection before failing (0 = wait forever)                                                                                                                                                                             |
 | `START_LEDGER`                    | latest                               | Only used when the DB is empty                                                                                                                                                                                                                      |
@@ -303,6 +382,7 @@ network, exactly as before.
 | `HORIZON_AUTH_TOKEN`              | unset                                | Optional Bearer token for authenticated Horizon endpoints; allows higher rate limits with paid or self-hosted providers. Never logged                                                                                                               |
 | `HORIZON_TIP_WEIGHT_FACTOR`       | `2`                                  | Relative priority factor for tip vs backfill requests; tip requests get weighted higher to prevent backfill from delaying real-time indexing                                                                                                        |
 | `SOROBAN_RPC_URL`                 | unset                                | Single-network deployments: enables Soroban contract event indexing                                                                                                                                                                                 |
+| `SOROBAN_REQUEST_TIMEOUT_MS`      | `10000`                              | Longest one Soroban RPC call may take. Event polling shares the ledger loop, so without a bound a node that never answers stops ledger indexing too (see [docs/CHAOS_TESTING.md](docs/CHAOS_TESTING.md))                                          |
 | `INDEXED_CONTRACT_IDS`            | unset                                | Comma-separated contract IDs to index events for; requires a Soroban RPC URL                                                                                                                                                                        |
 | `REGISTRY_CONTRACT_ID`            | unset                                | Lumina Registry contract to poll for additional contract IDs; inherited by every network, requires a Soroban RPC URL + `REGISTRY_READ_ACCOUNT`                                                                                        |
 | `REGISTRY_READ_ACCOUNT`           | unset                                | Any funded G... account used to simulate the registry's read calls — no secret key needed, simulation doesn't sign or submit. Inherited by every network                                                                              |
@@ -368,6 +448,8 @@ npm run dev
 | Variable                         | Default                                                       |
 | -------------------------------- | ------------------------------------------------------------- |
 | `HEALTH_PORT`                    | `9090` — port serving `/health`, `/ready` and `/metrics`      |
+| `INDEXER_LEADER_LOCK`            | `true` — single-writer guard; a second indexer on the same database waits as standby. `false` disables it. See `docs/INDEXER_CONTROL_FLOW.md` §5 |
+| `INDEXER_LEADER_RETRY_MS`        | `5000` — how often a standby retries the leader lock          |
 | `HEALTH_MAX_SECONDS_SINCE_INDEX` | `60` — stall threshold before `/health` reports 503           |
 | `HEALTH_MAX_LAG_LEDGERS`         | `20` — lag threshold before `/health` reports 503             |
 | `LOG_LEVEL`                      | `info`                                                        |
@@ -593,6 +675,33 @@ TEST_DATABASE_URL=postgresql://lumina:lumina@localhost:5432/lumina \
 ```
 
 CI runs them against its own Postgres service.
+
+### Contract, chaos and soak tests
+
+Three suites test the services together rather than one at a time. All three
+need `TEST_DATABASE_URL`, and create and drop databases of their own on it; the
+chaos and soak tests also need both services built (`npm run build`), because
+they run them.
+
+```bash
+npm run test:contract       # indexer ↔ GraphQL server agreement on operations.details
+npm run test:chaos          # fail Postgres, Horizon and Soroban RPC; require recovery
+npm run test:soak:detector  # the soak test's leak detector, against known series and a leaking process
+SOAK_DURATION_MS=3600000 npm run test:soak   # the stack under load for an hour; fails on a resource trend
+```
+
+- **Contract** — real mainnet operations, one per shape Horizon returns, written
+  through the indexer and read back through every server reader of
+  `operations.details`. What the two sides agree on is in
+  [docs/OPERATIONS_DETAILS_CONTRACT.md](docs/OPERATIONS_DETAILS_CONTRACT.md).
+- **Chaos** — the whole stack running, with each dependency failed in turn and
+  then together; the services must recover under their own restart policy and
+  nothing else. What each failure does, and how long recovery takes, is in
+  [docs/CHAOS_TESTING.md](docs/CHAOS_TESTING.md).
+- **Soak** — the stack under sustained load, sampling memory, handles and
+  Postgres connections, failing on a sustained upward trend rather than waiting
+  for a crash. Runs weekly in CI (`.github/workflows/soak.yml`); see
+  [docs/SOAK_TESTING.md](docs/SOAK_TESTING.md).
 
 ## License
 

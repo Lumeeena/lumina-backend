@@ -60,6 +60,7 @@ The following migrations are strictly **irreversible** in place and will be reje
 | `010_trustlines` | `010_trustlines.down.sql` | Drops `trustlines` table. |
 | `011_assets` | `011_assets.down.sql` | Drops `assets` table. |
 | `012_asset_volume_buckets` | `012_asset_volume_buckets.down.sql` | Drops `asset_volume_buckets` table and `bucket_hour()` function. |
+| `015_retry_queue_network_index` | `015_retry_queue_network_index.down.sql` | Restores `idx_retry_queue_next_attempt` and drops `idx_retry_queue_network_next_attempt`. The stale rows the up migration deleted are not restored; their ledgers were already indexed. |
 
 ---
 

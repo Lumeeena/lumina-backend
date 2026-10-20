@@ -1,0 +1,18 @@
+# Node drains and cluster upgrades may evict at most one API replica at a time.
+#
+# There is deliberately no PodDisruptionBudget for the indexer: with exactly one
+# replica, any budget that protects it (minAvailable: 1) blocks every drain of
+# its node forever. A brief indexer restart costs nothing but a short catch-up,
+# which is the trade the single-writer design already makes.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: lumina-graphql
+  labels:
+    app.kubernetes.io/name: lumina-graphql
+    app.kubernetes.io/component: api
+spec:
+  maxUnavailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: lumina-graphql

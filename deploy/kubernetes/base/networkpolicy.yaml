@@ -1,0 +1,52 @@
+# Ingress only, on purpose: the services reach Horizon, Soroban RPC, Postgres
+# and object storage at addresses this base cannot know, so egress is left
+# open rather than guessed at. Takes effect only where the CNI enforces
+# NetworkPolicy.
+#
+# The API port is open to the cluster (an Ingress controller or Gateway lives
+# in another namespace). The indexer's port carries /metrics and /debug/config
+# and nothing a client needs, so only in-namespace pods and the monitoring
+# namespace may reach it.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: lumina-graphql
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: lumina-graphql
+  policyTypes: ["Ingress"]
+  ingress:
+    - ports:
+        - port: 4000
+          protocol: TCP
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: lumina-indexer
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: lumina-indexer
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - podSelector: {}
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: monitoring
+      ports:
+        - port: 9090
+          protocol: TCP
+---
+# The backup jobs accept no connections at all.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: lumina-backup
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: lumina-backup
+  policyTypes: ["Ingress"]

@@ -98,6 +98,20 @@ the selected direction.
 - **Default limit:** 20 items per page; nested account lists default to 10
 - **Maximum limit:** 100 items. Larger limits are rejected with `BAD_USER_INPUT`.
 
+### Aggregate limits
+
+A few queries return a whole result set rather than a paginated page, so they
+carry a row ceiling instead of a cursor: `networkStats`, `activityRollups`, and
+`sponsoredAccounts`. Each accepts a `limit` (default and maximum 1000) and
+rejects anything larger with `BAD_USER_INPUT`. The two time-series queries also
+reject a range that *spans* more buckets than the limit — a truncated series
+would be indistinguishable from a complete one — so a wider range must be
+requested at `granularity: "day"` or split into smaller windows.
+
+The ceiling exists because a response is assembled in memory before it is sent:
+without it, memory would grow with the request rather than staying flat. See
+[`docs/RESPONSE_MEMORY.md`](RESPONSE_MEMORY.md) for the measured ceiling.
+
 ## Common Queries
 
 ### Fetch recent transactions
@@ -672,20 +686,31 @@ client.subscribe(
 The GraphQL API returns errors in the standard GraphQL error format. Each error has:
 
 - `message` — a human-readable description
-- `extensions.code` — a machine-readable error category
+- `extensions.code` — a stable, machine-readable code
+
+**Branch on `extensions.code`, never on `message`**: messages are for humans
+and may be reworded at any time. The full taxonomy — which category each code
+belongs to and what to do about it — is in
+[`ERROR_CODES.md`](ERROR_CODES.md).
 
 ### Common error codes
 
-| Code | Meaning | Example |
+| Code | Category | Meaning |
 | --- | --- | --- |
-| `GRAPHQL_VALIDATION_FAILED` | Query is malformed or violates the schema | Missing required field, wrong type |
-| `GRAPHQL_PARSE_FAILED` | Query syntax is invalid | Unmatched braces, invalid tokens |
-| `INTERNAL_SERVER_ERROR` | Server error | Database connection failure |
-| `BAD_REQUEST` | Client request error | Invalid asset format, empty search query |
-| `BAD_USER_INPUT` | The request named something the server does not serve | `network: RANKENET` when only `MAINNET`, `TESTNET` are configured |
-| `INVALID_CURSOR` | A pagination cursor the server could not use | A truncated cursor, a hand-built one, or one issued by a different query — see [Pagination](#invalid-cursors-are-errors) |
-| `UNAUTHENTICATED` | API key is malformed, unknown, or revoked | See [`AUTHENTICATION.md`](AUTHENTICATION.md#authentication-errors) |
-| `RATE_LIMITED` | Rate limit exceeded; wait `extensions.retryAfter` seconds | See [`AUTHENTICATION.md`](AUTHENTICATION.md#when-you-are-throttled) |
+| `BAD_USER_INPUT` | invalid input | The request named an unknown network, or contained an argument the server cannot use (bad asset filter, out-of-range page size, invalid custom-event filter) |
+| `INVALID_CURSOR` | invalid input | A pagination cursor the server could not use — see [Pagination](#invalid-cursors-are-errors) |
+| `QUERY_TOO_DEEP`, `QUERY_TOO_COMPLEX` | invalid input | The operation exceeds this deployment's depth or cost budget |
+| `NOT_FOUND` | not found | The contract has no registered custom-event schema, or the event is not declared |
+| `RATE_LIMITED` | rate limited | A request budget or the subscription ceiling turned the request away; wait `extensions.retryAfter` |
+| `UNAUTHENTICATED` | authentication | API key is malformed, unknown, or revoked — see [`AUTHENTICATION.md`](AUTHENTICATION.md#authentication-errors) |
+| `QUERY_TIMEOUT`, `REQUEST_TIMEOUT` | internal | The database or the HTTP request exceeded its time budget |
+| `INTERNAL_SERVER_ERROR` | internal | Unexpected server failure; in production the message is masked and `extensions.correlationId` names the log entry |
+
+Apollo and graphql-js add their own stable codes for malformed requests
+(`GRAPHQL_PARSE_FAILED`, `GRAPHQL_VALIDATION_FAILED`, `BAD_REQUEST`,
+`OPERATION_RESOLUTION_FAILURE`, `PERSISTED_QUERY_NOT_FOUND`,
+`PERSISTED_QUERY_NOT_SUPPORTED`); they are listed with the rest in
+[`ERROR_CODES.md`](ERROR_CODES.md#framework-codes).
 
 ### Example error response
 
@@ -693,9 +718,9 @@ The GraphQL API returns errors in the standard GraphQL error format. Each error 
 {
   "errors": [
     {
-      "message": "Asset filter must be in format CODE:ISSUER or XLM",
+      "message": "Asset filter must be \"CODE:ISSUER\" (or \"XLM\" for the native asset), got \"USDC\".",
       "extensions": {
-        "code": "BAD_REQUEST"
+        "code": "BAD_USER_INPUT"
       }
     }
   ]
@@ -704,11 +729,18 @@ The GraphQL API returns errors in the standard GraphQL error format. Each error 
 
 ### Search-specific errors
 
+Both search-input failures are `BAD_USER_INPUT`:
+
 - **Empty query:** Search queries must not be empty or whitespace-only
 - **Query too long:** Search queries have a maximum length to prevent performance issues
-- **Invalid cursor:** returned as `INVALID_CURSOR` on every paginated query, search included — see [Pagination](#invalid-cursors-are-errors)
+
+An invalid cursor is returned as `INVALID_CURSOR` on every paginated query,
+search included — see [Pagination](#invalid-cursors-are-errors).
 
 ### Custom event filter errors
+
+All of these are `BAD_USER_INPUT`; a missing registered schema or an undeclared
+event is `NOT_FOUND`:
 
 - **Invalid field:** The field does not exist in the contract's registered schema
 - **Invalid operator:** The operator does not match the field type (e.g., `GT` on a string field)
@@ -750,7 +782,7 @@ Most GraphQL tools (Apollo Client, GraphQL CodeGen, etc.) use introspection to p
 Every query, argument, type field and enum value in the schema is documented, so the same descriptions come through the playground and through `__type { fields { description } }`. A few worth knowing before you read them:
 
 - **Index or Horizon.** Each query's description says which it reads. `transaction(hash:)`, `account(address:)`, `asset(asset:)` and `contractSchema(contractId:)` fall back to Horizon; the listings do not, because there is nothing to fall back to.
-- **Snapshot, not live state.** `Account` is what the indexer last saw, stamped with `lastModifiedLedger`. A Horizon-fallback `account(address:)` is current instead, so the two can disagree for an address the indexer has not caught up on.
+- **Snapshot, not live state.** `Account` is what the indexer last saw, stamped with `lastModifiedLedger`. For a past ledger, pass `asOfLedger:` to `account(address:)`: it returns the latest state the indexer recorded at or before that ledger, with no Horizon fallback, and `null` when nothing was recorded. See [ACCOUNT_STATE_HISTORY.md](ACCOUNT_STATE_HISTORY.md) for what that does and does not guarantee. A Horizon-fallback `account(address:)` is current instead, so the two can disagree for an address the indexer has not caught up on.
 - **Type-specific fields.** `Operation` is one flat type: `amount` is null on a `change_trust`, `funder` is null on a payment. Read the field you want, treat the rest as absent.
 - **Custom event fields.** `CustomEvent.fields` carries one entry per field the registered schema declares, so an optional field the event omitted is `value: null` rather than missing. `contractSchema(contractId:)` returns the whole schema, so a client can discover names before querying data.
 
@@ -767,3 +799,35 @@ For issues or questions:
 - **Authentication and API keys:** `docs/AUTHENTICATION.md`
 - **Schema reference:** `docs/CUSTOM_SCHEMAS.md`
 - **Examples:** this guide
+
+## Account lifecycle history
+
+`accountLifecycle` returns indexed creation and merge operations for the address
+itself, newest first, including accounts already merged away and repeated
+creation/merge cycles. No current account snapshot is required.
+
+```graphql
+query {
+  accountLifecycle(address: "G...", network: MAINNET, limit: 20) {
+    items {
+      id type createdAt transactionHash sourceAccount
+      createdAccount funder startingBalance mergeDestination
+    }
+    pageInfo { hasNextPage cursor }
+  }
+}
+```
+
+Pass the returned cursor to `accountLifecycle(cursor:)` with the same address
+and network to continue. Limits must be between 1 and 100.
+`createdAccount`, `funder`, and `startingBalance` identify creation; the balance
+is an exact decimal string in XLM. `mergeDestination` is Horizon's `into`
+address, receiving the removed source account's remaining XLM; the merge
+operation does not supply an amount. These decoded fields are also available
+on ordinary operation queries.
+
+This query matches Horizon's `account` field for both lifecycle types. Operations
+funding other addresses or receiving another account's merge are not the queried
+address's own lifecycle. Existing `operations(account:)` keeps its submitting
+account semantics. Empty results mean no matching indexed history. Existing
+JSONB rows are decoded at read time, so no migration or reindex is required.

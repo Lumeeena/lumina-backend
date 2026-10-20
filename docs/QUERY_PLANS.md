@@ -58,7 +58,8 @@ find every selected column in the index and the visibility map must permit
 skipping the heap. Adding every selected column to `INCLUDE` can create a large
 index with substantial write amplification, especially for JSONB. Check the
 actual plan and index size first; a small transfer reduction is not sufficient
-reason to make a write-heavy index wider.
+reason to make a write-heavy index wider. The one listing where that check came
+out in favour is recorded under [Index-only scans](#index-only-scans) below.
 
 Measure projected JSON row size for the same representative transaction page
 with this read-only query (replace `mainnet` with the deployment network):
@@ -351,7 +352,7 @@ were added for a feature whose query cannot use them:
 | `idx_operations_details` (GIN) | nothing queries `details` with containment (`@>`); every JSONB predicate is `->>` |
 | `idx_custom_events_fields` (GIN) | same: the filters are `fields->>'x' = $1`, which `jsonb_ops` cannot serve |
 | `idx_events_topics` (GIN) | the one query that could use it (`ev.topic`) prefers `idx_events_ledger`, which finds 20 rows in 241 |
-| `idx_transactions_created_at`, `idx_operations_created_at`, `idx_events_created_at`, `idx_ledgers_closed_at` | no application query orders by `created_at`/`closed_at`; they may serve operational queries outside this repository, which is why removing them is a separate decision from the four above |
+| `idx_transactions_created_at`, `idx_operations_created_at`, `idx_events_created_at`, `idx_ledgers_closed_at` | no application query orders by `created_at`/`closed_at`. `idx_ledgers_closed_at` serves the retention prune, not the API; that decision is measured in [LEDGERS_INDEX_REVIEW.md](LEDGERS_INDEX_REVIEW.md). Removing the others is a separate decision from the four above |
 
 ## Secondary observations
 
@@ -384,7 +385,12 @@ legible rather than suspicious.
 
 ## Recommended DDL (not applied)
 
-Recorded, not executed — this pass changes no index and no query.
+Recorded, not executed — this pass changes no index and no query. Migration
+019 later applied the `operations` part, network-first and measured against
+real mainnet traffic: `(network, ledger DESC, id DESC)` and
+`(network, source_account, ledger DESC, id DESC)`, with the unused asset and
+`details` indexes dropped. See
+[OPERATIONS_INDEX_REVIEW.md](OPERATIONS_INDEX_REVIEW.md).
 
 ```sql
 -- op.first-page, op.cursor-page — the ordering every operations query asks
@@ -421,3 +427,94 @@ Plus the `UNION ALL` rewrite for `getOperationsByAsset` (finding 2) and the
 decision on the unused indexes above. Each recommendation is evidenced by the
 catalog entry named beside it, and by the `npm run explain` output that changes
 when it lands.
+
+## Index-only scans
+
+Applied in `db/migrations/015_transactions_listing_covering_index.sql`.
+
+### Which queries could be index-only
+
+A query can skip the heap only if every column it selects is in one index. The
+candidates are the listings, because their column lists are fixed in `db.ts`:
+
+| query | selects | verdict |
+|---|---|---|
+| `getTransactions`, unfiltered (first page, keyset pages, both directions) | `TRANSACTION_COLUMNS`: ten narrow columns | **covered** |
+| `getLedgers`, `getLatestLedgerFromDb` | `LEDGER_COLUMNS`: seven fixed-width columns | measured, not worth it (below) |
+| `getOperations`, `getAccountOperations` | `details` (JSONB) | no: the index would roughly duplicate the table |
+| `getEventsByContract` | `topics`, `value` (JSONB) | no, same reason |
+| `getContractStorageEntries` | `value` (JSONB) | no, same reason |
+| `getAccounts` | `balances`, `flags`, `thresholds` (JSONB) | no, same reason |
+| `getTradesFromDb` | 21 columns: the whole row | no: that is a second copy of the table |
+
+**Transactions.** `idx_transactions_network_ledger_hash` (migration 010) already
+has the listing's key, `(network, ledger DESC, hash DESC)`. Migration 015
+*replaces* it with the same key plus `INCLUDE (created_at, source_account,
+fee_charged, operation_count, successful, memo_type, memo)`, so the write cost is
+the INCLUDE payload, not a second index.
+
+**Ledgers.** Measured with `(network, sequence DESC) INCLUDE (…)` and dropped.
+Ledgers are written in sequence order, so a page of 20 sits on one heap page.
+`ledgers_pkey` already reads a page in 3 buffers, and the planner kept the
+primary key for the first page and forward keyset pages; the covering index
+read the same 3 buffers on the one plan that picked it. It added an index for
+nothing.
+
+### EXPLAIN, before and after
+
+PostgreSQL 16.13, 3.8M transactions over 7,600 ledgers (500 per ledger), after
+`VACUUM (ANALYZE)`, with the statements exactly as `getTransactions` and
+`getLedgers` send them. `EXPLAIN (ANALYZE, BUFFERS)`, second run of each:
+
+| query | before | after |
+|---|---|---|
+| `tx.first-page` | Index Scan `idx_transactions_network_ledger_hash`, 24 buffers | **Index Only Scan** `…_covering`, Heap Fetches 0, 5 buffers |
+| `tx.cursor-page` (forward keyset) | Index Scan, 30 buffers | **Index Only Scan**, Heap Fetches 0, 11 buffers |
+| `tx.cursor-page` (backward keyset) | Index Scan Backward, 28 buffers | **Index Only Scan Backward**, Heap Fetches 0, 10 buffers |
+| `ledgers.first-page`, `.cursor-forward` | Index Scan `ledgers_pkey`, 3 buffers | unchanged |
+
+Of the 11 / 10 buffers on a cursor page, 5 are the `transactions_pkey` lookup that
+turns the cursor hash into its `(ledger, hash)`. That subquery reads one row and
+stays an Index Scan.
+
+Not covered, deliberately:
+
+- `getTransactionsByLedger` keeps `idx_transactions_ledger`: one ledger's rows
+  are physically adjacent, so its heap visits are cheap already.
+- The filtered `getTransactions` variants (`successful`, `sourceAccount`, date
+  range) use their own migration 010 indexes. Covering those too would triple
+  the INCLUDE payload on every insert, for filters that are much less used.
+
+### The visibility map, and the newest page
+
+An index-only scan skips the heap only for pages the visibility map marks
+all-visible, and only vacuum sets that. Right after a ledger is written, before
+vacuum has reached it, the first page reads the heap anyway: measured,
+`Heap Fetches: 20` on the newest page, then `0` after `VACUUM`. That is no worse
+than the old plan, but it is the page the listing reads most.
+
+Migration 006 vacuums `transactions` after 5000 inserted rows *plus 5% of the
+table*. That gap grows with the table: at 100M rows it is 5M rows. Migration 015
+sets `autovacuum_vacuum_insert_scale_factor = 0` and a fixed
+`autovacuum_vacuum_insert_threshold = 50000`, so the unmarked tail stays the same
+size however large the table gets. A vacuum of an insert-only table visits only
+the pages the map does not already cover, so a more frequent run stays cheap.
+
+### Write cost
+
+The same indexer-shaped load into two databases: one ledger row plus 500
+transactions, committed per ledger. Rounds alternate between the old index set
+and migration 015, with a `CHECKPOINT` before each so both pay the same
+full-page writes. Autovacuum was off during the timing runs.
+
+| | before | after | change |
+|---|---|---|---|
+| `…network_ledger_hash` index at 3M rows | 443 MB | 872 MB (`…_covering`) | +429 MB |
+| all `transactions` indexes | 2,440 MB | 2,869 MB | +17.6% |
+| table + indexes | 3,091 MB | 3,520 MB | +13.9% |
+| WAL per 500k rows (median of 3 rounds) | 1,115 MB | 1,201 MB | +7.7% |
+| insert time per 100k rows (median of 8 rounds) | 21.2 s | 21.2 s | below noise (rounds varied ±15%) |
+
+The cost is disk and WAL, roughly 150 bytes of index per row, not insert
+latency. That buys an index-only read on the API's most-used listing, on every
+page an explorer client walks.

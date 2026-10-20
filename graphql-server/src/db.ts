@@ -18,6 +18,30 @@ import {
   type TotalCount,
 } from './pagination';
 
+/**
+ * Keeps a dropped Postgres connection from taking the server down.
+ *
+ * pg-pool emits `error` on the pool when an idle client's connection dies — a
+ * Postgres restart, a failover, `pg_terminate_backend` — and with no listener
+ * that is an unhandled `'error'` event: the process exits, and every open
+ * subscription goes with it. A client checked out of the pool is worse off:
+ * pg-pool removes its own listener for the duration, so a connection dying in
+ * the middle of a request raises the same unhandled event on the client.
+ *
+ * Both are handled here. The pool replaces an idle client itself, so that case
+ * only needs reporting. For a checked-out client the request in flight already
+ * rejects with the same error and is answered as a failed request, and
+ * `release()` discards a client that is no longer queryable, so the client
+ * listener only has to exist.
+ */
+export function handlePoolErrors(pool: Pool, onIdleClientError: (err: Error) => void): Pool {
+  pool.on('error', onIdleClientError);
+  pool.on('connect', client => {
+    client.on('error', () => undefined);
+  });
+  return pool;
+}
+
 // ─── Row shapes (snake_case, matching db/schema.sql) ──────────────────────────
 
 interface LedgerRow {
@@ -87,6 +111,7 @@ interface EventRow {
   paging_token: string;
   topics: string[];
   value: unknown;
+  transaction_hash: string | null;
 }
 
 interface ContractStorageEntryRow {
@@ -101,9 +126,9 @@ interface ContractStorageEntryRow {
   last_modified_ledger: string;
 }
 
-export const TRANSACTION_MAPPER_COLUMNS =
+const TRANSACTION_COLUMNS =
   'hash, network, ledger, created_at, source_account, fee_charged, operation_count, successful, memo_type, memo';
-export const OPERATION_MAPPER_COLUMNS = `id, network, type, transaction_hash, ledger, created_at, source_account,
+const OPERATION_COLUMNS = `id, network, type, transaction_hash, ledger, created_at, source_account,
   jsonb_build_object(
     'from', details->'from',
     'to', details->'to',
@@ -113,6 +138,8 @@ export const OPERATION_MAPPER_COLUMNS = `id, network, type, transaction_hash, le
     'asset_issuer', details->'asset_issuer',
     'starting_balance', details->'starting_balance',
     'funder', details->'funder',
+    'account', details->'account',
+    'into', details->'into',
     'offer_id', details->'offer_id',
     'price', details->'price',
     'selling_asset_type', details->'selling_asset_type',
@@ -120,16 +147,19 @@ export const OPERATION_MAPPER_COLUMNS = `id, network, type, transaction_hash, le
     'selling_asset_issuer', details->'selling_asset_issuer',
     'buying_asset_type', details->'buying_asset_type',
     'buying_asset_code', details->'buying_asset_code',
-    'buying_asset_issuer', details->'buying_asset_issuer'
+    'buying_asset_issuer', details->'buying_asset_issuer',
+    'bump_to', details->'bump_to',
+    'name', details->'name',
+    'value', details->'value'
   ) AS details`;
-const LEDGER_MAPPER_COLUMNS =
+const LEDGER_COLUMNS =
   'sequence, network, closed_at, transaction_count, operation_count, base_fee, base_reserve';
-const ACCOUNT_MAPPER_COLUMNS =
+const ACCOUNT_COLUMNS =
   'address, network, sequence, subentry_count, last_modified_ledger, num_sponsored, num_sponsoring, balances, flags, thresholds';
-const EVENT_MAPPER_COLUMNS = 'id, network, type, contract_id, ledger, created_at, paging_token, topics, value';
-const CONTRACT_STORAGE_ENTRY_MAPPER_COLUMNS =
+const EVENT_COLUMNS = 'id, network, type, contract_id, ledger, created_at, paging_token, topics, value, transaction_hash';
+const CONTRACT_STORAGE_ENTRY_COLUMNS =
   'contract_id, network, key, durability, state, value, value_xdr, live_until_ledger, last_modified_ledger';
-const TRADE_MAPPER_COLUMNS = `id, paging_token, ledger_close_time, trade_type, base_account, base_amount,
+const TRADE_COLUMNS = `id, paging_token, ledger_close_time, trade_type, base_account, base_amount,
   base_asset_type, base_asset_code, base_asset_issuer, base_offer_id, counter_account, counter_amount,
   counter_asset_type, counter_asset_code, counter_asset_issuer, counter_offer_id, base_is_seller,
   price_n, price_d, price, network`;
@@ -167,6 +197,10 @@ export function mapTransaction(row: TransactionRow) {
 function formatAsset(type?: string, code?: string, issuer?: string): string | null {
   if (!type) return null;
   if (type === 'native') return 'XLM';
+  // A liquidity pool share (`liquidity_pool_shares`) has a type and neither a
+  // code nor an issuer, so there is no CODE:ISSUER to give; it used to come
+  // out as "null:null". See docs/OPERATIONS_DETAILS_CONTRACT.md.
+  if (!code || !issuer) return null;
   return `${code}:${issuer}`;
 }
 
@@ -188,10 +222,15 @@ export function mapOperation(row: OperationRow) {
     asset: formatAsset(d['asset_type'] as string, d['asset_code'] as string, d['asset_issuer'] as string),
     startingBalance: (d['starting_balance'] as string) ?? null,
     funder: (d['funder'] as string) ?? null,
+    createdAccount: row.type === 'create_account' ? (d['account'] as string) ?? null : null,
+    mergeDestination: row.type === 'account_merge' ? (d['into'] as string) ?? null : null,
     offerId: (d['offer_id'] as string) ?? null,
     price: (d['price'] as string) ?? null,
     selling: formatAsset(d['selling_asset_type'] as string, d['selling_asset_code'] as string, d['selling_asset_issuer'] as string),
     buying: formatAsset(d['buying_asset_type'] as string, d['buying_asset_code'] as string, d['buying_asset_issuer'] as string),
+    bumpSequence: row.type === 'bump_sequence' ? (d['bump_to'] as string) ?? null : null,
+    dataName: row.type === 'manage_data' ? (d['name'] as string) ?? null : null,
+    dataValue: row.type === 'manage_data' ? (d['value'] as string) ?? null : null,
   };
 }
 
@@ -251,6 +290,7 @@ export function mapEvent(row: EventRow) {
     pagingToken: row.paging_token,
     topics: row.topics,
     value: row.value === null ? null : JSON.stringify(row.value),
+    transactionHash: row.transaction_hash,
   };
 }
 
@@ -334,12 +374,14 @@ export async function getTransactions(
     params.push(options.sourceAccount);
     conditions.push(`source_account = $${params.length}`);
   }
-  const cursorClause = cursorCondition(params, KEYSETS.transactions, cursor, direction, baseOrder);
-  if (cursorClause) conditions.push(cursorClause);
+  if (cursor) {
+    const condition = cursorCondition(params, KEYSETS.transactions, cursor, direction, baseOrder);
+    if (condition) conditions.push(condition);
+  }
   params.push(limit);
 
   const { rows } = await pool.query<TransactionRow>(
-    `SELECT ${TRANSACTION_MAPPER_COLUMNS} FROM transactions
+    `SELECT ${TRANSACTION_COLUMNS} FROM transactions
      WHERE ${conditions.join(' AND ')}
      ORDER BY ledger ${queryOrder}, hash ${queryOrder}
      LIMIT $${params.length}`,
@@ -351,7 +393,7 @@ export async function getTransactions(
 
 export async function getTransactionByHash(pool: Pool, network: string, hash: string) {
   const { rows } = await pool.query<TransactionRow>(
-    `SELECT ${TRANSACTION_MAPPER_COLUMNS} FROM transactions WHERE hash = $1 AND network = $2`,
+    `SELECT ${TRANSACTION_COLUMNS} FROM transactions WHERE hash = $1 AND network = $2`,
     [hash, network]
   );
   return rows[0] ? mapTransaction(rows[0]) : null;
@@ -360,7 +402,7 @@ export async function getTransactionByHash(pool: Pool, network: string, hash: st
 export async function getTransactionsByHashes(pool: Pool, network: string, hashes: readonly string[]) {
   if (hashes.length === 0) return new Map<string, ReturnType<typeof mapTransaction>>();
   const { rows } = await pool.query<TransactionRow>(
-    `SELECT ${TRANSACTION_MAPPER_COLUMNS} FROM transactions WHERE hash = ANY($1::text[]) AND network = $2`,
+    `SELECT ${TRANSACTION_COLUMNS} FROM transactions WHERE hash = ANY($1::text[]) AND network = $2`,
     [hashes, network]
   );
   return new Map(rows.map(row => [row.hash, mapTransaction(row)]));
@@ -396,22 +438,47 @@ export async function getOperations(
     params.push(opts.type.toLowerCase());
     conditions.push(`type = $${params.length}`);
   }
-  const cursorClause = cursorCondition(params, KEYSETS.operations, opts.cursor, direction, baseOrder);
-  if (cursorClause) conditions.push(cursorClause);
+  if (opts.cursor) {
+    const condition = cursorCondition(params, KEYSETS.operations, opts.cursor, direction, baseOrder);
+    if (condition) conditions.push(condition);
+  }
   const where = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
   params.push(opts.limit);
 
   const { rows } = await pool.query<OperationRow>(
-    `SELECT ${OPERATION_MAPPER_COLUMNS} FROM operations ${where} ORDER BY ledger ${queryOrder}, id ${queryOrder} LIMIT $${params.length}`,
+    `SELECT ${OPERATION_COLUMNS} FROM operations ${where} ORDER BY ledger ${queryOrder}, id ${queryOrder} LIMIT $${params.length}`,
     params
   );
   const items = rows.map(mapOperation);
   return isForward ? items : items.reverse();
 }
 
+/** Lifecycle boundaries of the address itself, including accounts already merged away. */
+export async function getAccountLifecycle(
+  pool: Pool,
+  network: string,
+  address: string,
+  limit: number,
+  cursor?: string | null
+) {
+  // Both Horizon operation types identify the created/deleted address as `account`.
+  // Containment can use the existing details GIN index, including historical rows.
+  const params: unknown[] = [network, JSON.stringify({ account: address })];
+  const after = cursorCondition(params, KEYSETS.accountLifecycle, cursor);
+  params.push(limit);
+  const { rows } = await pool.query<OperationRow>(
+    `SELECT ${OPERATION_COLUMNS} FROM operations
+     WHERE network = $1 AND type IN ('create_account', 'account_merge')
+       AND details @> $2::jsonb${after ? ` AND ${after}` : ''}
+     ORDER BY ledger DESC, id DESC LIMIT $${params.length}`,
+    params
+  );
+  return rows.map(mapOperation);
+}
+
 export async function getOperationsByTransactionHash(pool: Pool, network: string, hash: string) {
   const { rows } = await pool.query<OperationRow>(
-    `SELECT ${OPERATION_MAPPER_COLUMNS} FROM operations WHERE transaction_hash = $1 AND network = $2 ORDER BY id ASC`,
+    `SELECT ${OPERATION_COLUMNS} FROM operations WHERE transaction_hash = $1 AND network = $2 ORDER BY id ASC`,
     [hash, network]
   );
   return rows.map(mapOperation);
@@ -424,7 +491,7 @@ export async function getOperationsByTransactionHashes(
 ) {
   if (hashes.length === 0) return new Map<string, ReturnType<typeof mapOperation>[]>();
   const { rows } = await pool.query<OperationRow>(
-    `SELECT ${OPERATION_MAPPER_COLUMNS} FROM operations WHERE transaction_hash = ANY($1::text[]) AND network = $2 ORDER BY transaction_hash ASC, id ASC`,
+    `SELECT ${OPERATION_COLUMNS} FROM operations WHERE transaction_hash = ANY($1::text[]) AND network = $2 ORDER BY transaction_hash ASC, id ASC`,
     [hashes, network]
   );
   const byHash = new Map<string, ReturnType<typeof mapOperation>[]>();
@@ -458,7 +525,7 @@ export async function getLedgers(
   params.push(limit);
 
   const { rows } = await pool.query<LedgerRow>(
-    `SELECT ${LEDGER_MAPPER_COLUMNS} FROM ledgers WHERE network = $1${condition ? ` AND ${condition}` : ''} ORDER BY sequence ${queryOrder} LIMIT $${params.length}`,
+    `SELECT ${LEDGER_COLUMNS} FROM ledgers WHERE network = $1${condition ? ` AND ${condition}` : ''} ORDER BY sequence ${queryOrder} LIMIT $${params.length}`,
     params
   );
   const items = rows.map(mapLedger);
@@ -467,7 +534,7 @@ export async function getLedgers(
 
 export async function getLedgerBySequence(pool: Pool, network: string, sequence: number) {
   const { rows } = await pool.query<LedgerRow>(
-    `SELECT ${LEDGER_MAPPER_COLUMNS} FROM ledgers WHERE sequence = $1 AND network = $2`,
+    `SELECT ${LEDGER_COLUMNS} FROM ledgers WHERE sequence = $1 AND network = $2`,
     [sequence, network]
   );
   return rows[0] ? mapLedger(rows[0]) : null;
@@ -476,7 +543,7 @@ export async function getLedgerBySequence(pool: Pool, network: string, sequence:
 export async function getLedgersBySequences(pool: Pool, network: string, sequences: readonly number[]) {
   if (sequences.length === 0) return new Map<number, ReturnType<typeof mapLedger>>();
   const { rows } = await pool.query<LedgerRow>(
-    `SELECT ${LEDGER_MAPPER_COLUMNS} FROM ledgers WHERE sequence = ANY($1::bigint[]) AND network = $2`,
+    `SELECT ${LEDGER_COLUMNS} FROM ledgers WHERE sequence = ANY($1::bigint[]) AND network = $2`,
     [sequences, network]
   );
   return new Map(rows.map(row => [Number(row.sequence), mapLedger(row)]));
@@ -484,7 +551,7 @@ export async function getLedgersBySequences(pool: Pool, network: string, sequenc
 
 export async function getLatestLedgerFromDb(pool: Pool, network: string) {
   const { rows } = await pool.query<LedgerRow>(
-    `SELECT ${LEDGER_MAPPER_COLUMNS} FROM ledgers WHERE network = $1 ORDER BY sequence DESC LIMIT 1`,
+    `SELECT ${LEDGER_COLUMNS} FROM ledgers WHERE network = $1 ORDER BY sequence DESC LIMIT 1`,
     [network]
   );
   return rows[0] ? mapLedger(rows[0]) : null;
@@ -494,13 +561,20 @@ export async function getLatestLedgerFromDb(pool: Pool, network: string) {
  * The indexed tip for one network: the highest ledger it has written and when
  * that write happened. `indexerStatus` reports it against Horizon's tip to say
  * how stale the data is — the read that question needs, in one round trip.
+ *
+ * Read the tip row rather than aggregating `MAX(sequence), MAX(indexed_at)`.
+ * The aggregate cannot use the primary key: `MAX(indexed_at)` has no index and
+ * makes the planner scan the whole table on every call, which at 2.5M ledgers
+ * measured a 734 ms parallel sequential scan. The tip row is also the correct
+ * definition of "when that write happened" — a backfill writing an old ledger
+ * updates `indexed_at`, and the two maxima need not belong to the same row.
  */
 export async function getIndexedTip(
   pool: Pool,
   network: string
 ): Promise<{ sequence: number | null; indexedAt: string | null }> {
   const { rows } = await pool.query<{ sequence: string | null; indexed_at: Date | null }>(
-    'SELECT MAX(sequence) AS sequence, MAX(indexed_at) AS indexed_at FROM ledgers WHERE network = $1',
+    'SELECT sequence, indexed_at FROM ledgers WHERE network = $1 ORDER BY sequence DESC LIMIT 1',
     [network]
   );
   const row = rows[0];
@@ -512,8 +586,33 @@ export async function getIndexedTip(
 
 export async function getAccountFromDb(pool: Pool, network: string, address: string) {
   const { rows } = await pool.query<AccountRow>(
-    `SELECT ${ACCOUNT_MAPPER_COLUMNS} FROM accounts WHERE address = $1 AND network = $2`,
+    `SELECT ${ACCOUNT_COLUMNS} FROM accounts WHERE address = $1 AND network = $2`,
     [address, network]
+  );
+  if (!rows[0]) return null;
+  return accountFromRow(rows[0]);
+}
+
+/**
+ * The most recent stored state of an account at or before `ledger`.
+ *
+ * Reads `account_state_history`, which the indexer fills on each account
+ * refresh (see docs/ACCOUNT_STATE_HISTORY.md). `null` means no stored state
+ * exists at or before that ledger: the account was not yet observed, or its
+ * history has been pruned. It does not mean the account did not exist.
+ */
+export async function getAccountAsOfLedgerFromDb(
+  pool: Pool,
+  network: string,
+  address: string,
+  ledger: number
+) {
+  const { rows } = await pool.query<AccountRow>(
+    `SELECT ${ACCOUNT_COLUMNS} FROM account_state_history
+     WHERE address = $1 AND network = $2 AND last_modified_ledger <= $3
+     ORDER BY last_modified_ledger DESC
+     LIMIT 1`,
+    [address, network, ledger]
   );
   if (!rows[0]) return null;
   return accountFromRow(rows[0]);
@@ -522,7 +621,7 @@ export async function getAccountFromDb(pool: Pool, network: string, address: str
 export async function getAccountsFromDb(pool: Pool, network: string, addresses: readonly string[]) {
   if (addresses.length === 0) return new Map<string, ReturnType<typeof mapAccount>>();
   const { rows } = await pool.query<AccountRow>(
-    `SELECT ${ACCOUNT_MAPPER_COLUMNS} FROM accounts WHERE address = ANY($1::text[]) AND network = $2`,
+    `SELECT ${ACCOUNT_COLUMNS} FROM accounts WHERE address = ANY($1::text[]) AND network = $2`,
     [addresses, network]
   );
   return new Map(rows.map(row => [row.address, accountFromRow(row)]));
@@ -613,7 +712,7 @@ export async function getAccounts(
   params.push(opts.limit);
 
   const { rows } = await pool.query<AccountRow>(
-    `SELECT ${ACCOUNT_MAPPER_COLUMNS} FROM accounts
+    `SELECT ${ACCOUNT_COLUMNS} FROM accounts
       WHERE network = $1${condition ? ` AND ${condition}` : ''}
       ORDER BY ${queryOrderBy}
       LIMIT $${params.length}`,
@@ -625,7 +724,7 @@ export async function getAccounts(
 
 export async function getAccountTransactions(pool: Pool, network: string, address: string, limit: number) {
   const { rows } = await pool.query<TransactionRow>(
-    `SELECT ${TRANSACTION_MAPPER_COLUMNS} FROM transactions WHERE source_account = $1 AND network = $2 ORDER BY ledger DESC LIMIT $3`,
+    `SELECT ${TRANSACTION_COLUMNS} FROM transactions WHERE source_account = $1 AND network = $2 ORDER BY ledger DESC LIMIT $3`,
     [address, network, limit]
   );
   return rows.map(mapTransaction);
@@ -633,7 +732,7 @@ export async function getAccountTransactions(pool: Pool, network: string, addres
 
 export async function getAccountOperations(pool: Pool, network: string, address: string, limit: number) {
   const { rows } = await pool.query<OperationRow>(
-    `SELECT ${OPERATION_MAPPER_COLUMNS} FROM operations WHERE source_account = $1 AND network = $2 ORDER BY ledger DESC LIMIT $3`,
+    `SELECT ${OPERATION_COLUMNS} FROM operations WHERE source_account = $1 AND network = $2 ORDER BY ledger DESC LIMIT $3`,
     [address, network, limit]
   );
   return rows.map(mapOperation);
@@ -665,13 +764,15 @@ export async function getEventsByContract(
     params.push(opts.topic);
     conditions.push(`$${params.length} = ANY(topics)`);
   }
-  const cursorClause = cursorCondition(params, KEYSETS.events, opts.cursor, direction, baseOrder);
-  if (cursorClause) conditions.push(cursorClause);
+  if (opts.cursor) {
+    const condition = cursorCondition(params, KEYSETS.events, opts.cursor, direction, baseOrder);
+    if (condition) conditions.push(condition);
+  }
 
   params.push(opts.limit);
 
   const { rows } = await pool.query<EventRow>(
-    `SELECT ${EVENT_MAPPER_COLUMNS} FROM contract_events WHERE ${conditions.join(' AND ')} ORDER BY ledger ${queryOrder}, id ${queryOrder} LIMIT $${params.length}`,
+    `SELECT ${EVENT_COLUMNS} FROM contract_events WHERE ${conditions.join(' AND ')} ORDER BY ledger ${queryOrder}, id ${queryOrder} LIMIT $${params.length}`,
     params
   );
   const items = rows.map(mapEvent);
@@ -740,7 +841,7 @@ export async function getContractStorageEntries(
   params.push(opts.limit);
 
   const { rows } = await pool.query<ContractStorageEntryRow>(
-    `SELECT ${CONTRACT_STORAGE_ENTRY_MAPPER_COLUMNS} FROM contract_storage_entries WHERE ${conditions.join(' AND ')} ORDER BY last_modified_ledger ${queryOrder}, key ${queryOrder} LIMIT $${params.length}`,
+    `SELECT ${CONTRACT_STORAGE_ENTRY_COLUMNS} FROM contract_storage_entries WHERE ${conditions.join(' AND ')} ORDER BY last_modified_ledger ${queryOrder}, key ${queryOrder} LIMIT $${params.length}`,
     params
   );
   const items = rows.map(mapContractStorageEntry);
@@ -755,7 +856,7 @@ export async function getContractStorageEntries(
  */
 export async function getTransactionsByLedger(pool: Pool, network: string, ledger: number) {
   const { rows } = await pool.query<TransactionRow>(
-    `SELECT ${TRANSACTION_MAPPER_COLUMNS} FROM transactions WHERE ledger = $1 AND network = $2 ORDER BY hash ASC`,
+    `SELECT ${TRANSACTION_COLUMNS} FROM transactions WHERE ledger = $1 AND network = $2 ORDER BY hash ASC`,
     [ledger, network]
   );
   return rows.map(mapTransaction);
@@ -777,7 +878,7 @@ export async function getAccountOperationsInLedger(
   address: string
 ) {
   const { rows } = await pool.query<OperationRow>(
-    `SELECT ${OPERATION_MAPPER_COLUMNS} FROM operations
+    `SELECT ${OPERATION_COLUMNS} FROM operations
       WHERE ledger = $1
         AND network = $3
         AND ( source_account = $2
@@ -902,7 +1003,7 @@ export async function getTradesFromDb(
   const limitPos = params.length;
 
   const sql = `
-    SELECT ${TRADE_MAPPER_COLUMNS} FROM trades
+    SELECT ${TRADE_COLUMNS} FROM trades
     WHERE ${conditions.join(' AND ')}
     ORDER BY ledger_close_time DESC, id DESC
     LIMIT $${limitPos}
@@ -963,4 +1064,216 @@ export async function getTableCountEstimateOrExact(
     precision: CountPrecision.ESTIMATE,
     isEstimate: true,
   };
+}
+
+// ─── Signers & Sponsorship (#226) ────────────────────────────────────────────
+
+export interface SignerRow {
+  key: string;
+  type: string;
+  weight: number;
+}
+
+export async function getAccountSigners(
+  pool: Pool,
+  network: string,
+  address: string
+): Promise<SignerRow[]> {
+  const { rows } = await pool.query<SignerRow>(
+    `SELECT key, type, weight FROM account_signers
+     WHERE network = $1 AND account_address = $2
+     ORDER BY weight DESC, key ASC`,
+    [network, address]
+  );
+  return rows;
+}
+
+export async function getSponsoredAccounts(
+  pool: Pool,
+  network: string,
+  sponsorAddress: string,
+  limit: number
+): Promise<ReturnType<typeof mapAccount>[]> {
+  const { rows } = await pool.query(
+    `SELECT a.address, a.network, a.sequence, a.subentry_count, a.last_modified_ledger,
+            a.num_sponsored, a.num_sponsoring, a.balances, a.flags, a.thresholds
+     FROM accounts a
+     JOIN sponsorships s ON s.sponsored_id = a.address AND s.network = a.network
+     WHERE s.sponsor = $1 AND s.network = $2
+     ORDER BY a.address ASC
+     LIMIT $3`,
+    [sponsorAddress, network, limit]
+  );
+  return rows.map((row) =>
+    mapAccount({
+      network: row.network,
+      address: row.address,
+      sequence: row.sequence,
+      subentry_count: row.subentry_count,
+      last_modified_ledger: row.last_modified_ledger,
+      num_sponsored: row.num_sponsored,
+      num_sponsoring: row.num_sponsoring,
+      balances: row.balances,
+      flags: row.flags,
+      thresholds: row.thresholds,
+    })
+  );
+}
+
+// ─── Contracts & Deployments (#227) ──────────────────────────────────────────
+
+export interface ContractDeploymentRow {
+  contract_id: string;
+  deployer: string;
+  wasm_hash: string;
+  deployed_ledger: number;
+  deployed_at: string;
+}
+
+export async function getContractDeployment(
+  pool: Pool,
+  network: string,
+  contractId: string
+): Promise<ContractDeploymentRow | null> {
+  const { rows } = await pool.query<ContractDeploymentRow>(
+    `SELECT contract_id, deployer, wasm_hash, deployed_ledger, deployed_at
+     FROM contract_deployments
+     WHERE network = $1 AND contract_id = $2`,
+    [network, contractId]
+  );
+  return rows[0] ?? null;
+}
+
+export async function getContracts(
+  pool: Pool,
+  network: string,
+  limit: number,
+  cursor?: string
+): Promise<ContractDeploymentRow[]> {
+  const conditions = ['network = $1'];
+  const params: unknown[] = [network];
+  if (cursor) {
+    params.push(cursor);
+    conditions.push(`deployed_ledger < $${params.length}`);
+  }
+  params.push(limit);
+  const { rows } = await pool.query<ContractDeploymentRow>(
+    `SELECT contract_id, deployer, wasm_hash, deployed_ledger, deployed_at
+     FROM contract_deployments
+     WHERE ${conditions.join(' AND ')}
+     ORDER BY deployed_ledger DESC
+     LIMIT $${params.length}`,
+    params
+  );
+  return rows;
+}
+
+export async function getSharedWasmContracts(
+  pool: Pool,
+  network: string,
+  wasmHash: string,
+  excludeContractId: string,
+  limit: number
+): Promise<ContractDeploymentRow[]> {
+  const { rows } = await pool.query<ContractDeploymentRow>(
+    `SELECT contract_id, deployer, wasm_hash, deployed_ledger, deployed_at
+     FROM contract_deployments
+     WHERE network = $1 AND wasm_hash = $2 AND contract_id != $3
+     ORDER BY deployed_ledger DESC
+     LIMIT $4`,
+    [network, wasmHash, excludeContractId, limit]
+  );
+  return rows;
+}
+
+// ─── Network Statistics (#228) ───────────────────────────────────────────────
+
+export interface NetworkStatsBucketRow {
+  bucket_start: string;
+  transaction_count: number;
+  operation_count: number;
+  active_accounts: number;
+  total_volume: string;
+}
+
+export async function getNetworkStats(
+  pool: Pool,
+  network: string,
+  startTime: string,
+  endTime: string,
+  granularity: string,
+  limit: number
+): Promise<NetworkStatsBucketRow[]> {
+  const { rows } = await pool.query<NetworkStatsBucketRow>(
+    `SELECT
+       bucket_start,
+       transaction_count,
+       operation_count,
+       active_accounts,
+       total_volume::text AS total_volume
+     FROM activity_rollups
+     WHERE network = $1 AND granularity = $2
+       AND bucket_start >= $3 AND bucket_start < $4
+     ORDER BY bucket_start ASC
+     LIMIT $5`,
+    [network, granularity, startTime, endTime, limit]
+  );
+  return rows;
+}
+
+// ─── Activity Rollups (#229) ─────────────────────────────────────────────────
+
+export interface ActivityRollupRow {
+  bucket_start: string;
+  granularity: string;
+  network: string;
+  transaction_count: number;
+  operation_count: number;
+  active_accounts: number;
+  total_volume: string;
+}
+
+export async function getActivityRollups(
+  pool: Pool,
+  network: string,
+  granularity: string,
+  startTime: string,
+  endTime: string,
+  limit: number
+): Promise<ActivityRollupRow[]> {
+  const { rows } = await pool.query<ActivityRollupRow>(
+    `SELECT
+       bucket_start, granularity, network,
+       transaction_count, operation_count, active_accounts,
+       total_volume::text AS total_volume
+     FROM activity_rollups
+     WHERE network = $1 AND granularity = $2
+       AND bucket_start >= $3 AND bucket_start < $4
+     ORDER BY bucket_start ASC
+     LIMIT $5`,
+    [network, granularity, startTime, endTime, limit]
+  );
+  return rows;
+}
+
+export async function getRollupConsistency(
+  pool: Pool,
+  network: string,
+  granularity: string,
+  bucketStart: string
+): Promise<{ rollupCount: number; baseCount: number; matches: boolean }> {
+  const { rows: rollupRows } = await pool.query<{ transaction_count: string }>(
+    `SELECT transaction_count::text FROM activity_rollups
+     WHERE network = $1 AND granularity = $2 AND bucket_start = $3`,
+    [network, granularity, bucketStart]
+  );
+  const { rows: baseRows } = await pool.query<{ count: string }>(
+    `SELECT COUNT(*)::text AS count FROM transactions
+     WHERE network = $1 AND ledger_close_time >= $2
+       AND ledger_close_time < $2::timestamptz + CASE WHEN $3 = 'day' THEN INTERVAL '1 day' ELSE INTERVAL '1 hour' END`,
+    [network, bucketStart, granularity]
+  );
+  const rollupCount = parseInt(rollupRows[0]?.transaction_count ?? '0', 10);
+  const baseCount = parseInt(baseRows[0]?.count ?? '0', 10);
+  return { rollupCount, baseCount, matches: rollupCount === baseCount };
 }

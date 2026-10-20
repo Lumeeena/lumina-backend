@@ -14,7 +14,7 @@ CREATE TABLE IF NOT EXISTS export_jobs (
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     started_at TIMESTAMPTZ,
     completed_at TIMESTAMPTZ,
-    CONSTRAINT export_jobs_status_check CHECK (
+    CONSTRAINT export_jobs_completion_check CHECK (
         (status = 'complete' AND completed_at IS NOT NULL) OR
         (status != 'complete')
     )

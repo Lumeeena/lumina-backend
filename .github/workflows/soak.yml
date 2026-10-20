@@ -1,0 +1,63 @@
+name: Soak
+
+# The whole stack under sustained load for an hour, failing on a resource
+# trend (memory, handles, Postgres connections) rather than waiting for a
+# crash. Too long for every pull request, so it runs weekly and on demand.
+# See docs/SOAK_TESTING.md.
+on:
+  schedule:
+    - cron: '0 3 * * 1'
+  workflow_dispatch:
+    inputs:
+      duration_minutes:
+        description: 'How long to run the stack under load, in minutes (at most 300)'
+        type: number
+        default: 60
+        required: true
+
+jobs:
+  soak:
+    name: Soak (long-running stability)
+    runs-on: ubuntu-latest
+    # The longest run the input allows, plus time to build and tear down.
+    timeout-minutes: 340
+    services:
+      postgres:
+        image: postgres:16-alpine@sha256:721873c34ceb9f8d8fc265984940dc982404c105f19ad51be9fdc5970a6080ea
+        env:
+          POSTGRES_DB: lumina_test
+          POSTGRES_USER: lumina
+          POSTGRES_PASSWORD: lumina_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U lumina -d lumina_test"
+          --health-interval 2s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm ci
+      - run: npm run build
+      - name: npm run test:soak
+        # The input goes through the environment and is checked, never pasted
+        # into the script.
+        run: |
+          if ! [[ "$DURATION_MINUTES" =~ ^[0-9]+$ ]] || (( DURATION_MINUTES < 10 || DURATION_MINUTES > 300 )); then
+            echo "duration_minutes must be a whole number from 10 to 300, got '$DURATION_MINUTES'" >&2
+            exit 1
+          fi
+          SOAK_DURATION_MS=$(( DURATION_MINUTES * 60000 )) npm run test:soak
+        env:
+          DURATION_MINUTES: ${{ github.event.inputs.duration_minutes || '60' }}
+          TEST_DATABASE_URL: postgresql://lumina:lumina_test@localhost:5432/lumina_test
+          SOAK_OUTPUT_DIR: test/.artifacts/soak
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: soak-report
+          path: test/.artifacts/soak/
+          if-no-files-found: ignore

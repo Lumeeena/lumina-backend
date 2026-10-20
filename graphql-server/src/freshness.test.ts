@@ -108,7 +108,7 @@ test('an index that has never written anything is stale', async () => {
 test('the Horizon tip is read from the requested network endpoint', async () => {
   // Both numbers describe one chain: reading mainnet's tip against testnet's
   // index would report a lag of half a million ledgers that does not exist.
-  const seen: string[] = [];
+  const seen: NetworkConfig['horizonUrl'][] = [];
   const network: NetworkConfig = {
     name: 'testnet',
     horizonUrl: 'https://horizon-testnet.example',

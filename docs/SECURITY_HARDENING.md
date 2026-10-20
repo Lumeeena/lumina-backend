@@ -17,10 +17,15 @@ Over-budget queries are rejected before any resolver runs, with `QUERY_TOO_DEEP`
 
 In production (`NODE_ENV=production`) an unexpected resolver error — for example
 a Postgres failure — is returned as `Internal server error` with
-`extensions.correlationId`. The full error is logged at `error` level with the
-same `correlationId`. Deliberate errors (`CustomQueryError`, `SearchError`,
-`AssetError`, `ApiKeyError`, `SubscriberLimitError`) and errors with a
-caller-facing code (validation, `QUERY_TIMEOUT`) are unchanged. Set
+`extensions.code: INTERNAL_SERVER_ERROR` and `extensions.correlationId`. The
+full error is logged at `error` level with the same `correlationId`.
+
+Deliberate errors are `LuminaError` subclasses (`CustomQueryError`,
+`SearchError`, `AssetError`, `ApiKeyError`, `SubscriberLimitError`, …) and are
+returned with their own stable code — `BAD_USER_INPUT`, `NOT_FOUND`,
+`UNAUTHENTICATED`, `RATE_LIMITED` and so on. Errors that already carry a
+caller-facing code (validation, `QUERY_TIMEOUT`) are likewise unchanged. The
+codes are grouped by category in [`ERROR_CODES.md`](ERROR_CODES.md). Set
 `MASK_INTERNAL_ERRORS=true|false` to override the environment default.
 
 ## Slow operation logging (`SLOW_OPERATION_THRESHOLD_MS`)

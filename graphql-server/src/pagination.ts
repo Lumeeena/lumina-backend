@@ -8,6 +8,7 @@
  * and looks like a bug in their code rather than in the request.
  */
 import { GraphQLError } from 'graphql';
+import { ERROR_CODES } from './errorCodes';
 
 /** Page size a query uses when the caller does not ask for one. */
 export const DEFAULT_PAGE_LIMIT = 20;
@@ -15,19 +16,108 @@ export const DEFAULT_PAGE_LIMIT = 20;
 /** Maximum allowable page size across all paginated queries. */
 export const MAX_PAGE_SIZE = 100;
 
+/**
+ * Maximum rows a single non-paginated aggregate may return.
+ *
+ * `DEFAULT_PAGE_LIMIT` / `MAX_PAGE_SIZE` bound a paginated *page*; the
+ * aggregate queries (`networkStats`, `activityRollups`, `sponsoredAccounts`)
+ * have no cursor to page with — the caller asks for a time range or a sponsor
+ * and gets everything in it. Without a ceiling the whole result is materialised
+ * in memory and serialised into one GraphQL response, so memory would grow with
+ * the request rather than staying flat. This is the ceiling those queries
+ * enforce: large enough for a full year of daily rollups (366) or a month of
+ * hourly ones (744), small enough that the response stays bounded.
+ */
+export const MAX_AGGREGATE_ROWS = 1000;
+
+/**
+ * The row ceiling for a non-paginated aggregate, or throw `BAD_USER_INPUT`.
+ *
+ * An optional caller `limit` is clamped against `MAX_AGGREGATE_ROWS` the same
+ * way `getPageSize` clamps a page: a request above the ceiling is an error, not
+ * a silently truncated result, so the caller can narrow the request rather than
+ * believe they received everything.
+ */
+export function getAggregateLimit(limit: number | null | undefined, defaultLimit: number): number {
+  const requested = limit ?? defaultLimit;
+  if (!Number.isSafeInteger(requested) || requested < 1) {
+    throw new GraphQLError(`Limit must be a positive integer; received ${requested}.`, {
+      extensions: { code: ERROR_CODES.BAD_USER_INPUT },
+    });
+  }
+  if (requested > MAX_AGGREGATE_ROWS) {
+    throw new GraphQLError(
+      `Requested limit ${requested} exceeds the maximum of ${MAX_AGGREGATE_ROWS} for this query. ` +
+        'Narrow the range or use a coarser granularity.',
+      { extensions: { code: ERROR_CODES.BAD_USER_INPUT } }
+    );
+  }
+  return requested;
+}
+
+/** Seconds in the bucket a `hour` / `day` granularity names. */
+export function granularitySeconds(granularity: 'hour' | 'day'): number {
+  return granularity === 'day' ? 86_400 : 3_600;
+}
+
+/**
+ * How many buckets `[startTime, endTime)` spans at a granularity, or `null` for
+ * a range that does not parse.
+ *
+ * A range is bounded by a row cap rather than a page cursor, so the check that
+ * matters is how many buckets it asks for *before* the query returns. Treating
+ * a range that spans more buckets than the cap as an error — rather than
+ * quietly `LIMIT`-ing it — is what keeps a caller from reading a truncated
+ * series as a complete one.
+ */
+export function countBuckets(
+  startTime: string,
+  endTime: string,
+  granularity: 'hour' | 'day'
+): number | null {
+  const start = Date.parse(startTime);
+  const end = Date.parse(endTime);
+  if (Number.isNaN(start) || Number.isNaN(end) || end <= start) return null;
+  return Math.ceil((end - start) / 1000 / granularitySeconds(granularity));
+}
+
+/**
+ * Throw if a time range spans more buckets than `limit` allows.
+ *
+ * `null` from `countBuckets` means the range itself is malformed, which the
+ * database would answer as an empty result; leave it for the query to handle
+ * rather than inventing an error here.
+ */
+export function assertRangeWithinLimit(
+  startTime: string,
+  endTime: string,
+  granularity: 'hour' | 'day',
+  limit: number
+): void {
+  const buckets = countBuckets(startTime, endTime, granularity);
+  if (buckets === null) return;
+  if (buckets > limit) {
+    throw new GraphQLError(
+      `Range spans ${buckets} ${granularity} buckets, above the maximum of ${limit}. ` +
+        'Narrow the range or use a coarser granularity.',
+      { extensions: { code: ERROR_CODES.BAD_USER_INPUT } }
+    );
+  }
+}
+
 export type PaginationDirection = 'FORWARD' | 'BACKWARD';
 
 export function getPageSize(limit: number | null | undefined, defaultLimit = DEFAULT_PAGE_LIMIT): number {
   const pageSize = limit ?? defaultLimit;
   if (!Number.isSafeInteger(pageSize) || pageSize < 1) {
     throw new GraphQLError(`Page size must be a positive integer; received ${pageSize}.`, {
-      extensions: { code: 'BAD_USER_INPUT' },
+      extensions: { code: ERROR_CODES.BAD_USER_INPUT },
     });
   }
   if (pageSize > MAX_PAGE_SIZE) {
     throw new GraphQLError(
       `Requested page size ${pageSize} exceeds the maximum of ${MAX_PAGE_SIZE}.`,
-      { extensions: { code: 'BAD_USER_INPUT' } }
+      { extensions: { code: ERROR_CODES.BAD_USER_INPUT } }
     );
   }
   return pageSize;
@@ -47,7 +137,7 @@ export type CursorValue = number | string;
 export class InvalidCursorError extends GraphQLError {
   constructor(detail: string) {
     super(`Invalid cursor: ${detail} Cursors are opaque — pass back the one a previous page returned.`, {
-      extensions: { code: 'INVALID_CURSOR' },
+      extensions: { code: ERROR_CODES.INVALID_CURSOR },
     });
     this.name = 'InvalidCursorError';
   }
@@ -97,6 +187,7 @@ export interface Keyset {
  * wrong.
  */
 export const KEYSETS = {
+  accountLifecycle: { query: 'accountLifecycle', columns: ['ledger', 'id'], types: ['bigint', 'text'] },
   transactions: { query: 'transactions', columns: ['ledger', 'hash'], types: ['bigint', 'text'] },
   ledgers: { query: 'ledgers', columns: ['sequence'], types: ['bigint'] },
   accountsActivity: { query: 'accounts', columns: ['last_modified_ledger', 'address'], types: ['bigint', 'text'] },
@@ -174,6 +265,9 @@ export function decodeCursor(raw: string, query: string, arity: number): CursorV
 
 export interface PageInfo {
   hasNextPage: boolean;
+  hasPreviousPage: boolean;
+  startCursor: string | null;
+  endCursor: string | null;
   cursor: string | null;
   totalCount?: TotalCount | null;
 }
@@ -181,11 +275,11 @@ export interface PageInfo {
 /**
  * The `pageInfo` for one page of results.
  *
- * `hasNextPage` is "a full page came back", which costs nothing extra and is
- * what every other paginated query has always reported. The cursor is the last
- * row's sort key whenever there is one, including on a short final page: a client
- * that stops because `hasNextPage` is false has nothing to do with it, and a
- * client that pages anyway gets the empty page that means it is done.
+ * `hasNextPage` and `hasPreviousPage` describe the page in the traversal
+ * direction: a full page going forward means there is more after it, a full
+ * page going backward means there is more before it. `startCursor` and
+ * `endCursor` name the first and last rows on the page; `cursor` is the one to
+ * pass back for the next page (the end cursor in a forward traversal).
  *
  * `keyOf` returns the columns the query keysets on, in the same order — one
  * value for a single-column ordering, a tuple for a composite one.
@@ -195,22 +289,46 @@ export function pageInfo<T>(
   items: readonly T[],
   limit: number,
   keyOf: (item: T) => CursorValue | readonly CursorValue[],
+  direction: PaginationDirection = 'FORWARD',
+  hasPrior = false,
   totalCount?: TotalCount | null
 ): PageInfo {
+  const first = items.at(0);
   const last = items.at(-1);
-  if (last === undefined) return { hasNextPage: false, cursor: null, totalCount: totalCount ?? null };
-  const key = keyOf(last);
-  const values = typeof key === 'string' || typeof key === 'number' ? [key] : [...key];
-  if (values.length !== keyset.columns.length) {
+
+  if (first === undefined || last === undefined) {
+    return {
+      hasNextPage: false,
+      hasPreviousPage: hasPrior,
+      startCursor: null,
+      endCursor: null,
+      cursor: null,
+      totalCount: totalCount ?? null,
+    };
+  }
+
+  const firstKey = keyOf(first);
+  const firstValues = typeof firstKey === 'string' || typeof firstKey === 'number' ? [firstKey] : [...firstKey];
+  const lastKey = keyOf(last);
+  const lastValues = typeof lastKey === 'string' || typeof lastKey === 'number' ? [lastKey] : [...lastKey];
+  if (firstValues.length !== keyset.columns.length || lastValues.length !== keyset.columns.length) {
     // A resolver minting the wrong number of values would issue cursors its own
     // query rejects; failing here names the mistake at its source.
     throw new Error(
-      `${keyset.query}: cursor has ${values.length} sort keys but its keyset has ${keyset.columns.length}.`
+      `${keyset.query}: cursor has ${lastValues.length} sort keys but its keyset has ${keyset.columns.length}.`
     );
   }
+
+  const startCursor = encodeCursor(keyset.query, firstValues);
+  const endCursor = encodeCursor(keyset.query, lastValues);
+  const isFullPage = items.length === limit;
+
   return {
-    hasNextPage: items.length === limit,
-    cursor: encodeCursor(keyset.query, values),
+    hasNextPage: direction === 'FORWARD' ? isFullPage : hasPrior,
+    hasPreviousPage: direction === 'FORWARD' ? hasPrior : isFullPage,
+    startCursor,
+    endCursor,
+    cursor: endCursor,
     totalCount: totalCount ?? null,
   };
 }

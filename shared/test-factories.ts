@@ -73,6 +73,7 @@ export function makeContractEvent(overrides?: Partial<ContractEvent>): ContractE
     pagingToken: 'token1',
     topics: ['"swap"'],
     value: { amount: '10' },
+    transactionHash: null,
     ...overrides,
   };
 }

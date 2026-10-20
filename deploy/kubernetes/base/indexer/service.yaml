@@ -1,0 +1,22 @@
+# Headless governing Service for the indexer StatefulSet. The indexer serves no
+# client traffic; this exists for the StatefulSet's stable identity and so
+# Prometheus can find /metrics.
+apiVersion: v1
+kind: Service
+metadata:
+  name: lumina-indexer
+  labels:
+    app.kubernetes.io/name: lumina-indexer
+    app.kubernetes.io/component: indexer
+spec:
+  clusterIP: None
+  # An indexer catching up after a restore is "not ready" (its lag is above
+  # threshold) for exactly as long as its metrics are most interesting. Keep it
+  # discoverable while unready so scraping does not stop when it matters.
+  publishNotReadyAddresses: true
+  selector:
+    app.kubernetes.io/name: lumina-indexer
+  ports:
+    - name: http-metrics
+      port: 9090
+      targetPort: http-metrics

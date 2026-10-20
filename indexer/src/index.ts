@@ -20,7 +20,6 @@
  *   <NAME>_INDEXED_CONTRACT_IDS — Overrides INDEXED_CONTRACT_IDS for that network
  *   PRIMARY_NETWORK       — Which declared network is primary (default: the first one declared)
  *   HORIZON_URL           — Single-network deployments: the one Horizon base URL (default: mainnet)
- *   HISTORY_ARCHIVE_URL   — Optional archive root used for the configured historical backfill range
  *   SOROBAN_RPC_URL       — Single-network deployments: Soroban RPC endpoint; unset disables contract event indexing
  *   DATABASE_URL          — PostgreSQL connection string
  *   START_LEDGER          — Ledger to begin indexing from if a network's DB is empty (default: that network's latest)
@@ -29,6 +28,8 @@
  *   POLL_INTERVAL_MS      — How often to poll for new ledgers (default: 5000)
  *   LEDGER_RETRY_ATTEMPTS — Attempts per failing ledger before the cursor stops at it (default: 3)
  *   LEDGER_RETRY_BASE_MS  — Base retry delay in ms, doubled each attempt (default: 500)
+ *   INDEXER_LEADER_LOCK   — 'false' disables the single-writer lock (default: on; see leaderLock.ts)
+ *   INDEXER_LEADER_RETRY_MS — How often a standby retries the lock (default: 5000)
  *   INDEXED_CONTRACT_IDS  — Comma-separated contract IDs to index events for (requires a Soroban RPC URL)
  *   REGISTRY_CONTRACT_ID  — Lumina Registry contract every network polls by default (requires a Soroban RPC URL + REGISTRY_READ_ACCOUNT)
  *   REGISTRY_READ_ACCOUNT — Any funded account address used to simulate the registry's read calls (no secret key needed)
@@ -39,41 +40,51 @@
 import {
   createPool,
   getAccountsNeedingRefresh,
+  getEarliestIndexedLedger,
   getLatestIndexedEventLedger,
   getLatestIndexedLedger,
+  getLatestTradePagingToken,
+  getOrInitBackfillProgress,
   getTrackedContractStorageKeys,
   indexLedger,
   insertContractEvents,
   insertCustomEvents,
+  insertTrades,
   loadContractSchemas,
   markContractStorageEntriesArchived,
   upsertContractStorageEntries,
+  updateBackfillProgress,
   enqueueLedgerRetry,
   recordContractStorageHistory,
   recordFailedLedger,
-  clearFailedLedger,
   findLedgerGaps,
   countLedgerGaps,
+  getIndexerCursor,
+  setIndexerCursor,
+  countPendingDeadLetters,
+  type Pools,
 } from './db';
+import { validateDatabaseSchema } from './validateSchema';
 import { decodeEvents } from './customDecode';
 import { loadConfig } from './config';
 import { routineLogger, subsystem } from './logger';
 import { RetryWorker } from './retryWorker';
 import { refreshAccountQueueBatch } from './accountRefresh';
-import { HistoryArchiveReader } from './historyArchive';
 import {
   contractEventsIndexed,
   customEventsDecoded,
   indexingErrors,
   ledgerIndexDuration,
+  recordBackfillLedger,
   recordHorizonTip,
   recordIndexedLedger,
   recordLedgerGaps,
-  ledgerGapsCount,
   accountCacheSize,
   sorobanEventsTruncated,
   contractsWatched,
   sorobanRetentionWindowExceeded,
+  deadLetterQueueSize,
+  horizonPaused,
 } from './metrics';
 import {
   aggregateNetworkStates,
@@ -90,12 +101,13 @@ import {
   type RetentionReport,
 } from './retention';
 import { initErrorTracking, captureException, shutdownErrorTracking } from './errorTracking';
+import { LeaderLock } from './leaderLock';
 import { getRetentionInfo, getContractStorageEntries } from './soroban';
 import { getLatestLedgerSequence, getLedger, getLedgerOperations, getLedgerTransactions, getTrades, initializeHorizonClient } from './horizon';
-import type { RequestPurpose } from './throttle';
 import { getActiveContracts, resolveRegistryConfigs, type RegistryConfig } from './registry';
 import { getEvents, getLatestLedgerSequence as getLatestRpcLedgerSequence, type ContractEvent } from './soroban';
 import { resolveNetworks, type NetworkConfig } from './networks';
+import { HorizonUnavailableError } from '@lumina/shared';
 
 // Read version from package.json for logging
 import { readFileSync } from 'fs';
@@ -115,10 +127,19 @@ const config = loadConfig();
 
 const HEALTH_PORT = parseInt(process.env['HEALTH_PORT'] ?? '9090', 10);
 
+// Single-writer guard. On by default: two indexers on one database both walk
+// the same cursors. INDEXER_LEADER_LOCK=false turns it off for a deliberate
+// multi-writer setup, which nothing in this repo supports.
+const LEADER_LOCK_ENABLED = process.env['INDEXER_LEADER_LOCK'] !== 'false';
+const LEADER_RETRY_MS = parseInt(process.env['INDEXER_LEADER_RETRY_MS'] ?? '5000', 10);
+let leader: LeaderLock | null = null;
+let leaderLost = false;
+
 const DATABASE_URL = config.databaseUrl;
 const POLL_INTERVAL_MS = config.pollIntervalMs;
 const START_LEDGER = config.startLedger;
-const DB_POOL_MAX = config.dbPoolMax;
+const DB_WRITE_POOL_MAX = config.dbWritePoolMax;
+const DB_READ_POOL_MAX = config.dbReadPoolMax;
 const DB_POOL_IDLE_TIMEOUT = config.dbPoolIdleTimeoutMs;
 const DB_POOL_CONNECTION_TIMEOUT = config.dbPoolConnectionTimeoutMs;
 
@@ -168,11 +189,31 @@ const RETENTION_WINDOWS = config.retentionWindows;
 const RETENTION_PRUNE_INTERVAL_MS = config.retentionPruneIntervalMs;
 const RETENTION_PRUNE_BATCH_SIZE = config.retentionPruneBatchSize;
 
-const pool = createPool(DATABASE_URL, {
-  max: DB_POOL_MAX,
-  idleTimeoutMillis: DB_POOL_IDLE_TIMEOUT,
-  connectionTimeoutMillis: DB_POOL_CONNECTION_TIMEOUT,
-});
+// Two pools, sized independently. The split exists so a long-running read —
+// a gap scan over the whole ledgers table, an integrity check — cannot take
+// the connections the write path needs: a slow read used to stall indexing
+// for a reason that had nothing to do with writing. Every standalone read
+// runs on `readPool`, every mutating statement on `writePool`; both point at
+// the same database, so the separation is of connection budget, not data.
+const writePool = createPool(
+  DATABASE_URL,
+  {
+    max: DB_WRITE_POOL_MAX,
+    idleTimeoutMillis: DB_POOL_IDLE_TIMEOUT,
+    connectionTimeoutMillis: DB_POOL_CONNECTION_TIMEOUT,
+  },
+  'write'
+);
+const readPool = createPool(
+  DATABASE_URL,
+  {
+    max: DB_READ_POOL_MAX,
+    idleTimeoutMillis: DB_POOL_IDLE_TIMEOUT,
+    connectionTimeoutMillis: DB_POOL_CONNECTION_TIMEOUT,
+  },
+  'read'
+);
+const pools: Pools = { write: writePool, read: readPool };
 
 let isShuttingDown = false;
 let isLoopRunning = false;
@@ -186,7 +227,6 @@ let isLoopRunning = false;
  */
 interface NetworkLoop {
   network: NetworkConfig;
-  historyArchiveReader: HistoryArchiveReader | undefined;
   /** Soroban RPC endpoint for this network; unset disables contract events. */
   sorobanRpcUrl: string | undefined;
   /** Contract ids to index events for: the global list, or this network's override. */
@@ -222,9 +262,6 @@ function createLoop(network: NetworkConfig, registries: Map<string, RegistryConf
   const override = process.env[`${network.name.toUpperCase()}_INDEXED_CONTRACT_IDS`];
   return {
     network,
-    historyArchiveReader: network.historyArchiveUrl
-      ? new HistoryArchiveReader(network.historyArchiveUrl, network.networkPassphrase)
-      : undefined,
     sorobanRpcUrl: network.sorobanRpcUrl,
     staticContractIds:
       override === undefined
@@ -239,6 +276,7 @@ function createLoop(network: NetworkConfig, registries: Map<string, RegistryConf
       latestIndexedLedger: 0,
       latestHorizonLedger: 0,
       lastIndexedAt: null,
+      horizonPaused: false,
     },
     cursor: 0,
     eventsCursor: 0,
@@ -273,50 +311,37 @@ function pruneAccountCache(cache: Map<string, number>, order: string[], now: num
 async function fetchAndIndexLedger(loop: NetworkLoop, sequence: number, isBackfillMode = false): Promise<void> {
   const name = loop.network.name;
   log.debug({ network: name, ledger: sequence, isBackfill: isBackfillMode }, 'indexing ledger');
-  
-  const isBackfill = isBackfillMode || (loop.state.latestHorizonLedger - sequence > 10);
-  const purpose: RequestPurpose = isBackfill ? 'backfill' : 'tip';
-  
-  const archived = isBackfillMode && loop.historyArchiveReader
-    ? await loop.historyArchiveReader.getLedger(sequence)
-    : undefined;
-  const [ledger, transactions, operations] = archived
-    ? [archived.ledger, archived.transactions, archived.operations]
-    : await Promise.all([
-      getLedger(loop.network.horizonUrl, sequence, purpose),
-      getLedgerTransactions(loop.network.horizonUrl, sequence, purpose),
-      getLedgerOperations(loop.network.horizonUrl, sequence, purpose),
-    ]);
 
-  let expiredAddresses: string[] = [];
-  let addressesToFetch: string[] = [];
+  const [ledger, transactions, operations] = await Promise.all([
+    getLedger(loop.network.horizonUrl, sequence),
+    getLedgerTransactions(loop.network.horizonUrl, sequence),
+    getLedgerOperations(loop.network.horizonUrl, sequence),
+  ]);
+
+  const addresses = new Set<string>();
+  for (const tx of transactions) addresses.add(tx.source_account);
+  for (const op of operations) addresses.add(op.source_account);
+
   const now = Date.now();
-  if (!archived) {
-    const addresses = new Set<string>();
-    for (const tx of transactions) addresses.add(tx.source_account);
-    for (const op of operations) addresses.add(op.source_account);
-
-    pruneAccountCache(loop.accountCache, loop.accountCacheOrder, now);
-    expiredAddresses = [...addresses].filter(address => {
-      const fetchedAt = loop.accountCache.get(address);
-      return fetchedAt === undefined || now - fetchedAt > ACCOUNT_CACHE_TTL_MS;
-    });
-    addressesToFetch = await getAccountsNeedingRefresh(pool, name, expiredAddresses, sequence);
-  }
+  pruneAccountCache(loop.accountCache, loop.accountCacheOrder, now);
+  const expiredAddresses = [...addresses].filter(address => {
+    const fetchedAt = loop.accountCache.get(address);
+    return fetchedAt === undefined || now - fetchedAt > ACCOUNT_CACHE_TTL_MS;
+  });
+  const addressesToFetch = await getAccountsNeedingRefresh(readPool, name, expiredAddresses, sequence);
   const stopTimer = ledgerIndexDuration.startTimer();
-  await indexLedger(pool, name, ledger, transactions, operations, addressesToFetch);
+  await indexLedger(writePool, name, ledger, transactions, operations, addressesToFetch);
   stopTimer();
 
-  if (!archived) {
-    for (const address of expiredAddresses) {
-      loop.accountCache.set(address, now);
-      const idx = loop.accountCacheOrder.indexOf(address);
-      if (idx !== -1) loop.accountCacheOrder.splice(idx, 1);
-      loop.accountCacheOrder.push(address);
-    }
-    accountCacheSize.set({ network: name }, loop.accountCache.size);
-    scheduleAccountRefreshes(loop);
+  for (const address of expiredAddresses) {
+    loop.accountCache.set(address, now);
+    // Update LRU order: remove if exists, then add to end (most recent)
+    const idx = loop.accountCacheOrder.indexOf(address);
+    if (idx !== -1) loop.accountCacheOrder.splice(idx, 1);
+    loop.accountCacheOrder.push(address);
   }
+  accountCacheSize.set({ network: name }, loop.accountCache.size);
+  scheduleAccountRefreshes(loop);
 
   if (isBackfillMode) {
     recordBackfillLedger(name, sequence, transactions.length, operations.length);
@@ -352,7 +377,9 @@ export function calculateBackoffWithJitter(
   if (baseMs <= 0) return 0;
   const ceiling = Math.min(maxDelayMs, baseMs * 2 ** (attempt - 1));
   const half = Math.floor(ceiling / 2);
-  return half + Math.floor(randomFn() * (ceiling - half + 1));
+  // Clamp so an injected randomFn returning exactly 1 lands on the ceiling
+  // rather than ceiling + 1; Math.random() stays in [0, 1) either way.
+  return Math.min(ceiling, half + Math.floor(randomFn() * (ceiling - half + 1)));
 }
 
 /** Records a ledger that exhausted its retries for the durable retry worker to pick up. */
@@ -380,7 +407,7 @@ export async function fetchAndIndexLedgerWithRetry(
   // a database — this function used to reach for the module pool on exhaustion,
   // which made "did it give up correctly" untestable without Postgres. Same
   // shape as accountRefresh's injected fetchAccount.
-  enqueueRetry: EnqueueLedgerRetry = (net, seq, err) => enqueueLedgerRetry(pool, net, seq, err),
+  enqueueRetry: EnqueueLedgerRetry = (net, seq, err) => enqueueLedgerRetry(writePool, net, seq, err),
   recordFailed?: RecordFailedLedger,
   sleepFn: (ms: number) => Promise<void> = ms => new Promise(r => setTimeout(r, ms))
 ): Promise<boolean> {
@@ -394,6 +421,10 @@ export async function fetchAndIndexLedgerWithRetry(
       if (attempt === actualRetryAttempts) {
         indexingErrors.inc({ loop: 'ledger' });
         const errorMsg = message(err);
+        if (err instanceof HorizonUnavailableError) {
+          log.warn({ network, ledger: sequence }, 'Horizon is unavailable; leaving ledger pending without marking it failed');
+          return false;
+        }
         log.error({ network, ledger: sequence, attempts: attempt, err: errorMsg }, 'giving up on ledger; recording failure and enqueueing for durable retry');
         // Deliberately allowed to throw: if the retry cannot be recorded the
         // ledger is unindexed and unrecorded, and letting the error propagate
@@ -401,7 +432,7 @@ export async function fetchAndIndexLedgerWithRetry(
         if (recordFailed) {
           await recordFailed(network, sequence, errorMsg, attempt);
         } else {
-          await recordFailedLedger(pool, network, sequence, errorMsg, attempt).catch(() => {});
+          await recordFailedLedger(writePool, network, sequence, errorMsg, attempt).catch(() => {});
         }
         await enqueueRetry(network, sequence, errorMsg);
         return false;
@@ -420,21 +451,26 @@ export async function fetchAndIndexLedgerWithRetry(
 /**
  * Detects missing ledger sequence numbers below the tip and re-fetches them.
  * Updates the ledgerGapsCount metric before and after repair.
+ *
+ * The scans run on the read pool: counting and finding gaps window-scans the
+ * whole `ledgers` table per network, and that is exactly the long read that
+ * must not hold a connection the write path needs. The repairs themselves go
+ * through `indexOne`, which writes on the write pool.
  */
 export async function repairLedgerGaps(
-  pool: Pool,
+  pools: Pools,
   network: string,
   indexOne: (sequence: number) => Promise<boolean>,
   batchLimit = 10
 ): Promise<{ detected: number; repaired: number }> {
-  const initialGapCount = await countLedgerGaps(pool, network);
+  const initialGapCount = await countLedgerGaps(pools.read, network);
   recordLedgerGaps(network, initialGapCount);
 
   if (initialGapCount === 0) {
     return { detected: 0, repaired: 0 };
   }
 
-  const gaps = await findLedgerGaps(pool, network, batchLimit);
+  const gaps = await findLedgerGaps(pools.read, network, batchLimit);
   let repaired = 0;
 
   for (const seq of gaps) {
@@ -449,7 +485,7 @@ export async function repairLedgerGaps(
     }
   }
 
-  const remainingGaps = await countLedgerGaps(pool, network);
+  const remainingGaps = await countLedgerGaps(pools.read, network);
   recordLedgerGaps(network, remainingGaps);
 
   return { detected: initialGapCount, repaired };
@@ -550,7 +586,7 @@ async function pollContractEvents(loop: NetworkLoop): Promise<void> {
   if (!loop.sorobanRpcUrl || contractIds.length === 0) return;
   try {
     if (loop.eventsCursor === 0) {
-      const dbCursor = await getLatestIndexedEventLedger(pool, name);
+      const dbCursor = await getIndexerCursor(readPool, name, 'events') ?? await getLatestIndexedEventLedger(readPool, name);
       if (dbCursor > 0) {
         loop.eventsCursor = dbCursor + 1;
       } else {
@@ -586,7 +622,7 @@ async function pollContractEvents(loop: NetworkLoop): Promise<void> {
     if (events.length > 0) {
       routine.success({ network: name, events: events.length, fromLedger: loop.eventsCursor }, 'indexing contract events');
       contractEventsIndexed.inc(events.length);
-      await insertContractEvents(pool, name, events);
+      await insertContractEvents(writePool, name, events);
       await indexCustomEvents(loop, events);
     }
     if (truncated) {
@@ -597,6 +633,7 @@ async function pollContractEvents(loop: NetworkLoop): Promise<void> {
       );
     }
     loop.eventsCursor = Math.max(loop.eventsCursor, latestLedger - EVENTS_SAFETY_LAG_LEDGERS + 1);
+    await setIndexerCursor(writePool, name, 'events', loop.eventsCursor);
   } catch (err) {
     indexingErrors.inc({ loop: 'contract-events' });
     log.error({ network: name, err: message(err) }, 'contract event polling failed');
@@ -619,7 +656,7 @@ async function pollContractEvents(loop: NetworkLoop): Promise<void> {
  */
 async function indexCustomEvents(loop: NetworkLoop, events: ContractEvent[]): Promise<void> {
   try {
-    const schemas = await loadContractSchemas(pool, loop.network.name);
+    const schemas = await loadContractSchemas(readPool, loop.network.name);
     if (schemas.size === 0) return;
 
     const { decoded, failures } = decodeEvents(schemas, events);
@@ -637,7 +674,7 @@ async function indexCustomEvents(loop: NetworkLoop, events: ContractEvent[]): Pr
     if (decoded.length > 0) {
       routine.success({ network: loop.network.name, decoded: decoded.length }, 'decoded events against custom schemas');
       customEventsDecoded.inc({ outcome: 'decoded' }, decoded.length);
-      await insertCustomEvents(pool, loop.network.name, decoded);
+      await insertCustomEvents(writePool, loop.network.name, decoded);
     }
   } catch (err) {
     indexingErrors.inc({ loop: 'custom-schema' });
@@ -664,7 +701,7 @@ async function pollContractStorage(loop: NetworkLoop): Promise<void> {
   if (!loop.sorobanRpcUrl) return;
   const name = loop.network.name;
   try {
-    const tracked = await getTrackedContractStorageKeys(pool, name);
+    const tracked = await getTrackedContractStorageKeys(readPool, name);
     const keys = [...new Set([...tracked, ...config.indexedContractStorageKeys])];
     if (keys.length === 0) return;
 
@@ -673,15 +710,15 @@ async function pollContractStorage(loop: NetworkLoop): Promise<void> {
 
     if (entries.length > 0) {
       routine.success({ network: name, entries: entries.length }, 'indexed contract storage entries');
-      await upsertContractStorageEntries(pool, name, entries);
-      await recordContractStorageHistory(pool, name, entries);
+      await upsertContractStorageEntries(writePool, name, entries);
+      await recordContractStorageHistory(writePool, name, entries);
     }
 
     // Watched keys the RPC did not return. Only those previously observed as
     // `active` are marked; the UPDATE's state guard makes the rest no-ops.
     const missing = keys.filter(key => !returnedKeys.has(key));
     if (missing.length > 0) {
-      await markContractStorageEntriesArchived(pool, name, missing);
+      await markContractStorageEntriesArchived(writePool, name, missing);
     }
   } catch (err) {
     indexingErrors.inc({ loop: 'contract-storage' });
@@ -699,7 +736,7 @@ export async function pollTrades(loop: NetworkLoop): Promise<void> {
   const name = loop.network.name;
   try {
     if (!loop.tradesCursor) {
-      const dbCursor = await getLatestTradePagingToken(pool, name);
+      const dbCursor = await getLatestTradePagingToken(readPool, name);
       if (dbCursor) {
         loop.tradesCursor = dbCursor;
       }
@@ -710,7 +747,7 @@ export async function pollTrades(loop: NetworkLoop): Promise<void> {
       limit: 200,
     });
     if (trades.length > 0) {
-      await insertTrades(pool, name, trades);
+      await insertTrades(writePool, name, trades);
       loop.tradesCursor = trades[trades.length - 1].paging_token;
       routine.success({ network: name, count: trades.length }, 'trades indexed');
     }
@@ -729,7 +766,7 @@ async function runNetworkLoop(loop: NetworkLoop): Promise<void> {
   // start never takes the others down with it.
   let initialised = false;
   const initCursor = async (): Promise<void> => {
-    loop.cursor = await getLatestIndexedLedger(pool, name);
+    loop.cursor = await getIndexerCursor(readPool, name, 'forward') ?? await getLatestIndexedLedger(readPool, name);
     if (loop.cursor === 0 && START_LEDGER !== undefined) {
       loop.cursor = START_LEDGER - 1;
       log.info({ network: name, ledger: START_LEDGER }, 'starting from configured START_LEDGER');
@@ -765,7 +802,7 @@ async function runNetworkLoop(loop: NetworkLoop): Promise<void> {
 
     let endLedger = config.backfillEndLedger;
     if (endLedger === undefined) {
-      const earliest = await getEarliestIndexedLedger(pool, name);
+      const earliest = await getEarliestIndexedLedger(readPool, name);
       if (earliest === 0) {
         log.warn({ network: name }, 'no indexed ledgers found to determine backfill end ledger; backfill skipped');
         return;
@@ -778,7 +815,7 @@ async function runNetworkLoop(loop: NetworkLoop): Promise<void> {
       return;
     }
 
-    const progress = await getOrInitBackfillProgress(pool, name, startLedger, endLedger);
+    const progress = await getOrInitBackfillProgress(writePool, name, startLedger, endLedger);
     if (progress.completedAt) {
       log.info({ network: name, startLedger, endLedger, completedAt: progress.completedAt }, 'backfill range already completed');
       return;
@@ -800,7 +837,7 @@ async function runNetworkLoop(loop: NetworkLoop): Promise<void> {
         }
 
         const nextLedger = curr - 1;
-        await updateBackfillProgress(pool, name, startLedger, endLedger, nextLedger);
+        await updateBackfillProgress(writePool, name, startLedger, endLedger, nextLedger);
         curr = nextLedger;
       } catch (err) {
         indexingErrors.inc({ loop: 'backfill' });
@@ -816,7 +853,7 @@ async function runNetworkLoop(loop: NetworkLoop): Promise<void> {
 
   // Start the retry worker for this network
   loop.retryWorker = new RetryWorker({
-    pool,
+    pools,
     network: name,
     indexOne,
     pollIntervalMs: 30000, // Check retry queue every 30 seconds
@@ -837,14 +874,14 @@ async function runNetworkLoop(loop: NetworkLoop): Promise<void> {
     try {
       if (!initialised) {
         await initCursor();
-        const initialGaps = await countLedgerGaps(pool, name).catch(() => 0);
+        const initialGaps = await countLedgerGaps(readPool, name).catch(() => 0);
         recordLedgerGaps(name, initialGaps);
       }
       if (loop.registry && loop.loopTick % REGISTRY_POLL_EVERY_N_TICKS === 0) {
         await pollRegistry(loop);
       }
       if (loop.loopTick % GAP_REPAIR_EVERY_N_TICKS === 0) {
-        await repairLedgerGaps(pool, name, indexOne).catch(err => {
+        await repairLedgerGaps(pools, name, indexOne).catch(err => {
           log.error({ network: name, err: message(err) }, 'gap repair pass failed');
         });
       }
@@ -852,11 +889,14 @@ async function runNetworkLoop(loop: NetworkLoop): Promise<void> {
 
       const latest = await getLatestLedgerSequence(loop.network.horizonUrl);
       loop.state.latestHorizonLedger = latest;
+      horizonPaused.set({ network: name }, 0);
+      loop.state.horizonPaused = false;
       recordHorizonTip(name, latest, loop.state.latestIndexedLedger || loop.cursor);
 
       loop.cursor = await runLedgerCatchUp(loop.cursor, latest, indexOne, advanced =>
         recordHorizonTip(name, latest, advanced)
       );
+      deadLetterQueueSize.set({ network: name }, await countPendingDeadLetters(readPool, name));
 
       if (isShuttingDown) break;
       await pollContractEvents(loop);
@@ -864,6 +904,13 @@ async function runNetworkLoop(loop: NetworkLoop): Promise<void> {
       await pollTrades(loop);
     } catch (err) {
       indexingErrors.inc({ loop: 'main' });
+      if (err instanceof HorizonUnavailableError) {
+        horizonPaused.set({ network: name }, 1);
+        loop.state.horizonPaused = true;
+        log.warn({ network: name }, 'all Horizon endpoints unavailable; pausing indexing until recovery');
+        await sleep(POLL_INTERVAL_MS);
+        continue;
+      }
       log.error({ network: name, err: message(err) }, 'indexer loop error');
       if (err instanceof Error) {
         captureException(err, { loop: 'main', network: name, ledger: loop.cursor });
@@ -888,7 +935,9 @@ async function runNetworkLoop(loop: NetworkLoop): Promise<void> {
  */
 export async function runRetentionOnce(): Promise<RetentionReport[]> {
   try {
-    return await pruneExpiredData(pool, RETENTION_WINDOWS, { batchSize: RETENTION_PRUNE_BATCH_SIZE });
+    // Retention deletes on the write pool: it is a write, and its
+    // `lock_timeout` already bounds how long it can contend with indexing.
+    return await pruneExpiredData(writePool, RETENTION_WINDOWS, { batchSize: RETENTION_PRUNE_BATCH_SIZE });
   } catch (err) {
     indexingErrors.inc({ loop: 'retention' });
     log.error({ err: message(err) }, 'retention prune failed; will retry on the next interval');
@@ -917,8 +966,8 @@ async function runRetentionLoop(): Promise<void> {
 /**
  * Builds a one-off indexer for the primary network for the benchmark harness:
  * the same fetch-and-index path (with retries) as the main loop, without
- * starting the loop, health server or workers. The caller owns `pool` and
- * must end it.
+ * starting the loop, health server or workers. The caller owns `pools` and
+ * must end both.
  */
 export function createBenchmarkIndexer() {
   initializeHorizonClient({
@@ -930,7 +979,7 @@ export function createBenchmarkIndexer() {
   const { primary, networks } = resolveNetworks(process.env);
   const loop = createLoop(primary, resolveRegistryConfigs(networks));
   return {
-    pool,
+    pools,
     horizonUrl: primary.horizonUrl,
     databaseUrl: redactUrl(DATABASE_URL),
     // Backfill mode: the benchmark replays historical ledgers, not the tip.
@@ -960,6 +1009,22 @@ async function run() {
   const startedAt = Date.now();
   const loops = registry.networks.map(network => createLoop(network, registries));
 
+  // Schema validation at startup if enabled — reads only, so the read pool.
+  if (process.env['VALIDATE_SCHEMA_ON_STARTUP'] === 'true') {
+    log.info('validating database schema on startup');
+    try {
+      await validateDatabaseSchema(readPool);
+      log.info('schema validation passed');
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      log.error({ err: msg }, 'schema validation failed');
+      if (process.env['FAIL_ON_SCHEMA_MISMATCH'] === 'true') {
+        log.fatal('FAIL_ON_SCHEMA_MISMATCH is set, exiting');
+        process.exit(1);
+      }
+    }
+  }
+
   log.info(
     {
       version: VERSION,
@@ -967,7 +1032,8 @@ async function run() {
       primary: registry.primary.name,
       database: redactUrl(DATABASE_URL),
       healthPort: HEALTH_PORT,
-      dbPoolMax: DB_POOL_MAX ?? 10,
+      dbWritePoolMax: DB_WRITE_POOL_MAX ?? 10,
+      dbReadPoolMax: DB_READ_POOL_MAX ?? 10,
       dbPoolIdleTimeout: DB_POOL_IDLE_TIMEOUT ?? 10000,
       dbPoolConnectionTimeout: DB_POOL_CONNECTION_TIMEOUT ?? 0,
       retention: isRetentionEnabled(RETENTION_WINDOWS) ? RETENTION_WINDOWS : 'unlimited',
@@ -997,8 +1063,31 @@ async function run() {
         discoveredContracts: loop.discoveredContractIds,
       }))
     ),
-    pool,
+    pool: writePool,
+    pools,
   });
+
+  // A standby waits here, before any loop reads a cursor or calls Horizon.
+  if (LEADER_LOCK_ENABLED) {
+    leader = new LeaderLock({
+      databaseUrl: DATABASE_URL,
+      retryIntervalMs: LEADER_RETRY_MS,
+      stopRequested: () => isShuttingDown,
+      onLost: () => {
+        leaderLost = true;
+        void shutdown();
+      },
+    });
+    const acquired = await leader.acquire();
+    if (!acquired) {
+      log.info('shutdown requested while waiting for the leader lock');
+      return;
+    }
+  }
+
+  if (isRetentionEnabled(RETENTION_WINDOWS)) {
+    void runRetentionLoop();
+  }
 
   isLoopRunning = true;
   await runIndependently(loops, loop => runNetworkLoop(loop));
@@ -1019,10 +1108,13 @@ async function shutdown() {
     await new Promise(r => setTimeout(r, 100));
   }
 
-  if (pool) await pool.end();
+  await leader?.release();
+  await Promise.all([writePool.end(), readPool.end()]);
   await shutdownTracing();
   await shutdownErrorTracking();
-  process.exit(0);
+  // Exit non-zero after losing the lock, so a supervisor restarts this process
+  // into standby rather than treating the stop as a clean exit.
+  process.exit(leaderLost ? 1 : 0);
 }
 
 if (require.main === module) {
@@ -1047,7 +1139,7 @@ function scheduleAccountRefreshes(loop: NetworkLoop): void {
   const task = (async () => {
     try {
       const result = await refreshAccountQueueBatch(
-        pool,
+        pools,
         loop.network.name,
         loop.network.horizonUrl
       );

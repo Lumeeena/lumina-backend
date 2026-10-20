@@ -62,7 +62,11 @@ Reviewed from `db/schema.sql`, migrations 001-006 and the query code in
   `contract_events` (only `operations.created_at` is filtered on, by the asset
   volume query). These are unused only on the evidence of static reading, so
   they are not removed until the report below confirms `idx_scan = 0` over a
-  representative window.
+  representative window. The `operations` ones have since been measured:
+  migration 019 replaced `idx_operations_details` with a partial index for the
+  one containment query and kept `idx_operations_created_at`, which the
+  retention prune reads — see
+  [OPERATIONS_INDEX_REVIEW.md](OPERATIONS_INDEX_REVIEW.md).
 
 No production database credentials are available in this checkout, so no
 index has been removed based on unobserved production usage. Run the report

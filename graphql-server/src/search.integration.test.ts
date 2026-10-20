@@ -205,17 +205,15 @@ test('the native filter finds XLM operations', { skip, timeout: TEST_TIMEOUT_MS 
 test('the search indexes are actually present', { skip, timeout: TEST_TIMEOUT_MS }, async () => {
   // A missing index turns every search into a sequential scan, which is a
   // performance bug rather than a correctness one and so passes every other
-  // test in this file.
+  // test in this file. The asset filter's own expression indexes
+  // (idx_operations_asset_*) are not among them: migration 019 dropped them,
+  // because its three-role OR can use none of them, and it walks the listing's
+  // network/ledger index instead (docs/OPERATIONS_INDEX_REVIEW.md).
   const { rows } = await pool.query<{ indexname: string }>(
     `SELECT indexname FROM pg_indexes
       WHERE tablename IN ('transactions', 'operations')
-        AND indexname IN (
-          'idx_transactions_memo_trgm',
-          'idx_operations_asset_code',
-          'idx_operations_asset_issuer',
-          'idx_operations_asset_type'
-        )`
+        AND indexname IN ('idx_transactions_memo_trgm', 'idx_operations_network_ledger')`
   );
 
-  assert.equal(rows.length, 4, `expected all four search indexes, found ${rows.map(r => r.indexname).join(', ')}`);
+  assert.equal(rows.length, 2, `expected both search indexes, found ${rows.map(r => r.indexname).join(', ')}`);
 });

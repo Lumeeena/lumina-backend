@@ -25,6 +25,7 @@ default for every one of them is `0`, which means keep everything.
 | `RETENTION_OPERATIONS_DAYS`    | `operations`       | `0` (unlimited)  |
 | `RETENTION_CONTRACT_EVENTS_DAYS` | `contract_events` | `0` (unlimited)  |
 | `RETENTION_CUSTOM_EVENTS_DAYS` | `custom_events`    | `0` (unlimited)  |
+| `RETENTION_ACCOUNT_STATE_HISTORY_DAYS` | `account_state_history` | `0` (unlimited) |
 
 Two settings control the job itself:
 
@@ -97,17 +98,20 @@ pruning code:
 
 | Table                        | Prunable | Why not                                                    |
 | ---------------------------- | -------- | ---------------------------------------------------------- |
-| `ledgers`                    | yes      |                                                              |
+| `ledgers`                    | yes      | One row per closed ledger, about 17,280/day per network. Growth and the `closed_at` index are measured in [LEDGERS_INDEX_REVIEW.md](LEDGERS_INDEX_REVIEW.md#growth). |
 | `transactions`               | yes      |                                                              |
-| `operations`                 | yes      | The fastest-growing table in the schema                     |
+| `operations`                 | yes      | The fastest-growing table in the schema: 6–7 million rows and ~14 GB a day per mainnet network, more than the prune's defaults remove (200,000 rows an hour). See [OPERATIONS_INDEX_REVIEW.md](OPERATIONS_INDEX_REVIEW.md#growth). |
 | `contract_events`            | yes      |                                                              |
 | `custom_events`              | yes      |                                                              |
+| `account_state_history`      | yes      | Pruned on `recorded_at` (when the copy was stored), not chain time. The window bounds how far back `account(asOfLedger:)` can answer, once pruning runs. See the caveat on pruning status in [ACCOUNT_STATE_HISTORY.md](ACCOUNT_STATE_HISTORY.md#window-how-far-back-it-reaches). |
 | `contract_storage_entries`   | **no**   | Archived entries are kept as rows with `state = 'archived'` precisely so a client can tell "archived" from "absent" (no row at all). Pruning them collapses that distinction into "gone", which is the one thing the schema was designed to avoid. |
 | `accounts`                   | **no**   | Current state, not a log. Pruning an account row loses the cached balance, flags and thresholds with nothing to rebuild them from. |
+| `trustlines`                 | **no**   | Current state: one row per live (account, asset) pair. A time window would delete trustlines whose last payment happened to be old. See [TRUSTLINES_INDEX_REVIEW.md](TRUSTLINES_INDEX_REVIEW.md#growth). |
+| `assets`                     | **no**   | Current state: one row per asset, with `first_seen_ledger` and an incrementally maintained `holder_count` that cannot be rebuilt from pruned history. Bounded by the number of assets, not by traffic. See [ASSETS_INDEX_REVIEW.md](ASSETS_INDEX_REVIEW.md#growth). |
 | `contract_schemas`           | **no**   | Configuration, not history.                                  |
 | `api_keys`, `exports`        | **no**   | Configuration and operator state.                           |
 | `account_refresh_queue`      | **no**   | A work queue that drains itself. A retention window would only delete pending work. |
-| `retry_queue`                | **no**   | Same.                                                         |
+| `ledger_retry_queue`         | **no**   | Same. It drains because `indexLedger` deletes a ledger's row when the ledger lands, whichever loop indexed it; rows that remain are ledgers still missing. See [LEDGER_RETRY_QUEUE_REVIEW.md](LEDGER_RETRY_QUEUE_REVIEW.md). |
 
 If a table is not in the list, no configuration will make it disappear.
 

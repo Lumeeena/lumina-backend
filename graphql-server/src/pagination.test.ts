@@ -10,6 +10,10 @@ import {
   InvalidCursorError,
   cursorCondition,
   pageInfo,
+  getAggregateLimit,
+  assertRangeWithinLimit,
+  countBuckets,
+  MAX_AGGREGATE_ROWS,
 } from './pagination';
 
 test('page size defaults preserve root and nested-list defaults', () => {
@@ -133,4 +137,41 @@ test('pageInfo calculates bidirectional cursors and page flags', () => {
   assert.equal(emptyPage.startCursor, null);
   assert.equal(emptyPage.endCursor, null);
   assert.equal(emptyPage.cursor, null);
+});
+
+test('aggregate limit defaults to the row ceiling and rejects larger requests', () => {
+  assert.equal(getAggregateLimit(undefined, MAX_AGGREGATE_ROWS), MAX_AGGREGATE_ROWS);
+  assert.equal(getAggregateLimit(500, MAX_AGGREGATE_ROWS), 500);
+
+  assert.throws(() => getAggregateLimit(MAX_AGGREGATE_ROWS + 1, MAX_AGGREGATE_ROWS), (err: unknown) => {
+    assert.ok(err instanceof GraphQLError);
+    assert.equal(err.extensions?.['code'], 'BAD_USER_INPUT');
+    return true;
+  });
+  assert.throws(() => getAggregateLimit(0, MAX_AGGREGATE_ROWS), GraphQLError);
+  assert.throws(() => getAggregateLimit(1.5, MAX_AGGREGATE_ROWS), GraphQLError);
+});
+
+test('a time range wider than the row ceiling is an error, not silent truncation', () => {
+  // 2000 hours > MAX_AGGREGATE_ROWS buckets at hourly granularity.
+  assert.throws(
+    () => assertRangeWithinLimit('2020-01-01T00:00:00Z', '2020-03-31T00:00:00Z', 'hour', MAX_AGGREGATE_ROWS),
+    (err: unknown) => {
+      assert.ok(err instanceof GraphQLError);
+      assert.equal(err.extensions?.['code'], 'BAD_USER_INPUT');
+      return true;
+    }
+  );
+  // 3 days of hourly buckets fits.
+  assert.doesNotThrow(() =>
+    assertRangeWithinLimit('2020-01-01T00:00:00Z', '2020-01-04T00:00:00Z', 'hour', MAX_AGGREGATE_ROWS)
+  );
+});
+
+test('countBuckets rounds up and tolerates malformed ranges', () => {
+  assert.equal(countBuckets('2020-01-01T00:00:00Z', '2020-01-01T01:00:00Z', 'hour'), 1);
+  assert.equal(countBuckets('2020-01-01T00:00:00Z', '2020-01-02T00:00:00Z', 'day'), 1);
+  assert.equal(countBuckets('2020-01-01T00:00:00Z', '2020-01-01T01:30:00Z', 'hour'), 2);
+  assert.equal(countBuckets('2020-01-01T00:00:00Z', '2020-01-01T00:00:00Z', 'hour'), null);
+  assert.equal(countBuckets('nonsense', '2020-01-01T00:00:00Z', 'hour'), null);
 });

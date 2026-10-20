@@ -20,22 +20,28 @@ import type { ContractSchema, EventDefinition, FieldDefinition } from './customS
 import { findEventDefinition } from './customSchema';
 import type { ContractEvent } from './soroban';
 
+/** One schema-matched contract event, with all declared fields in canonical text form. */
 export interface DecodedCustomEvent {
+  /** Event paging token used as its stable database identifier. */
   eventId: string;
   contractId: string;
   eventName: string;
   ledger: number;
   createdAt: string;
   schemaVersion: number;
+  /** Decoded field values; optional absent values are represented as `null`. */
   fields: Record<string, string | null>;
 }
 
+/** A schema-matched event that could not be decoded against its definition. */
 export interface DecodeFailure {
   eventId: string;
   eventName: string;
+  /** Human-readable cause, including the failing field and expected shape. */
   reason: string;
 }
 
+/** Successfully decoded events and per-event failures from one input batch. */
 export interface DecodeResult {
   decoded: DecodedCustomEvent[];
   /** Events that matched a definition but could not be decoded against it. */
@@ -43,7 +49,7 @@ export interface DecodeResult {
 }
 
 /**
- * Decode every event that matches a schema.
+ * Decode every event that matches a schema into named, string-valued fields.
  *
  * Events with no matching definition are skipped silently — a contract emits
  * plenty a schema does not care about, and that is not an error. Events that

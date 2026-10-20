@@ -1,0 +1,18 @@
+# In-cluster entry point for the API. Exposing it outside the cluster — an
+# Ingress or Gateway with TLS — is cluster-specific and left to an overlay; see
+# docs/KUBERNETES.md. Whatever fronts it must support WebSocket upgrades on
+# /graphql for subscriptions.
+apiVersion: v1
+kind: Service
+metadata:
+  name: lumina-graphql
+  labels:
+    app.kubernetes.io/name: lumina-graphql
+    app.kubernetes.io/component: api
+spec:
+  selector:
+    app.kubernetes.io/name: lumina-graphql
+  ports:
+    - name: http
+      port: 4000
+      targetPort: http

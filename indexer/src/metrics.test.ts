@@ -150,6 +150,10 @@ test('every metric the dashboard queries is registered under its expected name',
     'lumina_latest_horizon_ledger',
     'lumina_indexing_lag_ledgers',
     'lumina_last_successful_index_timestamp_seconds',
+    'lumina_indexer_db_pool_connections_total',
+    'lumina_indexer_db_pool_connections_idle',
+    'lumina_indexer_db_pool_waiting',
+    'lumina_indexer_db_pool_errors_total',
   ];
 
   const registered = new Set((await registry.getMetricsAsJSON()).map(m => m.name));
@@ -244,13 +248,21 @@ test('recordBackfillLedger advances backfill counters and gauge', async () => {
 });
 
 test('recordBackfillLedger keeps each network independent', async () => {
+  // Counters are cumulative for the whole process, so the independence
+  // assertion is a per-network delta, not an absolute value: another test
+  // may already have counted a backfilled ledger on either network.
+  const before = {
+    mainnet: await value('lumina_backfilled_ledgers_total', { network: 'mainnet' }),
+    futurenet: await value('lumina_backfilled_ledgers_total', { network: 'futurenet' }),
+  };
+
   recordBackfillLedger('mainnet', 50_000, 1, 1);
-  recordBackfillLedger('testnet', 500, 1, 1);
+  recordBackfillLedger('futurenet', 500, 1, 1);
 
   assert.equal(await value('lumina_backfill_current_ledger', { network: 'mainnet' }), 50_000);
-  assert.equal(await value('lumina_backfill_current_ledger', { network: 'testnet' }), 500);
-  assert.equal(await value('lumina_backfilled_ledgers_total', { network: 'mainnet' }), 1);
-  assert.equal(await value('lumina_backfilled_ledgers_total', { network: 'testnet' }), 1);
+  assert.equal(await value('lumina_backfill_current_ledger', { network: 'futurenet' }), 500);
+  assert.equal(await value('lumina_backfilled_ledgers_total', { network: 'mainnet' }), before.mainnet + 1);
+  assert.equal(await value('lumina_backfilled_ledgers_total', { network: 'futurenet' }), before.futurenet + 1);
 });
 
 test('metricsContentType returns a valid Prometheus content type', () => {

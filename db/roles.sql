@@ -188,6 +188,18 @@ BEGIN
       ('contract_schemas', 'INSERT'),
       ('contract_schemas', 'UPDATE'),
       ('contract_schemas', 'DELETE'),
+      -- Exhausted ledgers: recordFailedLedger upserts, enqueueLedgerRetry
+      -- upserts, the retry worker polls and deletes, and indexLedger deletes
+      -- from both when the ledger lands (clearLedgerFailures). Without DELETE
+      -- here every ledger write fails, since that delete is in its transaction.
+      ('failed_ledgers',     'SELECT'),
+      ('failed_ledgers',     'INSERT'),
+      ('failed_ledgers',     'UPDATE'),
+      ('failed_ledgers',     'DELETE'),
+      ('ledger_retry_queue', 'SELECT'),
+      ('ledger_retry_queue', 'INSERT'),
+      ('ledger_retry_queue', 'UPDATE'),
+      ('ledger_retry_queue', 'DELETE'),
       -- Backfill progress tracking
       ('backfill_progress', 'SELECT'),
       ('backfill_progress', 'INSERT'),
@@ -215,7 +227,11 @@ BEGIN
       ('account_signer_changes', 'SELECT'),
       ('account_signer_changes', 'INSERT'),
       ('account_threshold_changes', 'SELECT'),
-      ('account_threshold_changes', 'INSERT')
+      ('account_threshold_changes', 'INSERT'),
+      -- Account history, written beside each accounts upsert (Issue #238).
+      -- ON CONFLICT (address, network, last_modified_ledger) DO NOTHING
+      ('account_state_history', 'SELECT'),
+      ('account_state_history', 'INSERT')
     ) AS grants(tbl, priv)
   LOOP
     -- Tolerate schema versions where a table does not exist yet.

@@ -23,14 +23,8 @@
  * row across the seam.
  */
 import type { Pool } from 'pg';
-import {
-  mapOperation,
-  mapTransaction,
-  OPERATION_MAPPER_COLUMNS,
-  TRANSACTION_MAPPER_COLUMNS,
-  type OperationRow,
-  type TransactionRow,
-} from './db';
+import { mapOperation, mapTransaction, type OperationRow, type TransactionRow } from './db';
+import { InvalidInputError } from './errorCodes';
 import {
   cursorCondition,
   decodeCursor as decodeKeysetCursor,
@@ -51,7 +45,8 @@ export const MIN_SIMILARITY = 0.15;
 /** Longest query we will run. Beyond this it is not a memo search. */
 export const MAX_QUERY_LENGTH = 256;
 
-export class SearchError extends Error {
+/** A search request the server cannot serve: empty or oversized query text, malformed asset filter. */
+export class SearchError extends InvalidInputError {
   constructor(message: string) {
     super(message);
     this.name = 'SearchError';
@@ -153,7 +148,7 @@ export async function searchTransactions(pool: Pool, options: SearchOptions) {
   params.push(options.limit);
 
   const { rows } = await pool.query<RankedTransactionRow>(
-    `SELECT ${TRANSACTION_MAPPER_COLUMNS}, ${rankExpression} AS rank
+    `SELECT *, ${rankExpression} AS rank
        FROM transactions
       WHERE ${conditions.join(' AND ')}
       ORDER BY rank ${queryOrder}, ledger ${queryOrder}, hash ${queryOrder}
@@ -271,19 +266,15 @@ export async function getOperationsByAsset(pool: Pool, options: AssetOperationsO
     params.push(options.type.toLowerCase());
     conditions.push(`type = $${params.length}`);
   }
-  const cursorClause = cursorCondition(
-    params,
-    KEYSETS.assetOperations,
-    options.cursor,
-    direction,
-    baseOrder
-  );
-  if (cursorClause) conditions.push(cursorClause);
+  if (options.cursor) {
+    const condition = cursorCondition(params, KEYSETS.assetOperations, options.cursor, direction, baseOrder);
+    if (condition) conditions.push(condition);
+  }
 
   params.push(options.limit);
 
   const { rows } = await pool.query<OperationRow>(
-    `SELECT ${OPERATION_MAPPER_COLUMNS} FROM operations
+    `SELECT * FROM operations
       WHERE ${conditions.join(' AND ')}
       ORDER BY ledger ${queryOrder}, id ${queryOrder}
       LIMIT $${params.length}`,

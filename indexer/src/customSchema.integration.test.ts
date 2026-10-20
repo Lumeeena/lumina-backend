@@ -66,6 +66,7 @@ function event(id: string, amount: bigint): ContractEvent {
     pagingToken: `900-${id}`,
     topics: [JSON.stringify('transfer'), JSON.stringify(FROM), JSON.stringify(TO)],
     value: { amount },
+    transactionHash: null,
   };
 }
 

@@ -2,6 +2,14 @@
 
 This runbook documents the official operational procedures for creating consistent backups, executing full database restores, understanding post-restore indexer behavior, and verifying ledger integrity for Lumina Backend.
 
+> **Where this fits now.** The *manual* procedure below is still correct for
+> restoring into a live database, and its per-table size estimates
+> (§3.1) remain the planning figures. For the *automated* mechanism — the daily
+> dump, the scheduled restore test, retention and metrics — see
+> [`BACKUPS.md`](BACKUPS.md). For the operational runbook an incident commander
+> follows, with measured timings from an executed restore, see
+> [`DISASTER_RECOVERY.md`](DISASTER_RECOVERY.md).
+
 ---
 
 ## 1. Motivation & Overview

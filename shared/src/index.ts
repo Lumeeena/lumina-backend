@@ -7,3 +7,5 @@
  */
 export * from './throttle';
 export * from './horizon';
+export * from './secrets';
+export { HorizonResponseError, RAW_RESPONSE_LIMIT } from './validate';

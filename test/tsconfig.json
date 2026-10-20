@@ -1,0 +1,21 @@
+{
+  // Tests that span services: the contract between the indexer and the
+  // GraphQL server, and the chaos and soak runs against the whole stack. Like
+  // db/explain, they belong to neither workspace — they import from both, or
+  // run both — and placing them inside either `src/` would pull the other
+  // workspace's files into that project's rootDir and break its build.
+  //
+  // `noEmit` because ts-node only ever compiles these in memory.
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2022"],
+    "module": "commonjs",
+    "moduleResolution": "node",
+    "esModuleInterop": true,
+    "resolveJsonModule": true,
+    "skipLibCheck": true,
+    "strict": true,
+    "noEmit": true,
+    "types": ["node"]
+  }
+}

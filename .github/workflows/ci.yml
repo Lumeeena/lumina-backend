@@ -144,3 +144,85 @@ jobs:
         working-directory: indexer
         env:
           TEST_DATABASE_URL: postgresql://lumina:lumina_test@localhost:5432/lumina_test
+
+  contract:
+    name: Contract (indexer ↔ GraphQL)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    services:
+      postgres:
+        image: postgres:16-alpine@sha256:721873c34ceb9f8d8fc265984940dc982404c105f19ad51be9fdc5970a6080ea
+        env:
+          POSTGRES_DB: lumina_test
+          POSTGRES_USER: lumina
+          POSTGRES_PASSWORD: lumina_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U lumina -d lumina_test"
+          --health-interval 2s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      # Both workspaces: the test writes through the indexer and reads through
+      # the GraphQL server, so it needs the dependencies of each.
+      - run: npm ci
+      - run: npm run build:shared
+      # Real mainnet operations, one per shape, written by indexLedger and read
+      # back by every server reader of operations.details. Fails when either
+      # side changes the shape the other depends on. See
+      # docs/OPERATIONS_DETAILS_CONTRACT.md.
+      - run: npm run test:contract
+        env:
+          TEST_DATABASE_URL: postgresql://lumina:lumina_test@localhost:5432/lumina_test
+
+  chaos:
+    name: Chaos (dependency failures)
+    runs-on: ubuntu-latest
+    # Eleven scenarios against a running stack, each with its own recovery
+    # deadline; the job limit is the backstop for a scenario that hangs.
+    timeout-minutes: 30
+    services:
+      postgres:
+        image: postgres:16-alpine@sha256:721873c34ceb9f8d8fc265984940dc982404c105f19ad51be9fdc5970a6080ea
+        env:
+          POSTGRES_DB: lumina_test
+          POSTGRES_USER: lumina
+          POSTGRES_PASSWORD: lumina_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U lumina -d lumina_test"
+          --health-interval 2s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm ci
+      # The stack runs the built services, as their images do.
+      - run: npm run build
+      # The soak test's leak detector, on known series and on a process that
+      # really leaks. The soak itself is too long for a pull request; it runs
+      # on a schedule (soak.yml).
+      - run: npm run test:soak:detector
+        env:
+          TEST_DATABASE_URL: postgresql://lumina:lumina_test@localhost:5432/lumina_test
+      # Fails Postgres, Horizon and Soroban RPC in turn and together, and
+      # requires the services to recover with nothing but their restart policy.
+      # See docs/CHAOS_TESTING.md.
+      - run: npm run test:chaos
+        env:
+          TEST_DATABASE_URL: postgresql://lumina:lumina_test@localhost:5432/lumina_test
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: chaos-report
+          path: test/.artifacts/chaos/
+          if-no-files-found: ignore

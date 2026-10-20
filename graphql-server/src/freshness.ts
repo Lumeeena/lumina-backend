@@ -54,7 +54,7 @@ export interface IndexerStatusReport {
 
 export interface FreshnessOptions {
   /** Injected so the test does not need Horizon. */
-  readHorizonLedger?: (baseUrl: string) => Promise<{ sequence: number } | null>;
+  readHorizonLedger?: (baseUrl: NetworkConfig['horizonUrl']) => Promise<{ sequence: number } | null>;
   staleAfterLedgers?: number;
   /** Epoch milliseconds, injected so the test can pin `checkedAt`. */
   now?: () => number;

@@ -2,7 +2,9 @@ import type { Pool } from 'pg';
 import {
   ACCOUNT_ORDER_NAMES,
   ACCOUNT_ORDERS,
+  getAccountAsOfLedgerFromDb,
   getAccountFromDb,
+  getAccountLifecycle,
   getAccountOperations,
   getAccountTransactions,
   getAccounts,
@@ -16,10 +18,27 @@ import {
   getTransactions,
   getTradesFromDb,
   getTableCountEstimateOrExact,
+  getContractStorageEntries,
+  getAccountSigners,
+  getSponsoredAccounts,
+  getContractDeployment,
+  getContracts,
+  getNetworkStats,
+  getActivityRollups,
+  getSharedWasmContracts,
   mapAccount,
   type AccountOrder,
 } from './db';
-import { DEFAULT_PAGE_LIMIT, KEYSETS, pageInfo, getPageSize } from './pagination';
+import {
+  DEFAULT_PAGE_LIMIT,
+  KEYSETS,
+  MAX_AGGREGATE_ROWS,
+  getAggregateLimit,
+  assertRangeWithinLimit,
+  pageInfo,
+  getPageSize,
+  type PaginationDirection,
+} from './pagination';
 import { createLoaders, type RequestLoaders } from './loaders';
 import { getAccount as getAccountFromHorizon, getLatestLedger as getLatestLedgerFromHorizon } from './horizon';
 import { createSubscriptionResolvers } from './subscriptions';
@@ -31,6 +50,7 @@ import { getNetworks, resolveNetworkArgument, type NetworkConfig, type NetworkRe
 import type { LedgerNotifier } from './pubsub';
 import { ANONYMOUS_CALLER, type ApiCaller } from './auth';
 import { computeBalanceHistory } from './balanceHistory';
+import { parseAsOfLedger } from './accountHistory';
 import { memoizeRequestQuery } from './requestMemo';
 
 export interface BaseContext {
@@ -191,6 +211,8 @@ export const resolvers = {
             items,
             limit,
             tx => [tx.ledger, tx.hash],
+            args.direction ?? 'FORWARD',
+            Boolean(args.cursor),
             totalCount
           ),
         };
@@ -204,9 +226,19 @@ export const resolvers = {
       });
     },
 
-    async account(_: unknown, args: { network?: string | null; address: string }, ctx: Context) {
+    async account(
+      _: unknown,
+      args: { network?: string | null; address: string; asOfLedger?: number | null },
+      ctx: Context
+    ) {
       return memoizeRequestQuery(ctx.queryMemo, 'account', args, async () => {
         const network = networkArgument(args, ctx);
+        if (args.asOfLedger != null) {
+          // Stored history only. Horizon holds the current state, so falling
+          // back to it here would answer a past question with today's balances.
+          const ledger = parseAsOfLedger(args.asOfLedger);
+          return getAccountAsOfLedgerFromDb(ctx.pool, network.name, args.address, ledger);
+        }
         return resolveAccount(args.address, ctx, network);
       });
     },
@@ -235,7 +267,31 @@ export const resolvers = {
         }
         return {
           items,
-          pageInfo: pageInfo(ACCOUNT_ORDERS[orderBy].keyset, items, limit, account => ACCOUNT_ORDERS[orderBy].keyOf(account), totalCount),
+          pageInfo: pageInfo(
+            ACCOUNT_ORDERS[orderBy].keyset,
+            items,
+            limit,
+            account => ACCOUNT_ORDERS[orderBy].keyOf(account),
+            'FORWARD',
+            Boolean(args.cursor),
+            totalCount
+          ),
+        };
+      });
+    },
+
+    async accountLifecycle(
+      _: unknown,
+      args: { network?: string | null; address: string; limit?: number | null; cursor?: string | null },
+      ctx: Context
+    ) {
+      return memoizeRequestQuery(ctx.queryMemo, 'accountLifecycle', args, async () => {
+        const limit = getPageSize(args.limit);
+        const network = networkArgument(args, ctx);
+        const items = await getAccountLifecycle(ctx.pool, network.name, args.address, limit, args.cursor);
+        return {
+          items,
+          pageInfo: pageInfo(KEYSETS.accountLifecycle, items, limit, operation => [operation.ledger, operation.id], 'FORWARD', Boolean(args.cursor)),
         };
       });
     },
@@ -294,6 +350,8 @@ export const resolvers = {
             items,
             limit,
             operation => [operation.ledger, operation.id],
+            args.direction ?? 'FORWARD',
+            Boolean(args.cursor),
             totalCount
           ),
         };
@@ -308,15 +366,25 @@ export const resolvers = {
       return memoizeRequestQuery(ctx.queryMemo, 'search', args, async () => {
         const limit = getPageSize(args.limit);
         const network = networkArgument(args, ctx);
-        const { items, nextCursor } = await searchTransactions(ctx.pool, {
+        const { items, startCursor, endCursor, nextCursor } = await searchTransactions(ctx.pool, {
           network: network.name,
           query: args.query,
           limit,
           cursor: args.cursor ?? null,
         });
-        // Search already computed the cursor for the next page from the ranking
-        // tuple, so its own value is used rather than one rebuilt from the rows.
-        return { items, pageInfo: { hasNextPage: items.length === limit, cursor: nextCursor } };
+        // Search already computed the cursors from the ranking tuple, so its
+        // own values are used rather than ones rebuilt from the rows.
+        return {
+          items,
+          pageInfo: {
+            hasNextPage: items.length === limit,
+            hasPreviousPage: Boolean(args.cursor),
+            startCursor,
+            endCursor,
+            cursor: nextCursor,
+            totalCount: null,
+          },
+        };
       });
     },
 
@@ -344,7 +412,17 @@ export const resolvers = {
           cursor: args.cursor ?? null,
           order: args.order ?? 'DESC',
         });
-        return { items, pageInfo: pageInfo(KEYSETS.events, items, limit, event => [event.ledger, event.id]) };
+        return {
+          items,
+          pageInfo: pageInfo(
+            KEYSETS.events,
+            items,
+            limit,
+            event => [event.ledger, event.id],
+            args.direction ?? 'FORWARD',
+            Boolean(args.cursor)
+          ),
+        };
       });
     },
 
@@ -376,6 +454,9 @@ export const resolvers = {
           items,
           pageInfo: {
             hasNextPage: items.length === limit,
+            hasPreviousPage: Boolean(args.cursor),
+            startCursor: items.at(0)?.key ?? null,
+            endCursor: items.at(-1)?.key ?? null,
             cursor: items.at(-1)?.key ?? null,
           },
         };
@@ -428,7 +509,18 @@ export const resolvers = {
         if (args.includeTotalCount) {
           totalCount = await getTableCountEstimateOrExact(ctx.pool, 'ledgers', network.name);
         }
-        return { items, pageInfo: pageInfo(KEYSETS.ledgers, items, limit, ledger => ledger.sequence, totalCount) };
+        return {
+          items,
+          pageInfo: pageInfo(
+            KEYSETS.ledgers,
+            items,
+            limit,
+            ledger => ledger.sequence,
+            'FORWARD',
+            Boolean(args.cursor),
+            totalCount
+          ),
+        };
       });
     },
 
@@ -460,7 +552,17 @@ export const resolvers = {
         });
         // The sort key is (ledger, eventId): the id alone is not unique within a
         // ledger, so keysetting on it would skip and repeat rows.
-        return { items, pageInfo: pageInfo(KEYSETS.customEvents, items, limit, event => [event.ledger, event.eventId]) };
+        return {
+          items,
+          pageInfo: pageInfo(
+            KEYSETS.customEvents,
+            items,
+            limit,
+            event => [event.ledger, event.eventId],
+            args.direction ?? 'FORWARD',
+            Boolean(args.cursor)
+          ),
+        };
       });
     },
 
@@ -517,6 +619,8 @@ export const resolvers = {
             items,
             limit,
             trade => [trade.ledgerCloseTime, trade.id],
+            'FORWARD',
+            Boolean(args.cursor),
             totalCount
           ),
         };
@@ -616,6 +720,121 @@ export const resolvers = {
         return getIndexerStatus(ctx.pool, network);
       });
     },
+
+    // ─── #226: Signers & Sponsorship ─────────────────────────────────────
+    async accountSigners(
+      _: unknown,
+      args: { network?: string | null; address: string },
+      ctx: Context
+    ) {
+      const network = networkArgument(args, ctx);
+      return getAccountSigners(ctx.pool, network.name, args.address);
+    },
+    async sponsoredAccounts(
+      _: unknown,
+      args: { network?: string | null; sponsorAddress: string; limit?: number | null },
+      ctx: Context
+    ) {
+      const network = networkArgument(args, ctx);
+      const limit = getAggregateLimit(args.limit, MAX_AGGREGATE_ROWS);
+      return getSponsoredAccounts(ctx.pool, network.name, args.sponsorAddress, limit);
+    },
+
+    // ─── #227: Contracts & Deployments ───────────────────────────────────
+    async contract(
+      _: unknown,
+      args: { network?: string | null; contractId: string },
+      ctx: Context
+    ) {
+      const network = networkArgument(args, ctx);
+      const row = await getContractDeployment(ctx.pool, network.name, args.contractId);
+      if (!row) return null;
+      return {
+        contractId: row.contract_id,
+        deployer: row.deployer,
+        wasmHash: row.wasm_hash,
+        deployedLedger: row.deployed_ledger,
+        deployedAt: row.deployed_at,
+      };
+    },
+    async contracts(
+      _: unknown,
+      args: { network?: string | null; limit?: number; cursor?: string },
+      ctx: Context
+    ) {
+      const network = networkArgument(args, ctx);
+      const limit = getPageSize(args.limit, 20);
+      const rows = await getContracts(ctx.pool, network.name, limit, args.cursor ?? undefined);
+      return rows.map((row) => ({
+        contractId: row.contract_id,
+        deployer: row.deployer,
+        wasmHash: row.wasm_hash,
+        deployedLedger: row.deployed_ledger,
+        deployedAt: row.deployed_at,
+      }));
+    },
+
+    // ─── #228: Network Statistics ────────────────────────────────────────
+    async networkStats(
+      _: unknown,
+      args: { network?: string | null; startTime: string; endTime: string; granularity?: string; limit?: number | null },
+      ctx: Context
+    ) {
+      const network = networkArgument(args, ctx);
+      const granularity = args.granularity === 'day' ? 'day' : 'hour';
+      const limit = getAggregateLimit(args.limit, MAX_AGGREGATE_ROWS);
+      assertRangeWithinLimit(args.startTime, args.endTime, granularity, limit);
+      const rows = await getNetworkStats(
+        ctx.pool,
+        network.name,
+        args.startTime,
+        args.endTime,
+        granularity,
+        limit
+      );
+      return rows.map((row) => ({
+        bucketStart: row.bucket_start,
+        transactionCount: row.transaction_count,
+        operationCount: row.operation_count,
+        activeAccounts: row.active_accounts,
+        totalVolume: row.total_volume,
+      }));
+    },
+
+    // ─── #229: Activity Rollups ──────────────────────────────────────────
+    async activityRollups(
+      _: unknown,
+      args: {
+        network?: string | null;
+        granularity?: string;
+        startTime: string;
+        endTime: string;
+        limit?: number | null;
+      },
+      ctx: Context
+    ) {
+      const network = networkArgument(args, ctx);
+      const granularity = args.granularity === 'day' ? 'day' : 'hour';
+      const limit = getAggregateLimit(args.limit, MAX_AGGREGATE_ROWS);
+      assertRangeWithinLimit(args.startTime, args.endTime, granularity, limit);
+      const rows = await getActivityRollups(
+        ctx.pool,
+        network.name,
+        granularity,
+        args.startTime,
+        args.endTime,
+        limit
+      );
+      return rows.map((row) => ({
+        bucketStart: row.bucket_start,
+        granularity: row.granularity,
+        network: row.network,
+        transactionCount: row.transaction_count,
+        operationCount: row.operation_count,
+        activeAccounts: row.active_accounts,
+        totalVolume: row.total_volume,
+      }));
+    },
   },
 
   Account: {
@@ -624,10 +843,39 @@ export const resolvers = {
       const network = networkForParent(ctx, parent.network);
       return getAccountTransactions(ctx.pool, network.name, parent.address, limit);
     },
+    async signers(parent: { address: string; network?: string }, _: unknown, ctx: Context) {
+      const network = networkForParent(ctx, parent.network);
+      return getAccountSigners(ctx.pool, network.name, parent.address);
+    },
     async operations(parent: { address: string; network?: string }, args: { limit?: number }, ctx: Context) {
       const limit = getPageSize(args.limit, 10);
       const network = networkForParent(ctx, parent.network);
       return getAccountOperations(ctx.pool, network.name, parent.address, limit);
+    },
+  },
+
+  ContractDeployment: {
+    async sharedWasmContracts(
+      parent: { contractId: string; wasmHash: string; network?: string },
+      args: { limit?: number },
+      ctx: Context
+    ) {
+      const network = networkForParent(ctx, parent.network);
+      const limit = getPageSize(args.limit, 10);
+      const rows = await getSharedWasmContracts(
+        ctx.pool,
+        network.name,
+        parent.wasmHash,
+        parent.contractId,
+        limit
+      );
+      return rows.map((row) => ({
+        contractId: row.contract_id,
+        deployer: row.deployer,
+        wasmHash: row.wasm_hash,
+        deployedLedger: row.deployed_ledger,
+        deployedAt: row.deployed_at,
+      }));
     },
   },
 
@@ -646,6 +894,15 @@ export const resolvers = {
       return ctx.loaders
         ? ctx.loaders(network).operationsByTransactionHash.load(parent.hash)
         : getOperationsByTransactionHash(ctx.pool, network.name, parent.hash);
+    },
+  },
+  ContractEvent: {
+    async transaction(parent: { transactionHash?: string | null; network?: string }, _: unknown, ctx: Context) {
+      if (!parent.transactionHash) return null;
+      const network = networkForParent(ctx, parent.network);
+      return ctx.loaders
+        ? ctx.loaders(network).transaction.load(parent.transactionHash)
+        : getTransactionByHash(ctx.pool, network.name, parent.transactionHash);
     },
   },
 

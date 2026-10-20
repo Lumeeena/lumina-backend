@@ -956,6 +956,61 @@
         "colorMode": "background",
         "graphMode": "area"
       }
+    },
+    {
+      "id": 42,
+      "type": "timeseries",
+      "title": "Indexer database pools",
+      "description": "Write and read pools are sized independently, so a long read (gap scan, integrity check) can only exhaust the read pool while the write path keeps its own connections. Waiting above zero means queries are queuing for a connection; on the write pool that stalls indexing.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 58
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 8
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "expr": "lumina_indexer_db_pool_connections_total",
+          "legendFormat": "{{pool}} total",
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          }
+        },
+        {
+          "expr": "lumina_indexer_db_pool_connections_idle",
+          "legendFormat": "{{pool}} idle",
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          }
+        },
+        {
+          "expr": "lumina_indexer_db_pool_waiting",
+          "legendFormat": "{{pool}} waiting",
+          "refId": "C",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          }
+        }
+      ]
     }
   ]
 }

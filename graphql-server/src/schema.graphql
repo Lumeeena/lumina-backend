@@ -89,81 +89,41 @@ type Query {
   **Falls back to Horizon** when the indexer has no row for the address, which is
   the common case for an account that exists but has not transacted in the range
   this deployment has indexed. Returns `null` only when neither source has it.
+
+  With `asOfLedger`, returns the account as the indexer last recorded it at or
+  before that ledger. There is **no Horizon fallback** for a historical query: it
+  returns `null` when no recorded state exists at or before that ledger, which
+  covers both "not yet observed" and "history pruned". See
+  docs/ACCOUNT_STATE_HISTORY.md for the resolution and retention limits.
   """
   account(
     """Network to read; defaults to the primary network configured for this deployment."""
     network: Network
     """Stellar account address, e.g. `GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN`."""
     address: String!
+    """
+    Read the account as of this ledger sequence instead of its current state. The
+    answer is the latest recorded state at or before the ledger; its
+    `lastModifiedLedger` says which recorded state it is.
+    """
+    asOfLedger: Int
   ): Account
 
   """
-  Query asset statistics (Issue #7).
-  """
-  asset(
-    """Network to read; defaults to the primary network configured for this deployment."""
-    network: Network
-    code: String!
-    issuer: String!
-  ): AssetStats
-
-  """
-  List all indexed assets with holder counts and volume (Issue #7).
+  Browse indexed assets, ordered by holder count or recent volume.
   """
   assets(
     """Network to read; defaults to the primary network configured for this deployment."""
     network: Network
+    """Ordering; defaults to HOLDERS."""
+    sortBy: AssetSort = HOLDERS
+    """Case-insensitive substring match on the asset code."""
+    search: String
+    """Maximum page size is 100. Larger limits are rejected."""
     limit: Int = 20
+    """Opaque cursor from a previous page's `pageInfo`; see `PageInfo`."""
     cursor: String
-    sortBy: AssetSortField = HOLDERS
-  ): AssetStatsPage!
-
-  """
-  Get trustline change history for an asset (Issue #7).
-  """
-  trustlineHistory(
-    """Network to read; defaults to the primary network configured for this deployment."""
-    network: Network
-    code: String!
-    issuer: String!
-    limit: Int = 20
-    cursor: String
-  ): [TrustlineChange!]!
-
-  """
-  Query contract storage state (Issue #9).
-  """
-  contractStorage(
-    """Network to read; defaults to the primary network configured for this deployment."""
-    network: Network
-    contractId: String!
-    key: JSON!
-  ): ContractStorageEntry
-
-  """
-  List all storage entries for a contract (Issue #9).
-  """
-  contractStorageEntries(
-    """Network to read; defaults to the primary network configured for this deployment."""
-    network: Network
-    contractId: String!
-    limit: Int = 100
-    cursor: String
-  ): ContractStorageEntryPage!
-
-  """
-  Get export job status (Issue #10).
-  """
-  exportJob(
-    """Network to read; defaults to the primary network configured for this deployment."""
-    network: Network
-    id: String!
-  ): ExportJob
-
-  """
-  Get API usage stats for the authenticated key (Issue #8).
-  """
-  myUsage(hours: Int = 24): UsageStats!
+  ): AssetPage!
 
   """
   List indexed accounts, most recently active first.
@@ -209,6 +169,23 @@ type Query {
     """Opt-in request for total matching count."""
     includeTotalCount: Boolean = false
   ): AccountPage!
+
+  """
+  Indexed creation and merge operations for an account, newest first.
+  Works even after the account has been removed, and includes repeated
+  creation/merge cycles. Does not require an indexed account snapshot.
+  An empty page means no matching indexed history, not proof it never existed.
+  """
+  accountLifecycle(
+    """Network to read; defaults to the primary network."""
+    network: Network
+    """The account created or removed, rather than its funder or merge recipient."""
+    address: String!
+    """Page size from 1 to 100."""
+    limit: Int = 20
+    """Opaque cursor returned by a previous accountLifecycle page."""
+    cursor: String
+  ): OperationPage!
 
   """
   Fetch operations, newest first, optionally filtered by account and type.
@@ -440,6 +417,48 @@ type Query {
     """
     bucketSeconds: Int = 86400
   ): AssetDetail!
+
+  """
+  Fetch one indexed asset by code and issuer.
+
+  Returns `null` when the asset has never been indexed. Use `asset(asset:)`
+  for supply plus a volume series, or `assets` to browse.
+  """
+  assetByKey(
+    """Network to read; defaults to the primary network configured for this deployment."""
+    network: Network
+    """Asset code, e.g. `USDC`."""
+    code: String!
+    """Issuing account address."""
+    issuer: String!
+  ): Asset
+
+  """
+  Account balance history for an asset over time.
+
+  Derives balances by replaying balance-affecting operations from the operations table.
+  Default range is 30 days, maximum is 90 days.
+  """
+  accountBalanceHistory(
+    """Network to read; defaults to the primary network configured for this deployment."""
+    network: Network
+    """
+    Account address to get balance history for.
+    """
+    address: String!
+    """
+    Asset to track: "CODE:ISSUER", or "XLM" for native. Defaults to XLM.
+    """
+    asset: String = "XLM"
+    """
+    Range start (ISO-8601). Defaults to 30 days before `to`.
+    """
+    from: String
+    """
+    Range end (ISO-8601). Defaults to now.
+    """
+    to: String
+  ): BalanceHistory!
 
   """
   How far behind the chain this API data is, for one network.
@@ -813,6 +832,8 @@ type Account {
     """Maximum page size is 100. Larger limits are rejected."""
     limit: Int = 10
   ): [Operation!]
+  """Signers on this account, heaviest first; empty until the indexer has recorded any."""
+  signers: [Signer!]!
 }
 
 """
@@ -917,6 +938,11 @@ type Operation {
   startingBalance: String
   """Create account (and sponsorship): the account paying."""
   funder: String
+  """Create account: the newly funded address."""
+  createdAccount: String
+
+  """Account merge: address receiving the removed account's remaining XLM."""
+  mergeDestination: String
 
   # Manage offer fields
   """Offer: the offer's id, absent while it is newly created."""
@@ -927,6 +953,16 @@ type Operation {
   selling: String
   """Offer: the asset being bought."""
   buying: String
+
+  # Bump sequence fields (Issue #260)
+  """Bump sequence: the sequence number to bump to."""
+  bumpSequence: String
+
+  # Manage data fields (Issue #260)
+  """Manage data: the data entry name."""
+  dataName: String
+  """Manage data: the data entry value (base64-encoded)."""
+  dataValue: String
 }
 
 """
@@ -952,6 +988,10 @@ type ContractEvent {
   topics: [String!]!
   """Event payload, JSON-encoded as a string; null when the event had none."""
   value: String  # JSON-encoded value
+  """Transaction hash reported by Soroban RPC; null when unavailable."""
+  transactionHash: String
+  """The indexed transaction row, when the hash is present locally."""
+  transaction: Transaction
 }
 
 """
@@ -1232,6 +1272,20 @@ type Asset {
   Recent volume (last 7 days) in the asset's base units.
   """
   recentVolume: String
+  """
+  The issuer's home domain, if published in their account settings.
+  """
+  issuerHomeDomain: String
+  """
+  Self-declared asset metadata from the issuer's stellar.toml file.
+  This is not verified - it's what the issuer claims about their asset.
+  """
+  issuerMetadata: String
+  """
+  True if this asset's code matches a well-known asset but has a different issuer.
+  Such assets may be attempting to impersonate the real asset.
+  """
+  isLookalike: Boolean
 }
 
 """
@@ -1363,3 +1417,183 @@ type TradePage {
   pageInfo: PageInfo!
 }
 
+# ─── Signers & Sponsorship (#226) ────────────────────────────────────────────
+
+"""
+One signer on a Stellar account.
+
+The `key` is the signer's public key (`G...` for ed25519) or pre-auth
+transaction hash / hash-x hash. `weight` contributes to the account's
+signature threshold.
+"""
+type Signer {
+  """Signer public key or hash."""
+  key: String!
+  """Signer type: `ed25519_public_key`, `preauth_tx`, or `hash_x`."""
+  type: String!
+  """Signature weight this signer contributes."""
+  weight: Int!
+}
+
+"""
+Sponsorship relationship: an account sponsoring reserves for another account's
+entries.
+"""
+type Sponsorship {
+  """The sponsoring account (pays reserves)."""
+  sponsoringId: String!
+  """The sponsored account (receives reserves)."""
+  sponsoredId: String!
+  """Ledger this sponsorship was last modified in."""
+  lastModifiedLedger: Int!
+}
+
+# ─── Contracts & Deployments (#227) ──────────────────────────────────────────
+
+"""
+A deployed Soroban contract and its on-chain deployment metadata.
+"""
+type ContractDeployment {
+  """Contract address (`C...`)."""
+  contractId: String!
+  """Account that deployed the contract."""
+  deployer: String!
+  """Wasm hash of the deployed contract code."""
+  wasmHash: String!
+  """Ledger the contract was deployed in."""
+  deployedLedger: Int!
+  """Timestamp of the deployment ledger."""
+  deployedAt: String!
+  """Other contracts sharing the same wasm code."""
+  sharedWasmContracts(
+    limit: Int = 10
+  ): [ContractDeployment!]
+}
+
+# ─── Network Statistics (#228) ───────────────────────────────────────────────
+
+"""
+Network-level activity statistics for a time period, computed from rollups.
+"""
+type NetworkStats {
+  """Period start (ISO 8601)."""
+  periodStart: String!
+  """Period end (ISO 8601)."""
+  periodEnd: String!
+  """Bucket granularity: `hour` or `day`."""
+  granularity: String!
+  """Total transactions in the period."""
+  transactionCount: Int!
+  """Total operations in the period."""
+  operationCount: Int!
+  """Number of distinct active accounts."""
+  activeAccounts: Int!
+  """Total volume moved (stroops, as string)."""
+  totalVolume: String!
+}
+
+"""
+A single time bucket for charting network statistics.
+"""
+type NetworkStatsBucket {
+  """Bucket start time (ISO 8601)."""
+  bucketStart: String!
+  """Transactions in this bucket."""
+  transactionCount: Int!
+  """Operations in this bucket."""
+  operationCount: Int!
+  """Distinct active accounts in this bucket."""
+  activeAccounts: Int!
+  """Total volume in this bucket (stroops)."""
+  totalVolume: String!
+}
+
+# ─── Activity Rollups (#229) ─────────────────────────────────────────────────
+
+"""
+A rolled-up activity aggregate for a time bucket.
+"""
+type ActivityRollup {
+  """Bucket start time (ISO 8601)."""
+  bucketStart: String!
+  """Bucket granularity: `hour` or `day`."""
+  granularity: String!
+  """Network name."""
+  network: String!
+  """Transactions in this bucket."""
+  transactionCount: Int!
+  """Operations in this bucket."""
+  operationCount: Int!
+  """Distinct active accounts in this bucket."""
+  activeAccounts: Int!
+  """Total volume in this bucket (stroops)."""
+  totalVolume: String!
+}
+
+# ─── Query additions ─────────────────────────────────────────────────────────
+
+extend type Query {
+  """
+  Account signers and sponsorship details (#226).
+  """
+  accountSigners(address: String!): [Signer!]!
+
+  """
+  Accounts sponsored by the given address (#226).
+  """
+  sponsoredAccounts(
+    """Issuing address whose sponsored accounts to list."""
+    sponsorAddress: String!
+    """
+    Maximum accounts to return. Capped at 1000 so a single sponsor cannot force
+    an unbounded response; use a narrower sponsor rather than raising this.
+    """
+    limit: Int = 1000
+  ): [Account!]!
+
+  """
+  Resolve a contract ID to its deployment details (#227).
+  """
+  contract(contractId: String!): ContractDeployment
+
+  """
+  List deployed contracts, newest first (#227).
+  """
+  contracts(limit: Int = 20, cursor: String): [ContractDeployment!]!
+
+  """
+  Network statistics for a time period, computed from rollups (#228).
+  """
+  networkStats(
+    """Start of the range (ISO 8601), inclusive."""
+    startTime: String!
+    """End of the range (ISO 8601), exclusive."""
+    endTime: String!
+    """Bucket width: `hour` or `day`."""
+    granularity: String = "hour"
+    """
+    Maximum buckets to return, capped at 1000. A range that would exceed the
+    cap returns an error rather than a silently truncated series.
+    """
+    limit: Int = 1000
+  ): [NetworkStatsBucket!]!
+
+  """
+  Rolled-up activity aggregates (#229).
+  """
+  activityRollups(
+    """Network whose rollups to read."""
+    network: String!
+    """Bucket width: `hour` or `day`."""
+    granularity: String = "hour"
+    """Start of the range (ISO 8601), inclusive."""
+    startTime: String!
+    """End of the range (ISO 8601), exclusive."""
+    endTime: String!
+    """
+    Maximum buckets to return, capped at 1000. A range that would exceed the
+    cap returns an error rather than a silently truncated series.
+    """
+    limit: Int = 1000
+  ): [ActivityRollup!]!
+}

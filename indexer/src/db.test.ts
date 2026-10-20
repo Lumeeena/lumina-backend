@@ -1,4 +1,5 @@
 import { test } from 'node:test';
+import { EventEmitter } from 'node:events';
 import assert from 'node:assert/strict';
 import type { Pool, PoolClient } from 'pg';
 import {
@@ -12,6 +13,7 @@ import {
   insertContractEvents,
   isCheckViolation,
   markContractStorageEntriesArchived,
+  insertAccountStateHistory,
   upsertAccount,
   upsertContractStorageEntries,
   processLiquidityPoolOperation,
@@ -26,25 +28,73 @@ import {
   processSetOptionsOperation,
   getSignerChangesForAccount,
   getThresholdChangesForAccount,
+  samplePoolSaturation,
 } from './db';
 import type { ContractStorageEntry } from './soroban';
-import { indexerPoolErrors } from './metrics';
+import { indexerPoolErrors, registry } from './metrics';
 import { makeAccount, makeContractEvent, makeLedger, makeOperation, makeTransaction } from '../../shared/test-factories';
+
+type SqlInput = string | { text: string; values?: unknown[] };
+
+/** The pg driver accepts either a SQL string or a prepared-statement config. */
+function sqlText(sql: SqlInput): string {
+  return typeof sql === 'string' ? sql : sql.text;
+}
+
+function sqlParams(sql: SqlInput, params?: unknown[]): unknown[] {
+  return typeof sql === 'string' ? (params ?? []) : (sql.values ?? []);
+}
 
 test('createPool logs and counts idle client errors instead of leaving them unhandled', async () => {
   const pool = createPool('postgresql://localhost:5432/lumina');
-  const before = (await indexerPoolErrors.get()).values[0]?.value ?? 0;
+  const before = (await indexerPoolErrors.get()).values.find(v => v.labels['pool'] === 'write')?.value ?? 0;
   pool.emit('error', new Error('simulated idle client error'));
-  const after = (await indexerPoolErrors.get()).values[0]?.value ?? 0;
+  const after = (await indexerPoolErrors.get()).values.find(v => v.labels['pool'] === 'write')?.value ?? 0;
   assert.equal(after, before + 1);
+  await pool.end();
+});
+
+test('pool errors are labelled by pool, so read-pool failures are distinguishable', async () => {
+  const pool = createPool('postgresql://localhost:5432/lumina', undefined, 'read');
+  const before = (await indexerPoolErrors.get()).values.find(v => v.labels['pool'] === 'read')?.value ?? 0;
+  pool.emit('error', new Error('simulated idle client error'));
+  const after = (await indexerPoolErrors.get()).values.find(v => v.labels['pool'] === 'read')?.value ?? 0;
+  assert.equal(after, before + 1);
+  await pool.end();
+});
+
+test('samplePoolSaturation publishes per-pool totals, idles and waiters', async () => {
+  const poolOf = (total: number, idle: number, waiting: number) =>
+    ({ totalCount: total, idleCount: idle, waitingCount: waiting }) as unknown as Pool;
+
+  samplePoolSaturation({ write: poolOf(5, 2, 0), read: poolOf(3, 0, 2) });
+
+  const valueFor = async (name: string, pool: string): Promise<number> => {
+    const metric = await registry.getSingleMetric(name)?.get();
+    return metric?.values.find(v => v.labels['pool'] === pool)?.value ?? 0;
+  };
+
+  assert.equal(await valueFor('lumina_indexer_db_pool_connections_total', 'write'), 5);
+  assert.equal(await valueFor('lumina_indexer_db_pool_connections_total', 'read'), 3);
+  assert.equal(await valueFor('lumina_indexer_db_pool_connections_idle', 'write'), 2);
+  assert.equal(await valueFor('lumina_indexer_db_pool_waiting', 'read'), 2);
+});
+
+test('a pooled connection dying while checked out does not raise an unhandled error', async () => {
+  // pg-pool drops its own listener while a client is checked out, so without
+  // one of ours a backend killed mid-transaction crashed the indexer.
+  const pool = createPool('postgresql://localhost:5432/lumina');
+  const client = new EventEmitter();
+  pool.emit('connect', client);
+  assert.doesNotThrow(() => client.emit('error', new Error('Connection terminated unexpectedly')));
   await pool.end();
 });
 
 function makeFakeClient(opts: { failOn?: string } = {}) {
   const calls: string[] = [];
   const client = {
-    query: async (sql: string) => {
-      const trimmed = sql.trim();
+    query: async (sql: SqlInput) => {
+      const trimmed = sqlText(sql).trim();
       if (trimmed.startsWith('BEGIN') || trimmed.startsWith('COMMIT') || trimmed.startsWith('ROLLBACK')) {
         calls.push(trimmed);
       } else {
@@ -80,11 +130,35 @@ test('indexLedger writes ledger, transactions, and operations inside one commit'
     'ledgers',
     'transactions',
     'operations',
+    'SAVEPOINT operation_processing',
+    'RELEASE SAVEPOINT operation_processing',
     'failed_ledgers',
+    'indexer_cursors',
     'SELECT pg_notify($1, $2)',
     'COMMIT',
     'RELEASE',
   ]);
+});
+
+test('indexLedger clears the ledger from failed_ledgers and ledger_retry_queue in one statement', async () => {
+  const statements: Array<{ sql: string; params: unknown[] }> = [];
+  const client = {
+    query: async (sql: string, params?: unknown[]) => {
+      statements.push({ sql, params: params ?? [] });
+      return { rows: [] };
+    },
+    release: () => {},
+  };
+  await indexLedger(fakePool(client), 'testnet', ledger, [tx], [op]);
+  // The forward loop, backfill and gap repair all retry a failed ledger
+  // themselves, so the ledger usually lands here rather than through the retry
+  // worker. A queue row left behind would be re-indexed for nothing, or, once
+  // permanently_failed, never deleted at all.
+  const clears = statements.filter(s => /DELETE FROM (failed_ledgers|ledger_retry_queue)/.test(s.sql));
+  assert.equal(clears.length, 1, 'both deletes should share one round trip');
+  assert.match(clears[0]!.sql, /DELETE FROM failed_ledgers WHERE sequence = \$1 AND network = \$2/);
+  assert.match(clears[0]!.sql, /DELETE FROM ledger_retry_queue WHERE ledger = \$1 AND network = \$2/);
+  assert.deepEqual(clears[0]!.params, [ledger.sequence, 'testnet']);
 });
 
 test('indexLedger inserts every transaction before any operation (FK order)', async () => {
@@ -133,8 +207,8 @@ test('indexLedger surfaces a check violation as a failed write', async () => {
   // rolls back, and the violation propagates so the retry loop in index.ts can
   // classify it (a check violation is not transient, so retrying is pointless).
   const client = {
-    query: async (sql: string) => {
-      if (sql.includes('INSERT INTO ledgers')) throw checkViolation('ledgers_transaction_count_check');
+    query: async (sql: SqlInput) => {
+      if (sqlText(sql).includes('INSERT INTO ledgers')) throw checkViolation('ledgers_transaction_count_check');
       return { rows: [] };
     },
     release: () => {},
@@ -148,8 +222,8 @@ test('indexLedger surfaces a check violation as a failed write', async () => {
 
 test('insertContractEvents surfaces a check violation as a failed write', async () => {
   const pool = {
-    query: async (sql: string) => {
-      if (sql.includes('INSERT INTO contract_events')) throw checkViolation('contract_events_id_check');
+    query: async (sql: SqlInput) => {
+      if (sqlText(sql).includes('INSERT INTO contract_events')) throw checkViolation('contract_events_id_check');
       return { rows: [] };
     },
   } as unknown as Pool;
@@ -229,8 +303,11 @@ test('indexLedger queues account refreshes in the ledger transaction', async () 
     'ledgers',
     'transactions',
     'operations',
+    'SAVEPOINT operation_processing',
+    'RELEASE SAVEPOINT operation_processing',
     'account_refresh_queue',
     'failed_ledgers',
+    'indexer_cursors',
     'SELECT pg_notify($1, $2)',
     'COMMIT',
     'RELEASE',
@@ -252,6 +329,8 @@ test('a failed refresh enqueue rolls the ledger transaction back for restart rec
     'ledgers',
     'transactions',
     'operations',
+    'SAVEPOINT operation_processing',
+    'RELEASE SAVEPOINT operation_processing',
     'account_refresh_queue',
     'ROLLBACK',
     'RELEASE',
@@ -294,7 +373,7 @@ test('ensurePartitions defaults the lookahead to 5 partitions', async () => {
 
 test('upsertAccount inserts with an ON CONFLICT upsert', async () => {
   const queries: string[] = [];
-  const client = { query: async (sql: string) => { queries.push(sql); return { rows: [] }; } } as unknown as PoolClient;
+  const client = { query: async (sql: SqlInput) => { queries.push(sqlText(sql)); return { rows: [] }; } } as unknown as PoolClient;
   await upsertAccount(client, 'testnet', account);
   assert.match(queries[0]!, /INSERT INTO accounts/);
   // The same address exists on every chain it has funded; without the network
@@ -303,17 +382,52 @@ test('upsertAccount inserts with an ON CONFLICT upsert', async () => {
   assert.match(queries[0]!, /network\)/);
 });
 
+test('insertAccountStateHistory stores the state under its own ledger, and only once', async () => {
+  const calls: Array<{ text: string; values: unknown[] }> = [];
+  const client = {
+    query: async (q: { text: string; values: unknown[] }) => {
+      calls.push(q);
+      return { rows: [] };
+    },
+  } as unknown as PoolClient;
+
+  await insertAccountStateHistory(client, 'testnet', account);
+
+  assert.equal(calls.length, 1);
+  assert.match(calls[0]!.text, /INSERT INTO account_state_history/);
+  // Keyed by the state's own last-modified ledger: seeing the same state on a
+  // second refresh must not add a row.
+  assert.match(calls[0]!.text, /ON CONFLICT \(address, network, last_modified_ledger\) DO NOTHING/);
+  assert.equal(calls[0]!.values[0], account.account_id);
+  assert.equal(calls[0]!.values[1], 'testnet');
+  assert.equal(calls[0]!.values[2], account.last_modified_ledger);
+});
+
 const event = makeContractEvent();
 
 test('insertContractEvents writes one row per event', async () => {
   const queries: string[] = [];
-  const pool = { query: async (sql: string) => { queries.push(sql); return { rows: [] }; } } as unknown as Pool;
+  const pool = { query: async (sql: SqlInput) => { queries.push(sqlText(sql)); return { rows: [] }; } } as unknown as Pool;
   await insertContractEvents(pool, 'testnet', [event, { ...event, id: 'evt2' }]);
   // Two inserts, then one notification announcing the batch.
   assert.equal(queries.length, 3);
   assert.match(queries[0]!, /INSERT INTO contract_events/);
   assert.match(queries[1]!, /INSERT INTO contract_events/);
   assert.match(queries[2]!, /pg_notify/);
+});
+
+test('insertContractEvents stores an i128 amount as decimal text rather than failing the batch', async () => {
+  // scValToNative decodes an i128 as a bigint. JSON.stringify throws on one, so
+  // a single token transfer used to fail every poll and pin the event cursor.
+  const values: unknown[][] = [];
+  const pool = {
+    query: async (sql: SqlInput) => {
+      if (typeof sql === 'object' && 'values' in sql && sql.values) values.push(sql.values);
+      return { rows: [] };
+    },
+  } as unknown as Pool;
+  await insertContractEvents(pool, 'mainnet', [{ ...event, value: { amount: 170141183460469231731687303715884105727n } }]);
+  assert.equal(values[0]![7], '{"amount":"170141183460469231731687303715884105727"}');
 });
 
 test('insertContractEvents is a no-op for an empty list', async () => {
@@ -339,16 +453,16 @@ test('every insert conflicts on the composite key, so two chains can share a led
   // testnet wrote the same numbers.
   const queries: string[] = [];
   const client = {
-    query: async (sql: string) => {
-      queries.push(sql);
+    query: async (sql: SqlInput) => {
+      queries.push(sqlText(sql));
       return { rows: [] };
     },
     release: () => {},
   } as unknown as PoolClient;
 
   const eventPool = {
-    query: async (sql: string) => {
-      queries.push(sql);
+    query: async (sql: SqlInput) => {
+      queries.push(sqlText(sql));
       return { rows: [] };
     },
   } as unknown as Pool;
@@ -364,6 +478,7 @@ test('every insert conflicts on the composite key, so two chains can share a led
     // no inference clause at all, so its entry is undefined rather than a key.
     undefined,
     'network, address',
+    'network, purpose',
     'id, network',
   ]);
 
@@ -380,8 +495,8 @@ test('every insert conflicts on the composite key, so two chains can share a led
 test('a ledger notification carries the network it was indexed on', async () => {
   const payloads: string[] = [];
   const client = {
-    query: async (sql: string, params?: unknown[]) => {
-      if (sql.includes('pg_notify')) payloads.push(String(params?.[1]));
+    query: async (sql: SqlInput, params?: unknown[]) => {
+      if (sqlText(sql).includes('pg_notify')) payloads.push(String(sqlParams(sql, params)[1]));
       return { rows: [] };
     },
     release: () => {},

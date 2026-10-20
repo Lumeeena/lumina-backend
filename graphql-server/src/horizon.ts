@@ -17,7 +17,10 @@ import {
   createHorizonClient,
   type HorizonAccount,
   type HorizonLatestLedger,
+  type HorizonTrade,
+  type HorizonTradesFilter,
   type HorizonTransaction,
+  type HorizonEndpoint,
 } from '@lumina/shared';
 import { horizonRequestDuration, horizonRequests } from './metrics';
 import { subsystem } from './logger';
@@ -51,14 +54,14 @@ const client = createHorizonClient({
 
 export function getRecentTransactions(
   limit = 20,
-  baseUrl?: string
+  baseUrl?: HorizonEndpoint
 ): Promise<HorizonTransaction[]> {
   return client.getRecentTransactions(limit, baseUrl);
 }
 
 export function getAccount(
   address: string,
-  baseUrl?: string
+  baseUrl?: HorizonEndpoint
 ): Promise<HorizonAccount | null> {
   return client.getAccount(address, baseUrl);
 }
@@ -66,18 +69,18 @@ export function getAccount(
 export function getAccountTransactions(
   address: string,
   limit = 10,
-  baseUrl?: string
+  baseUrl?: HorizonEndpoint
 ): Promise<HorizonTransaction[]> {
   return client.getAccountTransactions(address, limit, baseUrl);
 }
 
-export function getLatestLedger(baseUrl?: string): Promise<HorizonLatestLedger | null> {
+export function getLatestLedger(baseUrl?: HorizonEndpoint): Promise<HorizonLatestLedger | null> {
   return client.getLatestLedger(baseUrl);
 }
 
 export function getTrades(
   params?: HorizonTradesFilter,
-  baseUrl?: string
+  baseUrl?: HorizonEndpoint
 ): Promise<HorizonTrade[]> {
   return client.getTrades(params, baseUrl);
 }

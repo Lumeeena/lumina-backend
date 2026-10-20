@@ -27,6 +27,11 @@ CREATE TABLE IF NOT EXISTS ledgers (
     CONSTRAINT ledgers_operation_count_check   CHECK (operation_count >= 0)
 );
 
+-- Serves the retention prune (`closed_at < cutoff`), not an API query. The
+-- ledger listing orders by sequence and uses the primary key, so this index has
+-- zero scans until retention is enabled; it is kept because after a backfill or
+-- reindex the prune cannot rely on physical order. See
+-- docs/LEDGERS_INDEX_REVIEW.md.
 CREATE INDEX idx_ledgers_closed_at ON ledgers (closed_at DESC);
 
 -- ─── Transactions ─────────────────────────────────────────────────────────────
@@ -54,6 +59,13 @@ CREATE TABLE IF NOT EXISTS transactions (
 CREATE INDEX idx_transactions_ledger     ON transactions (ledger DESC);
 CREATE INDEX idx_transactions_source     ON transactions (source_account);
 CREATE INDEX idx_transactions_created_at ON transactions (created_at DESC);
+
+-- Serves the `transactions` listing as an Index Only Scan: the key is the
+-- keyset order, and INCLUDE carries every column the listing selects. See
+-- db/migrations/015_transactions_listing_covering_index.sql.
+CREATE INDEX idx_transactions_network_ledger_hash_covering
+    ON transactions (network, ledger DESC, hash DESC)
+    INCLUDE (created_at, source_account, fee_charged, operation_count, successful, memo_type, memo);
 
 -- ─── Operations ───────────────────────────────────────────────────────────────
 --
@@ -88,12 +100,28 @@ CREATE TABLE IF NOT EXISTS operations (
     CONSTRAINT operations_source_account_check    CHECK (source_account <> '')
 );
 
+-- Every index here names its reader; db/migrations/019_operations_index_review.sql
+-- and docs/OPERATIONS_INDEX_REVIEW.md have the measurements behind the set.
+--
+-- transaction_hash: Transaction.operations, and the foreign-key check each
+-- transactions row deleted by the retention prune makes against this table.
 CREATE INDEX idx_operations_transaction   ON operations (transaction_hash);
-CREATE INDEX idx_operations_source        ON operations (source_account);
+-- A rare operation type; a common one is found faster by walking ledger order.
 CREATE INDEX idx_operations_type          ON operations (type);
+-- The retention prune, balance history and the asset volume series: time ranges.
 CREATE INDEX idx_operations_created_at    ON operations (created_at DESC);
--- GIN index for JSONB queries (e.g. filter by "to" address in payment details)
-CREATE INDEX idx_operations_details       ON operations USING GIN (details);
+-- The listing's keyset order, so a page is the next 20 rows rather than a
+-- sort of the network; also one ledger's operations for the subscription replay.
+CREATE INDEX idx_operations_network_ledger
+    ON operations (network, ledger DESC, id DESC);
+-- An account's operations, already in the listing's order.
+CREATE INDEX idx_operations_network_source_ledger
+    ON operations (network, source_account, ledger DESC, id DESC);
+-- accountLifecycle's containment match, over the two operation types it reads
+-- rather than over every key of every operation.
+CREATE INDEX idx_operations_lifecycle
+    ON operations USING GIN (details jsonb_path_ops)
+    WHERE type IN ('create_account', 'account_merge');
 
 -- Defined for parity with db/migrations/006_partition_operations.sql, which
 -- also creates it — the parity check diffs the two dumps, so the definition has
@@ -182,6 +210,32 @@ CREATE INDEX idx_account_refresh_queue_pending
 -- without a deterministic tiebreaker a keyset walk repeats the same page.
 CREATE INDEX idx_accounts_last_modified ON accounts (network, last_modified_ledger DESC, address);
 
+-- Stored copies of an account, one per observed last-modified ledger. Written by
+-- the indexer on each account refresh; read by account(asOfLedger:). See
+-- docs/ACCOUNT_STATE_HISTORY.md for what a copy does and does not capture.
+CREATE TABLE IF NOT EXISTS account_state_history (
+    address              TEXT NOT NULL,
+    network              TEXT NOT NULL DEFAULT 'mainnet',
+    last_modified_ledger BIGINT NOT NULL,
+    sequence             TEXT NOT NULL,
+    subentry_count       INTEGER NOT NULL DEFAULT 0,
+    num_sponsored        INTEGER NOT NULL DEFAULT 0,
+    num_sponsoring       INTEGER NOT NULL DEFAULT 0,
+    balances             JSONB NOT NULL DEFAULT '[]',
+    flags                JSONB NOT NULL DEFAULT '{}',
+    thresholds           JSONB NOT NULL DEFAULT '{}',
+    recorded_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (address, network, last_modified_ledger),
+    CONSTRAINT account_state_history_address_check         CHECK (address <> ''),
+    CONSTRAINT account_state_history_sequence_check        CHECK (sequence <> ''),
+    CONSTRAINT account_state_history_last_modified_check   CHECK (last_modified_ledger > 0),
+    CONSTRAINT account_state_history_subentry_count_check  CHECK (subentry_count >= 0),
+    CONSTRAINT account_state_history_num_sponsored_check   CHECK (num_sponsored >= 0),
+    CONSTRAINT account_state_history_num_sponsoring_check  CHECK (num_sponsoring >= 0)
+);
+
+CREATE INDEX idx_account_state_history_recorded_at ON account_state_history (recorded_at);
+
 -- ─── Contract Events (Soroban) ────────────────────────────────────────────────
 
 CREATE TABLE IF NOT EXISTS contract_events (
@@ -193,6 +247,7 @@ CREATE TABLE IF NOT EXISTS contract_events (
     paging_token        TEXT NOT NULL,
     topics              TEXT[] NOT NULL DEFAULT '{}',
     value               JSONB,
+    transaction_hash    TEXT,
     indexed_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     network             TEXT NOT NULL DEFAULT 'mainnet',
     PRIMARY KEY (id, network),
@@ -206,6 +261,7 @@ CREATE INDEX idx_events_contract_id  ON contract_events (contract_id);
 CREATE INDEX idx_events_ledger       ON contract_events (ledger DESC);
 CREATE INDEX idx_events_created_at   ON contract_events (created_at DESC);
 CREATE INDEX idx_events_topics       ON contract_events USING GIN (topics);
+CREATE INDEX idx_events_transaction  ON contract_events (transaction_hash, network);
 
 -- ─── Custom per-contract event schemas ───────────────────────────────────
 -- One row per contract that has registered a schema. The definition is stored
@@ -316,18 +372,12 @@ CREATE TABLE IF NOT EXISTS trustlines (
     CONSTRAINT trustlines_last_modified_ledger_check CHECK (last_modified_ledger > 0)
 );
 
-CREATE INDEX IF NOT EXISTS idx_trustlines_asset
-    ON trustlines (asset_code, asset_issuer, network);
-
-CREATE INDEX IF NOT EXISTS idx_trustlines_asset_active
-    ON trustlines (asset_code, asset_issuer, network)
-    WHERE balance <> '0';
-
-CREATE INDEX IF NOT EXISTS idx_trustlines_account
-    ON trustlines (account, network);
-
-CREATE INDEX IF NOT EXISTS idx_trustlines_ledger
-    ON trustlines (last_modified_ledger DESC);
+-- No secondary indexes, on purpose. Every statement that touches this table is
+-- an indexer write keyed by the full primary key, and no API query reads it;
+-- the four indexes 010_trustlines created were dropped by
+-- 015_drop_unused_trustline_indexes on measured usage. See
+-- docs/TRUSTLINES_INDEX_REVIEW.md before adding one back: an index here must
+-- come with the query that reads it.
 
 -- ─── Assets (Asset Analytics) ────────────────────────────────────────────────
 
@@ -340,6 +390,9 @@ CREATE TABLE IF NOT EXISTS assets (
     created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     network             TEXT NOT NULL DEFAULT 'mainnet',
+    issuer_home_domain  TEXT,
+    issuer_metadata     JSONB,
+    is_lookalike        BOOLEAN DEFAULT FALSE,
     PRIMARY KEY (asset_code, asset_issuer, network),
     CONSTRAINT assets_asset_code_check          CHECK (asset_code <> ''),
     CONSTRAINT assets_asset_issuer_check        CHECK (asset_issuer <> ''),
@@ -348,14 +401,15 @@ CREATE TABLE IF NOT EXISTS assets (
     CONSTRAINT assets_last_activity_ledger_check CHECK (last_activity_ledger > 0)
 );
 
-CREATE INDEX IF NOT EXISTS idx_assets_holder_count
-    ON assets (holder_count DESC, asset_code, asset_issuer);
-
-CREATE INDEX IF NOT EXISTS idx_assets_activity
-    ON assets (last_activity_ledger DESC);
-
-CREATE INDEX IF NOT EXISTS idx_assets_network
-    ON assets (network);
+-- The assets listing: one network, most holders first, keyset-paged on
+-- (holder_count, asset_code, asset_issuer). Point lookups use the primary key.
+-- Every other secondary index this table had was measured unused and dropped in
+-- 016_assets_index_review; see docs/ASSETS_INDEX_REVIEW.md before adding one
+-- back. holder_count is written on the indexer's path, so this index already
+-- keeps those updates from being HOT; another index here must come with the
+-- query that reads it.
+CREATE INDEX IF NOT EXISTS idx_assets_network_holders
+    ON assets (network, holder_count DESC, asset_code, asset_issuer);
 
 -- ─── Asset Volume Buckets (Asset Analytics) ───────────────────────────────────
 
@@ -400,17 +454,10 @@ CREATE INDEX IF NOT EXISTS idx_transactions_memo_trgm
     ON transactions USING GIN (memo gin_trgm_ops)
     WHERE memo IS NOT NULL;
 
-CREATE INDEX IF NOT EXISTS idx_operations_asset_code
-    ON operations ((details->>'asset_code'))
-    WHERE details->>'asset_code' IS NOT NULL;
-
-CREATE INDEX IF NOT EXISTS idx_operations_asset_issuer
-    ON operations ((details->>'asset_issuer'))
-    WHERE details->>'asset_issuer' IS NOT NULL;
-
-CREATE INDEX IF NOT EXISTS idx_operations_asset_type
-    ON operations ((details->>'asset_type'))
-    WHERE details->>'asset_type' IS NOT NULL;
+-- Migration 004 also built expression indexes on operations' asset_code,
+-- asset_issuer and asset_type. Migration 019 dropped them: the asset filter
+-- matches three roles with an OR, which no single-role index can serve, so
+-- they were never read. See docs/OPERATIONS_INDEX_REVIEW.md.
 
 -- ─── API Keys ─────────────────────────────────────────────────────────────────
 
@@ -442,7 +489,10 @@ CREATE TABLE IF NOT EXISTS ledger_retry_queue (
     PRIMARY KEY (ledger, network)
 );
 
-CREATE INDEX IF NOT EXISTS idx_retry_queue_next_attempt ON ledger_retry_queue (next_attempt_at)
+-- `network` leads because the retry worker polls one network at a time; see
+-- db/migrations/015_retry_queue_network_index.sql.
+CREATE INDEX IF NOT EXISTS idx_retry_queue_network_next_attempt
+    ON ledger_retry_queue (network, next_attempt_at)
     WHERE NOT permanently_failed;
 
 -- ─── Failed Ledgers ───────────────────────────────────────────────────────────
@@ -457,6 +507,32 @@ CREATE TABLE IF NOT EXISTS failed_ledgers (
 );
 
 CREATE INDEX IF NOT EXISTS idx_failed_ledgers_sequence ON failed_ledgers (sequence, network);
+
+CREATE TABLE IF NOT EXISTS dead_letter_operations (
+    id BIGSERIAL PRIMARY KEY,
+    network TEXT NOT NULL,
+    ledger BIGINT NOT NULL,
+    operation_id TEXT,
+    payload JSONB NOT NULL,
+    error TEXT NOT NULL,
+    attempts INTEGER NOT NULL DEFAULT 1,
+    status TEXT NOT NULL DEFAULT 'pending',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    processed_at TIMESTAMPTZ,
+    CONSTRAINT dead_letter_operations_status_check CHECK (status IN ('pending', 'processed'))
+);
+CREATE INDEX IF NOT EXISTS idx_dead_letter_operations_pending
+    ON dead_letter_operations (network, created_at) WHERE status = 'pending';
+
+CREATE TABLE IF NOT EXISTS indexer_cursors (
+    network TEXT NOT NULL,
+    purpose TEXT NOT NULL,
+    cursor BIGINT NOT NULL,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (network, purpose),
+    CONSTRAINT indexer_cursors_purpose_check CHECK (purpose IN ('forward', 'backfill', 'events'))
+);
 
 -- ─── Liquidity Pools (Issue #201) ─────────────────────────────────────────────
 
@@ -599,13 +675,28 @@ CREATE INDEX IF NOT EXISTS idx_threshold_changes_account
 CREATE INDEX IF NOT EXISTS idx_threshold_changes_op
     ON account_threshold_changes (operation_id, network);
 
+-- ─── Admin Operations ─────────────────────────────────────────────────────────
+
+CREATE TABLE IF NOT EXISTS admin_operations (
+    id              BIGSERIAL PRIMARY KEY,
+    network         TEXT NOT NULL,
+    command         TEXT NOT NULL,
+    arguments       JSONB NOT NULL,
+    success         BOOLEAN NOT NULL,
+    details         TEXT,
+    executed_at     TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_admin_operations_network ON admin_operations (network, executed_at DESC);
 
 -- Lower insert-triggered vacuum/analyze thresholds for the append-heavy tables.
+-- transactions vacuums on a fixed row count so the visibility map keeps up with
+-- the newest pages, which the covering listing index needs to skip the heap.
 ALTER TABLE transactions SET (
-    autovacuum_vacuum_insert_threshold = 5000,
-    autovacuum_vacuum_insert_scale_factor = 0.05,
     autovacuum_analyze_threshold = 5000,
-    autovacuum_analyze_scale_factor = 0.02
+    autovacuum_analyze_scale_factor = 0.02,
+    autovacuum_vacuum_insert_threshold = 50000,
+    autovacuum_vacuum_insert_scale_factor = 0
 );
 
 ALTER TABLE operations SET (
@@ -614,3 +705,261 @@ ALTER TABLE operations SET (
     autovacuum_analyze_threshold = 5000,
     autovacuum_analyze_scale_factor = 0.02
 );
+
+-- ─── Consolidated from migrations ────────────────────────────────────────────
+
+CREATE TABLE IF NOT EXISTS api_usage (
+    id BIGSERIAL PRIMARY KEY,
+    key_id INTEGER REFERENCES api_keys(id) ON DELETE CASCADE,
+    operation_name TEXT,
+    response_time_ms INTEGER,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    network TEXT NOT NULL DEFAULT 'mainnet'
+);
+
+CREATE INDEX IF NOT EXISTS idx_api_usage_key_time
+    ON api_usage (key_id, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS backfill_progress (
+    network             TEXT NOT NULL,
+    start_ledger        BIGINT NOT NULL,
+    end_ledger          BIGINT NOT NULL,
+    current_ledger      BIGINT NOT NULL,
+    completed_at        TIMESTAMPTZ,
+    updated_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (network, start_ledger, end_ledger),
+    CONSTRAINT backfill_progress_range_check CHECK (start_ledger <= end_ledger),
+    CONSTRAINT backfill_progress_current_check CHECK (current_ledger >= start_ledger - 1 AND current_ledger <= end_ledger)
+);
+
+CREATE INDEX IF NOT EXISTS idx_backfill_progress_network
+    ON backfill_progress (network)
+    WHERE completed_at IS NULL;
+
+CREATE TABLE IF NOT EXISTS contract_interfaces (
+    contract_id          TEXT NOT NULL,
+    wasm_hash            TEXT NOT NULL,
+    functions            JSONB NOT NULL DEFAULT '[]',
+    created_at           TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at           TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    network              TEXT NOT NULL DEFAULT 'mainnet',
+    PRIMARY KEY (contract_id, network)
+);
+
+CREATE INDEX IF NOT EXISTS idx_contract_interfaces_wasm ON contract_interfaces (wasm_hash, network);
+
+CREATE TABLE IF NOT EXISTS contract_storage_history (
+    contract_id          TEXT NOT NULL,
+    key                  TEXT NOT NULL,
+    durability           TEXT NOT NULL,
+    value                JSONB,
+    value_xdr            TEXT,
+    live_until_ledger    BIGINT,
+    last_modified_ledger BIGINT NOT NULL,
+    indexed_at           TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    network              TEXT NOT NULL DEFAULT 'mainnet',
+    PRIMARY KEY (contract_id, key, last_modified_ledger, network),
+    CONSTRAINT contract_storage_history_durability_check CHECK (durability IN ('persistent', 'temporary')),
+    CONSTRAINT contract_storage_history_ledger_check     CHECK (last_modified_ledger > 0)
+);
+
+CREATE INDEX IF NOT EXISTS idx_contract_storage_history_time_range
+    ON contract_storage_history (contract_id, network, last_modified_ledger DESC);
+
+CREATE INDEX IF NOT EXISTS idx_contract_storage_history_key_lookup
+    ON contract_storage_history (contract_id, key, network, last_modified_ledger DESC);
+
+CREATE TABLE IF NOT EXISTS export_jobs (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    requested_by TEXT,
+    status TEXT NOT NULL CHECK (status IN ('pending', 'running', 'complete', 'failed')),
+    filters JSONB,
+    format TEXT NOT NULL CHECK (format IN ('csv', 'parquet')),
+    output_location TEXT,
+    error_message TEXT,
+    row_count INTEGER,
+    network TEXT NOT NULL DEFAULT 'mainnet',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    started_at TIMESTAMPTZ,
+    completed_at TIMESTAMPTZ,
+    CONSTRAINT export_jobs_completion_check CHECK (
+        (status = 'complete' AND completed_at IS NOT NULL) OR
+        (status != 'complete')
+    )
+);
+
+CREATE INDEX IF NOT EXISTS idx_export_jobs_status
+    ON export_jobs (status, created_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_export_jobs_requested_by
+    ON export_jobs (requested_by, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS soroban_ttl (
+    key                  TEXT NOT NULL,
+    contract_id          TEXT NOT NULL,
+    live_until_ledger    BIGINT NOT NULL,
+    last_ledger          BIGINT NOT NULL,
+    operation_type       TEXT NOT NULL,
+    created_at           TIMESTAMPTZ NOT NULL,
+    network              TEXT NOT NULL DEFAULT 'mainnet',
+    PRIMARY KEY (key, network)
+);
+
+CREATE INDEX IF NOT EXISTS idx_soroban_ttl_contract ON soroban_ttl (contract_id, network);
+
+CREATE INDEX IF NOT EXISTS idx_soroban_ttl_expiry ON soroban_ttl (live_until_ledger, network);
+
+CREATE TABLE IF NOT EXISTS sponsorships (
+    sponsor              TEXT NOT NULL,
+    sponsored_id         TEXT NOT NULL,
+    sponsored_type       TEXT NOT NULL,
+    ledger               BIGINT NOT NULL,
+    created_at           TIMESTAMPTZ NOT NULL,
+    network              TEXT NOT NULL DEFAULT 'mainnet',
+    PRIMARY KEY (sponsored_id, network)
+);
+
+CREATE INDEX IF NOT EXISTS idx_sponsorships_sponsor ON sponsorships (sponsor, network);
+
+CREATE INDEX IF NOT EXISTS idx_sponsorships_type ON sponsorships (sponsored_type, network);
+
+CREATE TABLE IF NOT EXISTS trades (
+    id                  TEXT NOT NULL,
+    paging_token        TEXT NOT NULL,
+    ledger_close_time   TIMESTAMPTZ NOT NULL,
+    trade_type          TEXT NOT NULL DEFAULT 'orderbook',
+    base_account        TEXT NOT NULL,
+    base_amount         NUMERIC(20, 7) NOT NULL,
+    base_asset_type     TEXT NOT NULL,
+    base_asset_code     TEXT,
+    base_asset_issuer   TEXT,
+    base_offer_id       TEXT,
+    counter_account     TEXT,
+    counter_amount      NUMERIC(20, 7) NOT NULL,
+    counter_asset_type  TEXT NOT NULL,
+    counter_asset_code  TEXT,
+    counter_asset_issuer TEXT,
+    counter_offer_id    TEXT,
+    base_is_seller      BOOLEAN,
+    price_n             BIGINT,
+    price_d             BIGINT,
+    price               NUMERIC(20, 7),
+    network             TEXT NOT NULL DEFAULT 'mainnet',
+    indexed_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (id, network),
+    CONSTRAINT trades_id_check           CHECK (id <> ''),
+    CONSTRAINT trades_base_account_check CHECK (base_account <> ''),
+    CONSTRAINT trades_base_amount_check  CHECK (base_amount >= 0),
+    CONSTRAINT trades_counter_amount_check CHECK (counter_amount >= 0)
+);
+
+CREATE INDEX IF NOT EXISTS idx_trades_pair
+    ON trades (base_asset_code, counter_asset_code, network, ledger_close_time DESC);
+
+CREATE INDEX IF NOT EXISTS idx_trades_base_asset
+    ON trades (base_asset_type, base_asset_code, base_asset_issuer, network);
+
+CREATE INDEX IF NOT EXISTS idx_trades_counter_asset
+    ON trades (counter_asset_type, counter_asset_code, counter_asset_issuer, network);
+
+CREATE INDEX IF NOT EXISTS idx_trades_base_account
+    ON trades (base_account, network, ledger_close_time DESC);
+
+CREATE INDEX IF NOT EXISTS idx_trades_counter_account
+    ON trades (counter_account, network, ledger_close_time DESC);
+
+CREATE INDEX IF NOT EXISTS idx_trades_ledger_close_time
+    ON trades (ledger_close_time DESC);
+
+CREATE TABLE IF NOT EXISTS trustline_changes (
+    id BIGSERIAL PRIMARY KEY,
+    account_address TEXT NOT NULL,
+    asset_code TEXT NOT NULL,
+    asset_issuer TEXT NOT NULL,
+    operation_id TEXT NOT NULL,
+    ledger_sequence BIGINT NOT NULL,
+    limit_before NUMERIC(20,7),
+    limit_after NUMERIC(20,7) NOT NULL,
+    changed_at TIMESTAMPTZ NOT NULL,
+    network TEXT NOT NULL DEFAULT 'mainnet',
+    CONSTRAINT trustline_changes_ledger_check CHECK (ledger_sequence > 0),
+    CONSTRAINT trustline_changes_limit_check CHECK (limit_after >= 0)
+);
+
+CREATE INDEX IF NOT EXISTS idx_trustline_changes_asset
+    ON trustline_changes (asset_code, asset_issuer, changed_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_trustline_changes_account
+    ON trustline_changes (account_address, changed_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_trustline_changes_ledger
+    ON trustline_changes (ledger_sequence);
+
+CREATE INDEX IF NOT EXISTS idx_trustline_changes_network
+    ON trustline_changes (network);
+
+CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_transactions_network_successful_page
+    ON transactions (network, successful, ledger DESC, hash DESC);
+
+CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_transactions_network_source_page
+    ON transactions (network, source_account, ledger DESC, hash DESC);
+
+CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_transactions_network_created_at
+    ON transactions (network, created_at DESC);
+
+
+-- ─── Signers, contract deployments, activity rollups (017) ───────────────────
+
+CREATE TABLE IF NOT EXISTS account_signers (
+  network text NOT NULL,
+  account_address text NOT NULL,
+  key text NOT NULL,
+  type text NOT NULL,
+  weight integer NOT NULL,
+  last_modified_ledger integer NOT NULL,
+  PRIMARY KEY (network, account_address, key)
+);
+
+CREATE INDEX IF NOT EXISTS idx_account_signers_lookup
+  ON account_signers (network, account_address);
+
+CREATE INDEX IF NOT EXISTS idx_sponsorships_by_sponsored
+  ON sponsorships (network, sponsored_id);
+
+CREATE TABLE IF NOT EXISTS contract_deployments (
+  network text NOT NULL,
+  contract_id text NOT NULL,
+  deployer text NOT NULL,
+  wasm_hash text NOT NULL,
+  deployed_ledger integer NOT NULL,
+  deployed_at timestamptz NOT NULL DEFAULT now(),
+  PRIMARY KEY (network, contract_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_contract_deployments_by_wasm
+  ON contract_deployments (network, wasm_hash);
+
+CREATE INDEX IF NOT EXISTS idx_contract_deployments_by_ledger
+  ON contract_deployments (network, deployed_ledger DESC);
+
+CREATE INDEX IF NOT EXISTS idx_contract_deployments_by_deployer
+  ON contract_deployments (network, deployer);
+
+CREATE TABLE IF NOT EXISTS activity_rollups (
+  network text NOT NULL,
+  granularity text NOT NULL CHECK (granularity IN ('hour', 'day')),
+  bucket_start timestamptz NOT NULL,
+  transaction_count integer NOT NULL DEFAULT 0,
+  operation_count integer NOT NULL DEFAULT 0,
+  active_accounts integer NOT NULL DEFAULT 0,
+  total_volume numeric NOT NULL DEFAULT 0,
+  updated_at timestamptz NOT NULL DEFAULT now(),
+  PRIMARY KEY (network, granularity, bucket_start)
+);
+
+CREATE INDEX IF NOT EXISTS idx_activity_rollups_range
+  ON activity_rollups (network, granularity, bucket_start);
+
+COMMENT ON TABLE activity_rollups IS
+  'Rolled-up activity aggregates for network statistics (#228, #229). '
+  'Updated as ledgers are indexed; read by networkStats and activityRollups queries.';

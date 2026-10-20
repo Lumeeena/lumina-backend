@@ -114,7 +114,7 @@ async function main(): Promise<void> {
       'Benchmark complete'
     );
   } finally {
-    await indexer.pool.end();
+    await Promise.all([indexer.pools.write.end(), indexer.pools.read.end()]);
   }
 }
 

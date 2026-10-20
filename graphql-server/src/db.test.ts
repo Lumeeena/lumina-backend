@@ -1,4 +1,5 @@
 import { test } from 'node:test';
+import { EventEmitter } from 'node:events';
 import assert from 'node:assert/strict';
 import type { Pool } from 'pg';
 import { Pool as PgPool } from 'pg';
@@ -6,9 +7,11 @@ import {
   getAccountFromDb,
   getAccounts,
   getEventsByContract,
+  getIndexedTip,
   getLedgers,
   getOperations,
   getTransactions,
+  handlePoolErrors,
   mapAccount,
   mapEvent,
   mapLedger,
@@ -110,6 +113,30 @@ test('mapOperation collapses asset_type/code/issuer into a single asset string',
   assert.equal(trustline.asset, 'USDC:GISSUER');
 });
 
+const operationRow = (type: string, details: Record<string, unknown>) => ({
+  network: 'mainnet', id: 'op', type, transaction_hash: 'tx', ledger: '100',
+  created_at: new Date('2026-01-01T00:00:00Z'), source_account: 'GABC', details,
+});
+
+test('mapOperation gives a pool-share trustline no asset string rather than "null:null"', () => {
+  // The projection returns JSON null for keys the record lacks, and a pool
+  // share has a type but no code or issuer.
+  const pool = mapOperation(operationRow('change_trust', { asset_type: 'liquidity_pool_shares', asset_code: null, asset_issuer: null }));
+  assert.equal(pool.asset, null);
+});
+
+test('mapOperation reads bump_sequence and manage_data fields by the keys Horizon uses', () => {
+  const bump = mapOperation(operationRow('bump_sequence', { bump_to: '279343990032449537' }));
+  assert.equal(bump.bumpSequence, '279343990032449537');
+  const data = mapOperation(operationRow('manage_data', { name: 'config', value: 'dmFsdWU=' }));
+  assert.equal(data.dataName, 'config');
+  assert.equal(data.dataValue, 'dmFsdWU=');
+  // `name` and `value` mean nothing on other types, so they are not borrowed.
+  const payment = mapOperation(operationRow('payment', { name: 'x', value: 'y' }));
+  assert.equal(payment.dataName, null);
+  assert.equal(payment.dataValue, null);
+});
+
 test('mapAccount converts snake_case balances/flags/thresholds to GraphQL shape', () => {
   const result = mapAccount({
     network: 'mainnet',
@@ -138,6 +165,7 @@ test('mapEvent JSON-encodes the value column for the String scalar', () => {
     id: 'evt1',
     type: 'contract',
     contract_id: 'CABC',
+    transaction_hash: 'tx1',
     ledger: '100',
     created_at: new Date('2026-01-01T00:00:00Z'),
     paging_token: 'tok1',
@@ -145,6 +173,7 @@ test('mapEvent JSON-encodes the value column for the String scalar', () => {
     value: { amount: '10' },
   });
   assert.equal(result.value, '{"amount":"10"}');
+  assert.equal(result.transactionHash, 'tx1');
 });
 
 test('getTransactions maps rows and passes limit/cursor params', async () => {
@@ -159,14 +188,14 @@ test('getTransactions maps rows and passes limit/cursor params', async () => {
   // The network is bound first and repeated in the cursor subquery: the same
   // hash exists on every network, so the keyset has to know which one.
   assert.deepEqual(queries[0]?.params, ['mainnet', 500, 'cursor-hash', 20]);
-  assert.match(queries[0]?.sql ?? '', /\(ledger, hash\) </);
+  assert.match(queries[0]?.sql ?? '', /\(ledger, hash\) < \(\$2::bigint, \$3::text\)/);
   assert.match(queries[0]?.sql ?? '', /ORDER BY ledger DESC, hash DESC/);
 });
 
 test('getTransactions uses an ascending tuple keyset when requested', async () => {
   const { pool, queries } = fakePool([]);
   await getTransactions(pool, 'mainnet', 20, encodeCursor('transactions', [500, 'cursor-hash']), { order: 'ASC' });
-  assert.match(queries[0]?.sql ?? '', /\(ledger, hash\) >/);
+  assert.match(queries[0]?.sql ?? '', /\(ledger, hash\) > \(\$2::bigint, \$3::text\)/);
   assert.match(queries[0]?.sql ?? '', /ORDER BY ledger ASC, hash ASC/);
 });
 
@@ -182,9 +211,11 @@ test('getTransactions composes filters with its stable keyset cursor', async () 
 
   assert.equal(
     queries[0]?.sql.replace(/\s+/g, ' ').trim(),
-    'SELECT hash, network, ledger, created_at, source_account, fee_charged, operation_count, successful, memo_type, memo FROM transactions WHERE network = $1 AND successful = $2 ' +
+    'SELECT hash, network, ledger, created_at, source_account, fee_charged, operation_count, successful, memo_type, memo ' +
+      'FROM transactions WHERE network = $1 AND successful = $2 ' +
       'AND created_at >= $3::timestamptz AND created_at <= $4::timestamptz ' +
-      'AND source_account = $5 AND (ledger, hash) > ($6::bigint, $7::text) ' +
+      'AND source_account = $5 AND (ledger, hash) > ' +
+      '($6::bigint, $7::text) ' +
       'ORDER BY ledger ASC, hash ASC LIMIT $8'
   );
   assert.deepEqual(queries[0]?.params, [
@@ -192,13 +223,52 @@ test('getTransactions composes filters with its stable keyset cursor', async () 
   ]);
 });
 
-test('getOperations builds WHERE clause only for provided filters', async () => {
+test('getTransactions binds filter values and pages by keyset, never OFFSET', async () => {
   const { pool, queries } = fakePool([]);
-  await getOperations(pool, { network: 'mainnet', account: 'GABC', limit: 10 });
-  assert.match(queries[0]?.sql ?? '', /WHERE network = \$1 AND source_account = \$2/);
+  // A value that would end the statement if it were ever concatenated in.
+  const sourceAccount = "GACCOUNT'; DROP TABLE transactions; --";
+
+  await getTransactions(pool, 'mainnet', 10, encodeCursor('transactions', [500, 'cursor-hash']), {
+    successful: true,
+    from: '2026-01-01T00:00:00Z',
+    to: '2026-01-31T23:59:59Z',
+    sourceAccount,
+  });
+
+  const sql = queries[0]?.sql ?? '';
+  const params = queries[0]?.params ?? [];
+
+  // Every filter is a placeholder and its value travels as a bind parameter:
+  // the statement text never carries one, hostile or not.
+  assert.match(sql, /network = \$1/);
+  assert.match(sql, /successful = \$2/);
+  assert.match(sql, /created_at >= \$3::timestamptz/);
+  assert.match(sql, /created_at <= \$4::timestamptz/);
+  assert.match(sql, /source_account = \$5/);
+  assert.deepEqual(params.slice(0, 5), [
+    'mainnet', true, '2026-01-01T00:00:00Z', '2026-01-31T23:59:59Z', sourceAccount,
+  ]);
+  assert.equal(params.length, 8);
+  assert.equal(params.at(-1), 10, 'limit is the last bound parameter');
+  assert.ok(!sql.includes(sourceAccount));
+  assert.ok(!sql.includes('2026-01-01T00:00:00Z'));
+
+  // Paging resumes on the (ledger, hash) tuple — an OFFSET would shift every
+  // subsequent page as new transactions land, duplicating a row across the seam.
+  assert.ok(!/OFFSET/i.test(sql));
+  assert.match(sql, /\(ledger, hash\) < \(\$6::bigint, \$7::text\)/);
+});
+
+test('getOperations binds provided filters without interpolating values', async () => {
+  const { pool, queries } = fakePool([]);
+  const account = "G' OR TRUE --";
+  const type = "PAYMENT' OR TRUE --";
+  await getOperations(pool, { network: 'mainnet', account, type, limit: 10 });
+  assert.match(queries[0]?.sql ?? '', /WHERE network = \$1 AND source_account = \$2 AND type = \$3/);
   assert.match(queries[0]?.sql ?? '', /jsonb_build_object\(/);
   assert.doesNotMatch(queries[0]?.sql ?? '', /SELECT \*|details,\s*indexed_at/);
-  assert.deepEqual(queries[0]?.params, ['mainnet', 'GABC', 10]);
+  assert.deepEqual(queries[0]?.params, ['mainnet', account, type.toLowerCase(), 10]);
+  assert.doesNotMatch(queries[0]?.sql ?? '', /G' OR TRUE|PAYMENT' OR TRUE/);
 });
 
 test('getOperations is scoped to one network even with no filters', async () => {
@@ -261,6 +331,19 @@ test('getLedgers rejects a cursor it could not have issued', async () => {
   assert.equal(queries.length, 0);
 });
 
+test('getIndexedTip reads the tip row instead of aggregating the table', async () => {
+  const { pool, queries } = fakePool([
+    { sequence: '900', indexed_at: new Date('2026-05-06T10:22:14Z') },
+  ]);
+
+  const tip = await getIndexedTip(pool, 'mainnet');
+
+  assert.deepEqual(tip, { sequence: 900, indexedAt: '2026-05-06T10:22:14.000Z' });
+  assert.match(queries[0]?.sql ?? '', /SELECT sequence, indexed_at FROM ledgers WHERE network = \$1 ORDER BY sequence DESC LIMIT 1/);
+  assert.doesNotMatch(queries[0]?.sql ?? '', /MAX\(/);
+  assert.deepEqual(queries[0]?.params, ['mainnet']);
+});
+
 // ── Accounts listing ─────────────────────────────────────────────────────────
 
 function accountRow(address: string, lastModifiedLedger = 100) {
@@ -309,7 +392,7 @@ test('accounts paginate on activity with a bound keyset, not a row lookup', asyn
   assert.ok(!/OFFSET/i.test(queries[0]?.sql ?? ''));
   // No subquery: the cursor carries the sort key, so a cursor survives the row
   // it names being re-indexed.
-  assert.ok(!/SELECT/i.test((queries[0]?.sql ?? '').replace(/SELECT [\s\S]+? FROM accounts/, '')));
+  assert.equal((queries[0]?.sql.match(/\bSELECT\b/gi) ?? []).length, 1);
 });
 
 test('accounts can be listed in address order instead', async () => {
@@ -324,14 +407,11 @@ test('accounts can be listed in address order instead', async () => {
 
 test('getOperations uses an ascending tuple keyset when requested', async () => {
   const { pool, queries } = fakePool([]);
-  await getOperations(pool, {
-    network: 'mainnet',
-    cursor: encodeCursor('operations', [900, 'op-9']),
-    limit: 10,
-    order: 'ASC',
-  });
-  assert.match(queries[0]?.sql ?? '', /\(ledger, id\) >/);
-  assert.match(queries[0]?.sql ?? '', /ORDER BY ledger ASC, id ASC/);
+  await getOperations(pool, { network: 'mainnet', cursor: encodeCursor('operations', [900, 'op-9']), limit: 10, order: 'ASC' });
+  assert.match(queries[0]?.sql ?? '', /\(ledger, id\) > \(\$2::bigint, \$3::text\)/);
+  assert.match(queries[0]?.sql ?? '', /ORDER BY ledger ASC, id ASC LIMIT \$4/);
+  assert.deepEqual(queries[0]?.params, ['mainnet', 900, 'op-9', 10]);
+  assert.doesNotMatch(queries[0]?.sql ?? '', /OFFSET/i);
 });
 
 test('getEventsByContract emits exactly the expected statement with every filter set', async () => {
@@ -348,14 +428,8 @@ test('getEventsByContract emits exactly the expected statement with every filter
 
 test('getEventsByContract uses an ascending tuple keyset when requested', async () => {
   const { pool, queries } = fakePool([]);
-  await getEventsByContract(pool, {
-    network: 'mainnet',
-    contractId: 'CABC',
-    cursor: encodeCursor('events', [900, 'evt-9']),
-    limit: 20,
-    order: 'ASC',
-  });
-  assert.match(queries[0]?.sql ?? '', /\(ledger, id\) >/);
+  await getEventsByContract(pool, { network: 'mainnet', contractId: 'CABC', cursor: encodeCursor('events', [900, 'evt-9']), limit: 20, order: 'ASC' });
+  assert.match(queries[0]?.sql ?? '', /\(ledger, id\) > \(\$3::bigint, \$4::text\)/);
   assert.match(queries[0]?.sql ?? '', /ORDER BY ledger ASC, id ASC/);
 });
 
@@ -378,4 +452,24 @@ test('the accounts listing never reaches Horizon', async () => {
   // row.
   assert.equal(queries.length, 1);
   assert.equal(queries[0]?.params.length, 2);
+});
+
+test('handlePoolErrors reports an idle client error instead of letting it end the process', async () => {
+  // The listener was lost once, in a rewrite of the pool construction, and the
+  // first Postgres restart then took the server and its subscriptions down.
+  const pool = new PgPool({ connectionString: 'postgresql://localhost:5432/lumina' });
+  const reported: string[] = [];
+  handlePoolErrors(pool, err => reported.push(err.message));
+  assert.doesNotThrow(() => pool.emit('error', new Error('terminating connection due to administrator command')));
+  assert.deepEqual(reported, ['terminating connection due to administrator command']);
+  await pool.end();
+});
+
+test('handlePoolErrors covers a client whose connection dies while it is checked out', async () => {
+  // pg-pool removes its own error listener for as long as a client is in use.
+  const pool = handlePoolErrors(new PgPool({ connectionString: 'postgresql://localhost:5432/lumina' }), () => undefined);
+  const client = new EventEmitter();
+  pool.emit('connect', client);
+  assert.doesNotThrow(() => client.emit('error', new Error('Connection terminated unexpectedly')));
+  await pool.end();
 });

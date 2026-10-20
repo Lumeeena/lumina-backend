@@ -1,4 +1,5 @@
 import { Pool } from 'pg';
+import { resolveDatabaseUrl } from '@lumina/shared';
 import { loadMigrations, runMigrations } from './migrations';
 
 async function main() {
@@ -6,7 +7,7 @@ async function main() {
   if (command !== 'up' && command !== 'status') {
     throw new Error('Usage: migrate <up|status>');
   }
-  const pool = new Pool({ connectionString: process.env.DATABASE_URL ?? 'postgresql://localhost:5432/lumina' });
+  const pool = new Pool({ connectionString: resolveDatabaseUrl() ?? 'postgresql://localhost:5432/lumina' });
   try {
     const status = await runMigrations(pool, loadMigrations(), command === 'up');
     console.log(`Applied: ${status.applied.length ? status.applied.join(', ') : '(none)'}`);

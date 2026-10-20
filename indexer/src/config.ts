@@ -5,11 +5,13 @@
  * Invalid values cause the process to exit immediately with a clear error message.
  */
 
+import { resolveDatabaseUrl } from '@lumina/shared';
 import { subsystem } from './logger';
 import { retentionWindowConflicts, RETENTION_TABLES, unlimitedRetentionWindows, type RetentionWindows } from './retention';
 
 const log = subsystem('config');
 
+/** Validated indexer settings resolved from environment variables and defaults. */
 export interface Config {
   horizonUrl: string;
   horizonAuthToken: string | undefined;
@@ -21,7 +23,14 @@ export interface Config {
   startLedger: number | undefined;
   backfillStartLedger: number | undefined;
   backfillEndLedger: number | undefined;
-  dbPoolMax: number | undefined;
+  /**
+   * Maximum connections in the write pool (ledger indexing, events, trades,
+   * retries, retention). `DB_POOL_MAX` remains the shared fallback for both
+   * pools; unset on either level falls through to pg's default of 10.
+   */
+  dbWritePoolMax: number | undefined;
+  /** Maximum connections in the read pool (gap scans, cursor probes, schema loads). */
+  dbReadPoolMax: number | undefined;
   dbPoolIdleTimeoutMs: number | undefined;
   dbPoolConnectionTimeoutMs: number | undefined;
   sorobanRpcUrl: string | undefined;
@@ -48,11 +57,16 @@ export interface Config {
   healthPort: number;
   ledgerRetryAttempts: number;
   ledgerRetryBaseMs: number;
+  /** Freshness window for a network's cached account data, reducing repeat Horizon requests. */
   accountCacheTtlMs: number;
+  /** Hard cap on cached accounts, bounding memory use when many addresses are observed. */
   accountCacheMaxSize: number;
+  /** Re-scan this many recent ledgers because event visibility can lag the reported RPC tip. */
   eventsSafetyLagLedgers: number;
   sorobanMinRequestIntervalMs: number;
+  /** Bounds event-processing work per poll cycle so a busy range cannot monopolize the indexer loop. */
   sorobanMaxEventsPerCycle: number;
+  /** How far back Soroban RPC event requests may look; distinct from database retention. */
   sorobanRetentionWindowLedgers: number;
   /**
    * Per-table retention windows in days of chain time; `0` keeps everything.
@@ -139,6 +153,19 @@ function stringWithDefault(name: string, defaultValue: string): string {
 }
 
 /**
+ * The database URL from `DATABASE_URL_FILE`, `DATABASE_URL` and
+ * `DATABASE_PASSWORD_FILE`; see docs/SECRETS.md.
+ */
+function databaseUrlWithDefault(defaultValue: string): string {
+  try {
+    return resolveDatabaseUrl('DATABASE_URL') ?? defaultValue;
+  } catch (err) {
+    log.fatal(`Configuration error: ${err instanceof Error ? err.message : String(err)}`);
+    process.exit(1);
+  }
+}
+
+/**
  * Redacts the password from a database URL for logging.
  */
 function redactDatabaseUrl(url: string): string {
@@ -154,9 +181,9 @@ function redactDatabaseUrl(url: string): string {
 }
 
 /**
- * Env var holding a table's retention window, e.g. `RETENTION_OPERATIONS_DAYS`.
- * Derived from the table name rather than repeated, so adding a prunable table
- * to retention.ts cannot leave it without a way to configure.
+ * Derives the environment variable for a table's retention window, e.g.
+ * `RETENTION_OPERATIONS_DAYS`. Deriving it from the table name ensures a newly
+ * prunable table cannot be left without a corresponding setting.
  */
 export function retentionEnvVar(table: string): string {
   return `RETENTION_${table.toUpperCase()}_DAYS`;
@@ -183,18 +210,23 @@ export function parseRetentionWindows(): RetentionWindows {
  * Throws an error and exits if any configuration is invalid.
  */
 export function loadConfig(): Config {
+  // DB_POOL_MAX remains the shared fallback for both pools: a deployment that
+  // sets only it keeps its existing sizing, while DB_WRITE_POOL_MAX and
+  // DB_READ_POOL_MAX let each pool be sized on its own.
+  const sharedPoolMax = optionalInt('DB_POOL_MAX', 1);
   const config: Config = {
     horizonUrl: stringWithDefault('HORIZON_URL', 'https://horizon.stellar.org'),
     horizonAuthToken: optionalString('HORIZON_AUTH_TOKEN'),
     horizonMinRequestIntervalMs: intWithDefault('HORIZON_MIN_REQUEST_INTERVAL_MS', 100, 1),
     horizonMaxRequestIntervalMs: intWithDefault('HORIZON_MAX_REQUEST_INTERVAL_MS', 10000, 1),
     horizonTipWeightFactor: intWithDefault('HORIZON_TIP_WEIGHT_FACTOR', 2, 1),
-    databaseUrl: stringWithDefault('DATABASE_URL', 'postgresql://localhost:5432/lumina'),
+    databaseUrl: databaseUrlWithDefault('postgresql://localhost:5432/lumina'),
     pollIntervalMs: intWithDefault('POLL_INTERVAL_MS', 5000, 100),
     startLedger: optionalInt('START_LEDGER', 1),
     backfillStartLedger: optionalInt('BACKFILL_START_LEDGER', 1),
     backfillEndLedger: optionalInt('BACKFILL_END_LEDGER', 1),
-    dbPoolMax: optionalInt('DB_POOL_MAX', 1),
+    dbWritePoolMax: optionalInt('DB_WRITE_POOL_MAX', 1) ?? sharedPoolMax,
+    dbReadPoolMax: optionalInt('DB_READ_POOL_MAX', 1) ?? sharedPoolMax,
     dbPoolIdleTimeoutMs: optionalInt('DB_POOL_IDLE_TIMEOUT', 1000),
     dbPoolConnectionTimeoutMs: optionalInt('DB_POOL_CONNECTION_TIMEOUT', 0),
     sorobanRpcUrl: optionalString('SOROBAN_RPC_URL'),
@@ -209,6 +241,8 @@ export function loadConfig(): Config {
     registryContractId: optionalString('REGISTRY_CONTRACT_ID'),
     registryReadAccount: optionalString('REGISTRY_READ_ACCOUNT'),
     registryNetworkPassphrase: optionalString('REGISTRY_NETWORK_PASSPHRASE'),
+    // Registry reads are independent of the faster ledger poll; a minute keeps
+    // discovery reasonably fresh without repeatedly querying registry state.
     registryPollIntervalMs: intWithDefault('REGISTRY_POLL_INTERVAL_MS', 60_000, 1000),
     healthPort: intWithDefault('HEALTH_PORT', 9090, 1, 65535),
     // Retry policy for a ledger whose fetch/index fails. More attempts ride
@@ -218,11 +252,20 @@ export function loadConfig(): Config {
     // see the indexer environment-variable table in the README.
     ledgerRetryAttempts: intWithDefault('LEDGER_RETRY_ATTEMPTS', 3, 1),
     ledgerRetryBaseMs: intWithDefault('LEDGER_RETRY_BASE_MS', 500, 1),
+    // A five-minute freshness window avoids repeatedly fetching busy accounts
+    // every poll; the per-network cache and size cap bound the stale-data cost.
     accountCacheTtlMs: intWithDefault('ACCOUNT_CACHE_TTL_MS', 5 * 60 * 1000, 1),
+    // The hard cap complements the TTL: a long-running process cannot retain
+    // an unbounded number of one-off addresses.
     accountCacheMaxSize: 50_000,
+    // A short overlap is cheap to re-scan and avoids permanently skipping
+    // events that become visible after the RPC has reported its latest ledger.
     eventsSafetyLagLedgers: 3,
+    // Bound per-cycle work so a busy event range cannot stall other indexer work.
     sorobanMinRequestIntervalMs: intWithDefault('SOROBAN_MIN_REQUEST_INTERVAL_MS', 100, 1),
     sorobanMaxEventsPerCycle: intWithDefault('SOROBAN_MAX_EVENTS_PER_CYCLE', 5000, 100),
+    // Provider event-history availability varies; keep the default request
+    // window bounded and let operators widen it to match their provider.
     sorobanRetentionWindowLedgers: intWithDefault('SOROBAN_RETENTION_WINDOW_LEDGERS', 300_000, 1),
     retentionWindows: parseRetentionWindows(),
     // Once an hour by default: long enough that the pass is not itself a load
@@ -295,7 +338,8 @@ export function loadConfig(): Config {
       startLedger: config.startLedger,
       backfillStartLedger: config.backfillStartLedger,
       backfillEndLedger: config.backfillEndLedger,
-      dbPoolMax: config.dbPoolMax,
+      dbWritePoolMax: config.dbWritePoolMax,
+      dbReadPoolMax: config.dbReadPoolMax,
       dbPoolIdleTimeoutMs: config.dbPoolIdleTimeoutMs,
       dbPoolConnectionTimeoutMs: config.dbPoolConnectionTimeoutMs,
       sorobanRpcUrl: config.sorobanRpcUrl,

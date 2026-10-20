@@ -3,33 +3,45 @@ import * as assert from 'node:assert/strict';
 import { loadConfig } from './config';
 import { isRetentionEnabled, retentionWindowConflicts, retainedTables, unlimitedRetentionWindows } from './retention';
 
-test('config parses comma-separated contract IDs', () => {
-  process.env['INDEXED_CONTRACT_IDS'] = 'C' + '0'.repeat(55) + ',C' + '1'.repeat(55) + ', C' + '2'.repeat(55);
-  process.env['SOROBAN_RPC_URL'] = 'http://localhost:8000';
-  
-  // Verify parsing logic
-  const ids = (process.env['INDEXED_CONTRACT_IDS'] ?? '')
-    .split(',')
-    .map(id => id.trim())
-    .filter(Boolean);
-  
-  assert.equal(ids.length, 3);
-  
-  delete process.env['INDEXED_CONTRACT_IDS'];
-  delete process.env['SOROBAN_RPC_URL'];
+function withEnv(env: Record<string, string | undefined>, fn: () => void): void {
+  const originals = new Map(Object.keys(env).map(name => [name, process.env[name]]));
+  for (const [name, value] of Object.entries(env)) {
+    if (value === undefined) delete process.env[name];
+    else process.env[name] = value;
+  }
+  try {
+    fn();
+  } finally {
+    for (const [name, value] of originals) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+  }
+}
+
+test('config parses comma-separated contract IDs and storage keys', () => {
+  withEnv({
+    INDEXED_CONTRACT_IDS: 'C' + '0'.repeat(55) + ',C' + '1'.repeat(55) + ', C' + '2'.repeat(55),
+    INDEXED_CONTRACT_STORAGE_KEYS: ' key-one, ,key-two ',
+    SOROBAN_RPC_URL: 'http://localhost:8000',
+  }, () => {
+    const cfg = loadConfig();
+
+    assert.deepEqual(cfg.indexedContractIds, ['C' + '0'.repeat(55), 'C' + '1'.repeat(55), 'C' + '2'.repeat(55)]);
+    assert.deepEqual(cfg.indexedContractStorageKeys, ['key-one', 'key-two']);
+  });
 });
 
-test('config handles empty contract IDs list', () => {
-  process.env['INDEXED_CONTRACT_IDS'] = '';
-  
-  const ids = (process.env['INDEXED_CONTRACT_IDS'] ?? '')
-    .split(',')
-    .map(id => id.trim())
-    .filter(Boolean);
-  
-  assert.equal(ids.length, 0);
-  
-  delete process.env['INDEXED_CONTRACT_IDS'];
+test('config handles empty contract ID and storage key lists', () => {
+  withEnv({
+    INDEXED_CONTRACT_IDS: '',
+    INDEXED_CONTRACT_STORAGE_KEYS: '',
+  }, () => {
+    const cfg = loadConfig();
+
+    assert.deepEqual(cfg.indexedContractIds, []);
+    assert.deepEqual(cfg.indexedContractStorageKeys, []);
+  });
 });
 
 test('config redacts database password', () => {
@@ -102,6 +114,7 @@ test('retention defaults to unlimited for every table', () => {
     operations: 0,
     contract_events: 0,
     custom_events: 0,
+    account_state_history: 0,
   });
   assert.equal(isRetentionEnabled(cfg.retentionWindows), false);
   assert.equal(cfg.retentionPruneIntervalMs, 3_600_000);
@@ -181,6 +194,9 @@ test('a negative retention window is rejected rather than silently treated as un
 
 /** Load config with `process.exit` stubbed to throw, and report whether it was fatal. */
 function loadConfigFatal(env: Record<string, string>): boolean {
+  const originals = new Map(
+    [...new Set([...RETENTION_VARS, ...Object.keys(env)])].map(name => [name, process.env[name]])
+  );
   clearRetentionEnv();
   for (const [name, value] of Object.entries(env)) process.env[name] = value;
   const originalExit = process.exit;
@@ -195,7 +211,10 @@ function loadConfigFatal(env: Record<string, string>): boolean {
     return true;
   } finally {
     process.exit = originalExit;
-    clearRetentionEnv();
+    for (const [name, value] of originals) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
   }
 }
 
@@ -218,6 +237,10 @@ test('a child window shorter than its parent is rejected', () => {
   // so transactions must be pruned at least 30 days back. 7 days leaves
   // transactions from 7-30 days ago still referencing the ledgers being deleted.
   assert.equal(loadConfigFatal({ RETENTION_LEDGERS_DAYS: '30', RETENTION_TRANSACTIONS_DAYS: '7' }), true);
+});
+
+test('a backfill range with its start after its end is rejected', () => {
+  assert.equal(loadConfigFatal({ BACKFILL_START_LEDGER: '20', BACKFILL_END_LEDGER: '10' }), true);
 });
 
 test('a child window equal to its parent is accepted', () => {

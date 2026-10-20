@@ -1,5 +1,5 @@
 /**
- * The indexer's HTTP surface: `/health`, `/ready` and `/metrics`.
+ * The indexer's HTTP surface: `/health`, `/ready`, `/live` and `/metrics`.
  *
  * The indexer is a polling loop with no server of its own, which meant nothing
  * outside the process could tell a working one from a wedged one — Docker's
@@ -15,6 +15,7 @@ import { createServer, type Server } from 'http';
 import type { Pool } from 'pg';
 import type { Config } from './config';
 import type { RetentionWindows } from './retention';
+import { samplePoolSaturation, type Pools } from './db';
 import { metricsContentType, renderMetrics } from './metrics';
 import { subsystem } from './logger';
 
@@ -52,6 +53,7 @@ export interface NetworkState {
   latestHorizonLedger: number;
   /** Unix ms of the last successful index on this network, or null if none yet. */
   lastIndexedAt: number | null;
+  horizonPaused?: boolean;
 }
 
 export interface IndexerState {
@@ -77,6 +79,7 @@ export interface NetworkHealth {
   latestHorizonLedger: number;
   lagLedgers: number;
   secondsSinceLastIndex: number | null;
+  horizonPaused: boolean;
 }
 
 export interface HealthReport {
@@ -121,7 +124,8 @@ export interface DebugConfiguration {
     horizonUrl: string | null;
     pollIntervalMs: number;
     startLedger: number | null;
-    dbPoolMax: number | null;
+    dbWritePoolMax: number | null;
+    dbReadPoolMax: number | null;
     dbPoolIdleTimeoutMs: number | null;
     dbPoolConnectionTimeoutMs: number | null;
     sorobanRpcUrl: string | null;
@@ -150,13 +154,14 @@ export interface DebugConfiguration {
 }
 
 export type DebugNetworkInput = Omit<DebugNetworkConfiguration, 'horizonUrl' | 'sorobanRpcUrl'> & {
-  horizonUrl: string;
+  horizonUrl: string | string[];
   sorobanRpcUrl: string | undefined;
 };
 
 /** Expose operational configuration without returning URL credentials or opaque tokens. */
-export function redactEndpoint(value: string | undefined): string | null {
+export function redactEndpoint(value: string | string[] | undefined): string | null {
   if (!value) return null;
+  if (Array.isArray(value)) return value.map(endpoint => redactEndpoint(endpoint)).filter(Boolean).join(', ');
   try {
     const parsed = new URL(value);
     const path = parsed.pathname !== '/' ? '/[redacted]' : '';
@@ -179,7 +184,8 @@ export function buildDebugConfiguration(
       horizonUrl: redactEndpoint(config.horizonUrl),
       pollIntervalMs: config.pollIntervalMs,
       startLedger: config.startLedger ?? null,
-      dbPoolMax: config.dbPoolMax ?? null,
+      dbWritePoolMax: config.dbWritePoolMax ?? null,
+      dbReadPoolMax: config.dbReadPoolMax ?? null,
       dbPoolIdleTimeoutMs: config.dbPoolIdleTimeoutMs ?? null,
       dbPoolConnectionTimeoutMs: config.dbPoolConnectionTimeoutMs ?? null,
       sorobanRpcUrl: redactEndpoint(config.sorobanRpcUrl),
@@ -293,6 +299,12 @@ export async function buildHealthReport(
     state.lastIndexedAt === null ? null : (now - state.lastIndexedAt) / 1000;
 
   const lagLedgers = Math.max(0, state.latestHorizonLedger - state.latestIndexedLedger);
+  const paused = state.networks?.some(entry => entry.horizonPaused) ?? false;
+  checks.push({
+    name: 'horizon-availability',
+    ok: !paused,
+    detail: paused ? 'all configured Horizon endpoints are unavailable; indexing is paused' : undefined,
+  });
 
   const uptimeSeconds = (now - state.startedAt) / 1000;
   const startingTolerance = uptimeSeconds <= thresholds.startToleranceSeconds;
@@ -335,6 +347,7 @@ export async function buildHealthReport(
       latestHorizonLedger: entry.latestHorizonLedger,
       lagLedgers: Math.max(0, entry.latestHorizonLedger - entry.latestIndexedLedger),
       secondsSinceLastIndex: age,
+      horizonPaused: entry.horizonPaused ?? false,
     };
   });
 
@@ -362,11 +375,37 @@ export function healthStatusCode(report: HealthReport): number {
   return report.status === 'degraded' ? 503 : 200;
 }
 
+/**
+ * HTTP status for `/live`: 503 only when the loop has stopped making progress.
+ *
+ * A liveness failure restarts the container, so it answers only the question a
+ * restart can fix — is this process wedged? Lag is left out on purpose: after a
+ * restore or an outage the indexer is legitimately hundreds of ledgers behind
+ * while it catches up, and restarting it then throws that progress away and
+ * crash-loops. The database is left out too (the report is built without a
+ * pool), because restarting every indexer during a database outage repairs
+ * nothing and adds reconnect load to a database that is already struggling.
+ * Both still fail `/health` and `/ready`, which is where an alert belongs.
+ */
+export function livenessStatusCode(report: HealthReport): number {
+  const freshness = report.checks.find(check => check.name === 'indexing-freshness');
+  return freshness === undefined || freshness.ok ? 200 : 503;
+}
+
 export interface HealthServerOptions {
   port: number;
   getState: () => IndexerState;
   getDebugConfiguration: () => DebugConfiguration;
+  /**
+   * The pool the database reachability probe runs against — the write pool,
+   * because a process that cannot write is not indexing.
+   */
   pool: Pool | null;
+  /**
+   * Both pools, sampled into the per-pool saturation gauges at scrape time.
+   * Absent in tests and tools that serve no metrics.
+   */
+  pools?: Pools | null;
   thresholds?: HealthThresholds;
 }
 
@@ -375,6 +414,7 @@ export function startHealthServer(options: HealthServerOptions): Server {
     const url = (req.url ?? '/').split('?')[0];
 
     if (url === '/metrics') {
+      if (options.pools) samplePoolSaturation(options.pools);
       renderMetrics()
         .then(body => {
           res.writeHead(200, { 'Content-Type': metricsContentType() });
@@ -403,6 +443,20 @@ export function startHealthServer(options: HealthServerOptions): Server {
         res.writeHead(500, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ error: 'debug configuration unavailable' }));
       }
+      return;
+    }
+
+    if (url === '/live') {
+      buildHealthReport(options.getState(), null, options.thresholds)
+        .then(report => {
+          res.writeHead(livenessStatusCode(report), { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify(report, null, 2));
+        })
+        .catch(err => {
+          log.error({ err: err instanceof Error ? err.message : err }, 'liveness check failed');
+          res.writeHead(500, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ status: 'degraded', error: 'liveness check failed' }));
+        });
       return;
     }
 

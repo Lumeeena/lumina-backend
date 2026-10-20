@@ -17,11 +17,19 @@
     "explain:seed": "ts-node-transpile-only --project db/explain/tsconfig.json db/explain/run.ts seed",
     "explain:check": "ts-node-transpile-only --project db/explain/tsconfig.json db/explain/run.ts check",
     "explain:update": "ts-node-transpile-only --project db/explain/tsconfig.json db/explain/run.ts update",
+    "audit:trustlines": "ts-node-transpile-only --project db/explain/tsconfig.json db/audit/trustlines.ts",
+    "audit:assets": "ts-node-transpile-only --project db/explain/tsconfig.json db/audit/assets.ts",
+    "audit:operations": "ts-node-transpile-only --project db/explain/tsconfig.json db/audit/operations.ts",
     "test:indexer": "cd indexer && npm test",
     "test:graphql": "cd graphql-server && npm test",
+    "test:contract": "TS_NODE_PROJECT=test/tsconfig.json node --require ts-node/register --test test/contract/operationsDetails.test.ts",
+    "test:chaos": "TS_NODE_PROJECT=test/tsconfig.json node --require ts-node/register --test test/chaos/chaos.test.ts",
+    "test:soak": "TS_NODE_PROJECT=test/tsconfig.json node --require ts-node/register test/soak/run.ts",
+    "test:soak:detector": "TS_NODE_PROJECT=test/tsconfig.json node --require ts-node/register --test test/soak/trend.test.ts test/soak/detectsLeak.test.ts",
     "manage-keys": "npm run --prefix graphql-server manage-keys --",
     "migrate": "npm run --prefix graphql-server migrate --",
-    "build:shared": "tsc -p shared/tsconfig.json"
+    "build:shared": "tsc -p shared/tsconfig.json",
+    "check:data-dictionary": "ts-node db/check-data-dictionary.ts"
   },
   "engines": {
     "node": ">=18 <=22"

@@ -27,7 +27,9 @@ import {
   parseAllowAnonymous,
 } from './auth';
 import { buildServerHealth, metricsPlugin, samplePool, serverHealthStatusCode } from './observability';
+import { handlePoolErrors } from './db';
 import {
+  dbPoolErrors,
   listenerConnected,
   metricsContentType,
   renderMetrics,
@@ -45,9 +47,11 @@ import {
   requestTimeoutMiddleware,
 } from './security';
 import { createErrorMasker, shouldMaskErrors } from './errorMasking';
+import { ERROR_CODES, errorWithStableCode, withStableErrorCode } from './errorCodes';
 import { loadSlowOperationThresholdMs, slowOperationPlugin } from './slowOperations';
 import { scheduledExportOptions, startScheduledExports } from './scheduledExport';
 import { loadMigrations, runMigrations } from './migrations';
+import { resolveDatabaseUrl } from '@lumina/shared';
 
 interface Context extends BaseContext {
   correlationId?: string;
@@ -63,12 +67,15 @@ const VERSION = packageJson.version;
 
 const typeDefs = readFileSync(join(__dirname, 'schema.graphql'), 'utf-8');
 
-const DATABASE_URL = process.env['DATABASE_URL'] ?? 'postgresql://localhost:5432/lumina';
+// Each URL may instead come from a file (`DATABASE_URL_FILE`), or have its
+// password come from one (`DATABASE_PASSWORD_FILE`), so a secret store never
+// has to put the credential in the environment. See docs/SECRETS.md.
+const DATABASE_URL = databaseUrlOrExit('DATABASE_URL') ?? 'postgresql://localhost:5432/lumina';
 // Optional read-only connection string. When set, HTTP queries are served from
 // the replica; writes, migrations, health/metrics sampling, the export COPY
 // stream and LISTEN all stay on the primary below. See
 // docs/DATABASE_OPERATIONS.md for the replication-lag caveats.
-const READ_DATABASE_URL = process.env['READ_DATABASE_URL']?.trim() || null;
+const READ_DATABASE_URL = databaseUrlOrExit('READ_DATABASE_URL')?.trim() || null;
 const PORT = parseInt(process.env['PORT'] ?? '4000', 10);
 const MAX_SUBSCRIPTIONS = parseInt(process.env['MAX_SUBSCRIPTIONS'] ?? '500', 10);
 const SUBSCRIPTION_QUEUE_LIMIT = parseInt(process.env['SUBSCRIPTION_QUEUE_LIMIT'] ?? '64', 10);
@@ -103,6 +110,12 @@ const readPool = READ_DATABASE_URL && READ_DATABASE_URL !== DATABASE_URL
       connectionTimeoutMillis: DB_POOL_CONNECTION_TIMEOUT,
     })
   : pool;
+for (const p of new Set([pool, readPool])) {
+  handlePoolErrors(p, err => {
+    dbPoolErrors.inc();
+    log.error({ err: err.message }, 'unexpected PostgreSQL pool client error; pool will replace the client');
+  });
+}
 const schema = makeExecutableSchema({ typeDefs, resolvers });
 
 const notifier = new LedgerNotifier({
@@ -150,6 +163,16 @@ async function main() {
         for (const error of errors) {
           log.error({ err: error.message }, 'subscription error');
         }
+        // graphql-ws serialises these itself, so they never reach Apollo's
+        // formatError; give each one a stable code before it goes on the wire.
+        return errors.filter((error): error is GraphQLError => error instanceof GraphQLError).map(errorWithStableCode);
+      },
+      // Execution errors (a resolver failing while the subscription is set up)
+      // arrive as a `next` payload rather than through onError, so they are
+      // coded here as well.
+      onNext: (_ctx, _message, _args, result) => {
+        if (!result.errors?.length) return undefined;
+        return { ...result, errors: result.errors.map(errorWithStableCode) };
       },
       // A subscription refused for being over the cap should close cleanly with
       // a reason, not surface as an unhandled server error.
@@ -164,7 +187,9 @@ async function main() {
           // Returned as a GraphQLError so graphql-ws sends the client a proper
           // `error` message and closes the operation, rather than the
           // subscription failing later as an unhandled server error.
-          return [new GraphQLError(new SubscriberLimitError(MAX_SUBSCRIPTIONS).message)];
+          return [new GraphQLError(new SubscriberLimitError(MAX_SUBSCRIPTIONS).message, {
+            extensions: { code: ERROR_CODES.RATE_LIMITED },
+          })];
         }
         return undefined;
       },
@@ -178,9 +203,10 @@ async function main() {
     // production unless GRAPHQL_INTROSPECTION=true.
     introspection: security.introspection,
     // Database timeouts are reported as a coded, actionable message rather
-    // than a generic internal error.
+    // than a generic internal error; deliberate errors get their own code;
     // then anything unexpected is masked behind a correlation id in production.
-    formatError: (formatted, error) => maskError(formatTimeoutError(formatted, error), error),
+    formatError: (formatted, error) =>
+      maskError(withStableErrorCode(formatTimeoutError(formatted, error), error), error),
     persistedQueries,
     plugins: [
       queryLimitsPlugin(security),
@@ -214,6 +240,15 @@ async function main() {
 
   // Ahead of the GraphQL middleware so an operator can always reach them, even
   // while the schema layer is unhappy.
+  //
+  // `/live` is the liveness probe: answering at all is the whole check. It
+  // deliberately ignores the database, which `/health` (the readiness probe)
+  // covers — a database outage should take replicas out of rotation, not
+  // restart every one of them at once.
+  app.get('/live', (_req, res) => {
+    res.json({ status: 'ok', uptimeSeconds: Math.round((Date.now() - startedAt) / 1000) });
+  });
+
   app.get('/health', (_req, res) => {
     buildServerHealth({
       pool,
@@ -359,6 +394,16 @@ main().catch(err => {
   log.fatal({ err: err instanceof Error ? err.message : err }, 'failed to start graphql server');
   process.exit(1);
 });
+
+/** A misconfigured secret is a startup failure, reported without the value. */
+function databaseUrlOrExit(name: string): string | undefined {
+  try {
+    return resolveDatabaseUrl(name);
+  } catch (err) {
+    log.fatal({ err: err instanceof Error ? err.message : err }, 'invalid database configuration');
+    process.exit(1);
+  }
+}
 
 /** Never log a database URL with its password in it. */
 function redactUrl(url: string): string {

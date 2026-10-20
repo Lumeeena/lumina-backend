@@ -1,26 +1,31 @@
 /**
- * Durable retry worker for failed ledgers.
- * 
- * Runs independently of the forward indexing loop, periodically checking
- * the retry queue and attempting to re-index failed ledgers. This ensures
- * failures are retried after process restarts and don't block forward progress.
+ * Drains the durable ledger retry queue independently of the forward indexer.
+ *
+ * The forward loop records failures in PostgreSQL after its bounded inline
+ * retries are exhausted. This worker picks those rows up on a later pass so a
+ * transient Horizon or database outage does not permanently strand a ledger
+ * or hold the forward cursor back. A successful retry removes the row; a
+ * false result or thrown error leaves it available for a future poll.
  */
 
-import type { Pool } from 'pg';
+import { getPendingRetries, removeLedgerFromRetryQueue, type Pools } from './db';
 import { subsystem } from './logger';
-import { getPendingRetries, removeLedgerFromRetryQueue } from './db';
 
 const log = subsystem('retry-worker');
 
 export interface RetryWorkerOptions {
-  pool: Pool;
+  /** Read and write pools: queue scans run on the read side, removals on the write side. */
+  pools: Pools;
+  /** Network name used to prevent retries crossing network boundaries. */
   network: string;
+  /** Re-indexes one ledger and resolves `true` only when it is complete. */
   indexOne: (sequence: number) => Promise<boolean>;
+  /** Delay between queue polls. Defaults to the 30-second production cadence. */
   pollIntervalMs?: number;
 }
 
 export class RetryWorker {
-  private pool: Pool;
+  private pools: Pools;
   private network: string;
   private indexOne: (sequence: number) => Promise<boolean>;
   private pollIntervalMs: number;
@@ -28,12 +33,21 @@ export class RetryWorker {
   private stopped = false;
 
   constructor(options: RetryWorkerOptions) {
-    this.pool = options.pool;
+    this.pools = options.pools;
     this.network = options.network;
     this.indexOne = options.indexOne;
-    this.pollIntervalMs = options.pollIntervalMs ?? 30000; // Default 30 seconds
+    // The production caller uses the same 30-second cadence explicitly. The
+    // default keeps direct users of this worker on that operational policy.
+    this.pollIntervalMs = options.pollIntervalMs ?? 30000;
   }
 
+  /**
+   * Start polling until {@link stop} is called.
+   *
+   * A failed poll is isolated to its cycle and does not terminate the worker;
+   * the next poll can recover from a transient database failure. Calling
+   * `start` while already running is a no-op.
+   */
   async start(): Promise<void> {
     if (this.running) return;
     this.running = true;
@@ -51,7 +65,8 @@ export class RetryWorker {
         );
       }
 
-      // Wait before next cycle
+      // Wait before the next cycle. This also prevents a permanently empty
+      // queue from turning into a tight database polling loop.
       await new Promise(resolve => setTimeout(resolve, this.pollIntervalMs));
     }
 
@@ -59,12 +74,18 @@ export class RetryWorker {
     log.info({ network: this.network }, 'retry worker stopped');
   }
 
+  /** Request a graceful stop after the current retry attempt finishes. */
   stop(): void {
     this.stopped = true;
   }
 
+  /** Process at most ten due ledgers, preserving queue rows on failure. */
   private async processRetries(): Promise<void> {
-    const pendingLedgers = await getPendingRetries(this.pool, this.network, 10);
+    // Ten rows per pass bounds the work done by one cycle while allowing the
+    // next poll to continue draining a larger backlog. Queue reads run on the
+    // read pool: a backlog scan must not take a connection from the write
+    // path, which is about to re-index these very ledgers.
+    const pendingLedgers = await getPendingRetries(this.pools.read, this.network, 10);
 
     if (pendingLedgers.length === 0) return;
 
@@ -79,7 +100,7 @@ export class RetryWorker {
       try {
         const success = await this.indexOne(ledger);
         if (success) {
-          await removeLedgerFromRetryQueue(this.pool, this.network, ledger);
+          await removeLedgerFromRetryQueue(this.pools.write, this.network, ledger);
           log.info({ network: this.network, ledger }, 'retry succeeded; removed from queue');
         }
       } catch (err) {

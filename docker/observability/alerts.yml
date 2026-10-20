@@ -1,6 +1,11 @@
 # Alerting thresholds, kept beside the dashboard so "what counts as unhealthy"
 # has exactly one definition. These mirror the indexer's own /health
 # thresholds — a page and a failing container healthcheck should not disagree.
+#
+# Aligned with SLOs defined in docs/SLOS.md:
+# - API availability: 99.9% (0.1% error budget)
+# - Indexing freshness: < 20 ledgers lag
+# - Horizon availability: < 0.1% rate-limited requests
 groups:
   - name: lumina-indexing
     rules:
@@ -16,26 +21,28 @@ groups:
           runbook: "See README — 'Indexing lag is high'"
 
       - alert: IndexingLagHigh
+        # SLO: Indexing lag < 20 ledgers (aligned with freshness objective)
         expr: lumina_indexing_lag_ledgers > 20
         for: 5m
         labels:
           severity: warning
         annotations:
-          summary: "Indexer is more than 20 ledgers behind Horizon"
+          summary: "Indexer is more than 20 ledgers behind Horizon (SLO breach)"
           runbook: "See README — 'Indexing lag is high'"
 
       - alert: HorizonRateLimited
-        # The incident this whole layer exists because of. A sustained 429 rate
-        # silently breaks account lookups.
+        # SLO: Horizon rate limit responses < 0.1% of requests
+        # Alert when sustained rate limiting exceeds SLO threshold
         expr: rate(lumina_horizon_requests_total{status="429"}[5m]) > 0.1
         for: 5m
         labels:
           severity: warning
         annotations:
-          summary: "Horizon is rate limiting us"
+          summary: "Horizon is rate limiting us (SLO breach)"
           runbook: "The adaptive rate limiting will automatically back off. Check lumina_horizon_throttle_interval_ms metric. Consider setting HORIZON_AUTH_TOKEN for higher limits."
 
       - alert: IndexingErrorRateHigh
+        # SLO-aligned: alert when error rate indicates reliability issue
         expr: rate(lumina_indexing_errors_total[5m]) > 0.05
         for: 10m
         labels:
@@ -44,6 +51,7 @@ groups:
           summary: "Indexer loops are erroring repeatedly"
 
       - alert: DatabasePoolErrors
+        # SLO: Database pool errors should be minimal
         expr: increase(lumina_indexer_db_pool_errors_total[5m]) > 0
         for: 1m
         labels:
@@ -51,9 +59,24 @@ groups:
         annotations:
           summary: "Indexer PostgreSQL pool is replacing failed clients"
 
+      - alert: IndexerDatabasePoolWaiting
+        # The failure the pool split exists to catch: work is queuing for a
+        # connection instead of running. On the write pool that means ledger
+        # indexing is stalled behind someone else's checkout; on the read pool a
+        # gap scan or integrity check has saturated its own budget — which is
+        # exactly why it can no longer take connections from the write pool.
+        expr: lumina_indexer_db_pool_waiting > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Indexer {{ $labels.pool }} pool: queries are queuing for a connection"
+          runbook: "Find the long query holding the {{ $labels.pool }} pool (pg_stat_activity), or raise DB_WRITE_POOL_MAX / DB_READ_POOL_MAX. Sustained queueing on the write pool stalls indexing even while reads keep landing."
+
   - name: lumina-graphql
     rules:
       - alert: DatabasePoolExhausted
+        # SLO: Database pool exhaustion should be minimal
         # Queries queue invisibly once every connection is checked out; latency
         # climbs with no error to point at.
         expr: lumina_db_pool_waiting > 0
@@ -61,7 +84,7 @@ groups:
         labels:
           severity: warning
         annotations:
-          summary: "GraphQL requests are queuing for a database connection"
+          summary: "GraphQL requests are queuing for a database connection (SLO breach)"
 
       - alert: SubscriptionListenerDown
         expr: lumina_graphql_listener_connected == 0
@@ -72,6 +95,8 @@ groups:
           summary: "Postgres LISTEN connection is down; subscriptions are paused"
 
       - alert: GraphQLErrorRateHigh
+        # SLO: API availability 99.9% (0.1% error budget)
+        # Alert at 5% error rate to catch issues before budget exhaustion
         expr: |
           sum(rate(lumina_graphql_operations_total{outcome="error"}[5m]))
             / clamp_min(sum(rate(lumina_graphql_operations_total[5m])), 0.001) > 0.05
@@ -79,7 +104,19 @@ groups:
         labels:
           severity: warning
         annotations:
-          summary: "More than 5% of GraphQL operations are failing"
+          summary: "More than 5% of GraphQL operations are failing (approaching SLO breach)"
+
+      - alert: GraphQLErrorRateCritical
+        # SLO: API availability 99.9% (0.1% error budget)
+        # Critical alert when error rate is burning error budget rapidly
+        expr: |
+          sum(rate(lumina_graphql_operations_total{outcome="error"}[5m]))
+            / clamp_min(sum(rate(lumina_graphql_operations_total[5m])), 0.001) > 0.5
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "More than 50% of GraphQL operations are failing (SLO breach)"
 
       - alert: ScheduledExportFailed
         expr: increase(lumina_scheduled_exports_total{outcome="failure"}[25h]) > 0
@@ -90,9 +127,60 @@ groups:
           summary: "A scheduled database export failed"
 
       - alert: GraphQLDatabasePoolErrors
+        # SLO: Database pool errors should be minimal
         expr: increase(lumina_graphql_db_pool_errors_total[5m]) > 0
         for: 1m
         labels:
           severity: warning
         annotations:
           summary: "GraphQL PostgreSQL pool is replacing failed clients"
+
+  - name: lumina-backups
+    rules:
+      # Metrics are pushed by db/backup/lumina-backup.sh; see docs/BACKUPS.md.
+      # The database is the only copy of everything the indexer has collected, so
+      # a backup that has quietly stopped is a data-loss risk, not a nuisance.
+      - alert: BackupTooOld
+        # The daily job plus a few hours of grace. A failed run deliberately does
+        # not clear lumina_backup_last_success_timestamp_seconds, so this fires on
+        # the real condition — no successful backup — rather than on one failure.
+        expr: time() - lumina_backup_last_success_timestamp_seconds > 26 * 3600
+        for: 10m
+        labels:
+          severity: critical
+        annotations:
+          summary: "No successful database backup in over 26 hours"
+          runbook: "See docs/BACKUPS.md — check the lumina-backup CronJob and the backup job logs"
+
+      - alert: BackupFailed
+        # One run in a row, so the failure is visible before it becomes BackupTooOld.
+        expr: lumina_backup_last_run_success == 0
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "The last database backup run failed"
+          runbook: "See docs/BACKUPS.md — the failure is in the lumina-backup job logs and reported by name"
+
+      - alert: BackupVerifyFailed
+        # A failed weekly restore test means the newest backup is not proven
+        # restorable: treat it as critical, because a backup nobody has restored
+        # is a hypothesis, and this is the alert that says the hypothesis broke.
+        expr: lumina_backup_last_run_success{operation="verify"} == 0
+        for: 10m
+        labels:
+          severity: critical
+        annotations:
+          summary: "The database backup restore-verification failed"
+          runbook: "See docs/BACKUPS.md and docs/DISASTER_RECOVERY.md — the newest backup did not restore or did not match its manifest"
+
+      - alert: BackupMissing
+        # No backup metric at all: the job has never reported. Distinct from
+        # BackupTooOld, which assumes it reported successfully at least once.
+        expr: absent(lumina_backup_last_success_timestamp_seconds)
+        for: 1h
+        labels:
+          severity: critical
+        annotations:
+          summary: "No database backup has ever reported success"
+          runbook: "See docs/BACKUPS.md — is PUSHGATEWAY_URL reachable and the lumina-backup CronJob scheduled?"

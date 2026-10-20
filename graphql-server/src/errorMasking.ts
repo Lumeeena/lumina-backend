@@ -4,30 +4,18 @@
  * A raw Postgres error carries table names, column names and query fragments
  * to the caller. Unexpected failures are therefore replaced by a generic
  * message and a correlation id; the full error is logged with the same id so
- * an operator can look it up. Deliberate errors — the ones written for callers
- * — pass through unchanged. See docs/SECURITY_HARDENING.md.
+ * an operator can look it up. Deliberate errors — `LuminaError` subclasses
+ * with a caller-facing code — pass through unchanged. See
+ * docs/SECURITY_HARDENING.md.
  */
 import { randomUUID } from 'crypto';
 import { unwrapResolverError } from '@apollo/server/errors';
 import type { GraphQLFormattedError } from 'graphql';
-import { AssetError } from './assets';
-import { ApiKeyError } from './auth';
-import { CustomQueryError } from './customEvents';
+import { ERROR_CODES, LuminaError } from './errorCodes';
 import { logger } from './logger';
-import { SubscriberLimitError } from './pubsub';
-import { SearchError } from './search';
 import { parseBool } from './security';
 
 export const MASKED_ERROR_MESSAGE = 'Internal server error';
-
-/** Errors raised on purpose, with messages meant for the caller. */
-const DELIBERATE_ERRORS: Array<new (...args: never[]) => Error> = [
-  CustomQueryError,
-  SearchError,
-  AssetError,
-  ApiKeyError,
-  SubscriberLimitError,
-];
 
 /**
  * Masking is on in production and off elsewhere, so development keeps full
@@ -51,10 +39,13 @@ export function createErrorMasker(options: ErrorMaskOptions) {
     if (!options.enabled) return formatted;
     // Only failures that Apollo classified as internal are candidates: other
     // codes (validation, timeouts, bad input) are already caller-facing.
-    if (formatted.extensions?.['code'] !== 'INTERNAL_SERVER_ERROR') return formatted;
+    if (formatted.extensions?.['code'] !== ERROR_CODES.INTERNAL_SERVER_ERROR) return formatted;
 
     const original = unwrapResolverError(error);
-    if (DELIBERATE_ERRORS.some(type => original instanceof type)) return formatted;
+    // Deliberate errors carry their own code from `withStableErrorCode`, so
+    // they no longer look internal; this check keeps them safe if the masker
+    // is ever called on its own.
+    if (original instanceof LuminaError) return formatted;
 
     const correlationId = newId();
     log(
@@ -69,7 +60,7 @@ export function createErrorMasker(options: ErrorMaskOptions) {
       message: MASKED_ERROR_MESSAGE,
       locations: formatted.locations,
       path: formatted.path,
-      extensions: { code: 'INTERNAL_SERVER_ERROR', correlationId },
+      extensions: { code: ERROR_CODES.INTERNAL_SERVER_ERROR, correlationId },
     };
   };
 }

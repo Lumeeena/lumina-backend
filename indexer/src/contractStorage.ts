@@ -5,7 +5,7 @@
  * Extracts ContractDataEntry changes from ledger close meta and indexes
  * them for GraphQL queries like contractStorage(contractId, key).
  */
-import { xdr, scValToNative } from '@stellar/stellar-sdk';
+import { xdr } from '@stellar/stellar-sdk';
 import type { Pool } from 'pg';
 import { subsystem } from './logger';
 
@@ -34,12 +34,10 @@ export function extractStorageChanges(
     const meta = xdr.TransactionMeta.fromXDR(txMetaXdr, 'base64');
     
     // Parse based on meta version
-    let ledgerEntryChanges: any[] = [];
-    
     if (meta.switch() === 3) {
       // v3 meta
       const v3 = meta.v3();
-      for (const opChange of v3.sorobanMeta()?.diagnosticEvents() || []) {
+      for (const _opChange of v3.sorobanMeta()?.diagnosticEvents() || []) {
         // Extract contract data entries from diagnostic events
         // This is a simplified scaffold - full implementation needs proper XDR parsing
         log.debug({ ledger: ledgerSequence }, 'Processing v3 meta');

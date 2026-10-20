@@ -52,6 +52,7 @@ function event(overrides: Partial<ContractEvent> = {}): ContractEvent {
     pagingToken: '500-1',
     topics: [JSON.stringify('transfer'), JSON.stringify(FROM), JSON.stringify(TO)],
     value: { amount: 1000n },
+    transactionHash: null,
     ...overrides,
   };
 }
@@ -78,6 +79,15 @@ test('keeps an i128 exact rather than rounding it through a JS number', () => {
 
   assert.equal(decoded[0].fields.amount, '1208925819614629174706176');
   assert.equal(BigInt(decoded[0].fields.amount!), huge);
+});
+
+test('decodes an i128 represented as unsigned high and low 64-bit words', () => {
+  const { decoded, failures } = decodeEvents(schemasFor(schema()), [
+    event({ value: { amount: { hi: '65536', lo: '0' } } }),
+  ]);
+
+  assert.equal(failures.length, 0);
+  assert.equal(decoded[0].fields.amount, '1208925819614629174706176');
 });
 
 test('accepts an integer already rendered as a string, normalised', () => {

@@ -37,6 +37,7 @@ export function metricsPlugin(): ApolloServerPlugin<Context> {
           const seconds = Number(process.hrtime.bigint() - start) / 1e9;
           graphqlOperationDuration.observe({ operation, type }, seconds);
           graphqlOperations.inc({ operation, type, outcome: failed ? 'error' : 'ok' });
+
         },
       };
     },
