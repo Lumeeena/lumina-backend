@@ -14,7 +14,9 @@ initializeHorizonClient({
 function mockFetchSequence(responses: Array<{ ok: boolean; status?: number; body: unknown }>) {
   let call = 0;
   (global as unknown as { fetch: typeof fetch }).fetch = (async () => {
-    const res = responses[call++];
+    // The shared client retries transient failures, so a scripted response
+    // stands until a later one replaces it rather than running out.
+    const res = responses[Math.min(call++, responses.length - 1)]!;
     return {
       ok: res.ok,
       status: res.status ?? 200,
@@ -104,7 +106,7 @@ test('getAccount throws on transient HTTP failures so queued refreshes can retry
   mockFetchSequence([{ ok: false, status: 429, body: {} }]);
   await assert.rejects(
     () => getAccount('https://horizon.example.com', 'G-rate-limited'),
-    /status 429/
+    /429/
   );
 });
 

@@ -243,7 +243,7 @@ test('ascending custom events reverse cursor comparison and result ordering', as
     contractId: CONTRACT,
     event: 'transfer',
     limit: 5,
-    cursor: 'evt9',
+    cursor: encodeCursor('customEvents', [900, 'evt9']),
     order: 'ASC',
   });
 

@@ -24,6 +24,7 @@
  */
 import type { Pool } from 'pg';
 import { mapOperation, mapTransaction, type OperationRow, type TransactionRow } from './db';
+import { InvalidInputError } from './errorCodes';
 import {
   cursorCondition,
   decodeCursor as decodeKeysetCursor,
@@ -44,7 +45,8 @@ export const MIN_SIMILARITY = 0.15;
 /** Longest query we will run. Beyond this it is not a memo search. */
 export const MAX_QUERY_LENGTH = 256;
 
-export class SearchError extends Error {
+/** A search request the server cannot serve: empty or oversized query text, malformed asset filter. */
+export class SearchError extends InvalidInputError {
   constructor(message: string) {
     super(message);
     this.name = 'SearchError';
@@ -252,7 +254,6 @@ export async function getOperationsByAsset(pool: Pool, options: AssetOperationsO
   const direction = options.direction ?? 'FORWARD';
   const isForward = direction === 'FORWARD';
   const queryOrder = isForward ? baseOrder : (baseOrder === 'DESC' ? 'ASC' : 'DESC');
-  const cursorOperator = baseOrder === 'ASC' ? (isForward ? '>' : '<') : (isForward ? '<' : '>');
   const parsed = parseAsset(options.asset);
   const params: unknown[] = [options.network];
   const conditions = ['network = $1', assetConditions(parsed, params)];
@@ -266,14 +267,8 @@ export async function getOperationsByAsset(pool: Pool, options: AssetOperationsO
     conditions.push(`type = $${params.length}`);
   }
   if (options.cursor) {
-    params.push(options.cursor);
-    // An operation id exists on every network, so the cursor's own row is
-    // looked up within this network ($1). Resolving it without that predicate
-    // compares the page against another chain's boundary, which silently
-    // repeats a row or ends the results early.
-    conditions.push(
-      `(ledger, id) ${cursorOperator} (SELECT ledger, id FROM operations WHERE id = $${params.length} AND network = $1)`
-    );
+    const condition = cursorCondition(params, KEYSETS.assetOperations, options.cursor, direction, baseOrder);
+    if (condition) conditions.push(condition);
   }
 
   params.push(options.limit);

@@ -32,6 +32,17 @@ import type { ContractStorageEntry } from './soroban';
 import { indexerPoolErrors } from './metrics';
 import { makeAccount, makeContractEvent, makeLedger, makeOperation, makeTransaction } from '../../shared/test-factories';
 
+type SqlInput = string | { text: string; values?: unknown[] };
+
+/** The pg driver accepts either a SQL string or a prepared-statement config. */
+function sqlText(sql: SqlInput): string {
+  return typeof sql === 'string' ? sql : sql.text;
+}
+
+function sqlParams(sql: SqlInput, params?: unknown[]): unknown[] {
+  return typeof sql === 'string' ? (params ?? []) : (sql.values ?? []);
+}
+
 test('createPool logs and counts idle client errors instead of leaving them unhandled', async () => {
   const pool = createPool('postgresql://localhost:5432/lumina');
   const before = (await indexerPoolErrors.get()).values[0]?.value ?? 0;
@@ -44,8 +55,8 @@ test('createPool logs and counts idle client errors instead of leaving them unha
 function makeFakeClient(opts: { failOn?: string } = {}) {
   const calls: string[] = [];
   const client = {
-    query: async (sql: string) => {
-      const trimmed = sql.trim();
+    query: async (sql: SqlInput) => {
+      const trimmed = sqlText(sql).trim();
       if (trimmed.startsWith('BEGIN') || trimmed.startsWith('COMMIT') || trimmed.startsWith('ROLLBACK')) {
         calls.push(trimmed);
       } else {
@@ -155,8 +166,8 @@ test('indexLedger surfaces a check violation as a failed write', async () => {
   // rolls back, and the violation propagates so the retry loop in index.ts can
   // classify it (a check violation is not transient, so retrying is pointless).
   const client = {
-    query: async (sql: string) => {
-      if (sql.includes('INSERT INTO ledgers')) throw checkViolation('ledgers_transaction_count_check');
+    query: async (sql: SqlInput) => {
+      if (sqlText(sql).includes('INSERT INTO ledgers')) throw checkViolation('ledgers_transaction_count_check');
       return { rows: [] };
     },
     release: () => {},
@@ -170,8 +181,8 @@ test('indexLedger surfaces a check violation as a failed write', async () => {
 
 test('insertContractEvents surfaces a check violation as a failed write', async () => {
   const pool = {
-    query: async (sql: string) => {
-      if (sql.includes('INSERT INTO contract_events')) throw checkViolation('contract_events_id_check');
+    query: async (sql: SqlInput) => {
+      if (sqlText(sql).includes('INSERT INTO contract_events')) throw checkViolation('contract_events_id_check');
       return { rows: [] };
     },
   } as unknown as Pool;
@@ -316,7 +327,7 @@ test('ensurePartitions defaults the lookahead to 5 partitions', async () => {
 
 test('upsertAccount inserts with an ON CONFLICT upsert', async () => {
   const queries: string[] = [];
-  const client = { query: async (sql: string) => { queries.push(sql); return { rows: [] }; } } as unknown as PoolClient;
+  const client = { query: async (sql: SqlInput) => { queries.push(sqlText(sql)); return { rows: [] }; } } as unknown as PoolClient;
   await upsertAccount(client, 'testnet', account);
   assert.match(queries[0]!, /INSERT INTO accounts/);
   // The same address exists on every chain it has funded; without the network
@@ -350,7 +361,7 @@ const event = makeContractEvent();
 
 test('insertContractEvents writes one row per event', async () => {
   const queries: string[] = [];
-  const pool = { query: async (sql: string) => { queries.push(sql); return { rows: [] }; } } as unknown as Pool;
+  const pool = { query: async (sql: SqlInput) => { queries.push(sqlText(sql)); return { rows: [] }; } } as unknown as Pool;
   await insertContractEvents(pool, 'testnet', [event, { ...event, id: 'evt2' }]);
   // Two inserts, then one notification announcing the batch.
   assert.equal(queries.length, 3);
@@ -382,16 +393,16 @@ test('every insert conflicts on the composite key, so two chains can share a led
   // testnet wrote the same numbers.
   const queries: string[] = [];
   const client = {
-    query: async (sql: string) => {
-      queries.push(sql);
+    query: async (sql: SqlInput) => {
+      queries.push(sqlText(sql));
       return { rows: [] };
     },
     release: () => {},
   } as unknown as PoolClient;
 
   const eventPool = {
-    query: async (sql: string) => {
-      queries.push(sql);
+    query: async (sql: SqlInput) => {
+      queries.push(sqlText(sql));
       return { rows: [] };
     },
   } as unknown as Pool;
@@ -423,8 +434,8 @@ test('every insert conflicts on the composite key, so two chains can share a led
 test('a ledger notification carries the network it was indexed on', async () => {
   const payloads: string[] = [];
   const client = {
-    query: async (sql: string, params?: unknown[]) => {
-      if (sql.includes('pg_notify')) payloads.push(String(params?.[1]));
+    query: async (sql: SqlInput, params?: unknown[]) => {
+      if (sqlText(sql).includes('pg_notify')) payloads.push(String(sqlParams(sql, params)[1]));
       return { rows: [] };
     },
     release: () => {},

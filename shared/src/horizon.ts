@@ -364,7 +364,7 @@ export function createHorizonClient(options: HorizonClientOptions = {}): Horizon
         return body as T;
       }
 
-      if (res.status === 404 && mode === 'null') return null;
+      if (res.status === 404 && mode !== 'throw') return null;
 
       if (res.status === 429 && attempt < maxRetries) {
         const retryAfter = res.headers?.get?.('Retry-After') ?? null;

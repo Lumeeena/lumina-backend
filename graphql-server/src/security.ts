@@ -28,6 +28,7 @@ import type {
   SelectionSetNode,
 } from 'graphql';
 import { getArgumentValues } from 'graphql/execution/values';
+import { ERROR_CODES } from './errorCodes';
 
 export const DEFAULT_MAX_QUERY_DEPTH = 10;
 export const DEFAULT_MAX_QUERY_COMPLEXITY = 1000;
@@ -187,13 +188,13 @@ export function assertWithinLimits(
   if (config.maxDepth > 0 && depth > config.maxDepth) {
     throw new GraphQLError(
       `Query depth ${depth} exceeds the maximum allowed depth of ${config.maxDepth}`,
-      { extensions: { code: 'QUERY_TOO_DEEP', depth, maxDepth: config.maxDepth } }
+      { extensions: { code: ERROR_CODES.QUERY_TOO_DEEP, depth, maxDepth: config.maxDepth } }
     );
   }
   if (config.maxComplexity > 0 && complexity > config.maxComplexity) {
     throw new GraphQLError(
       `Query complexity ${complexity} exceeds the maximum allowed complexity of ${config.maxComplexity}`,
-      { extensions: { code: 'QUERY_TOO_COMPLEX', complexity, maxComplexity: config.maxComplexity } }
+      { extensions: { code: ERROR_CODES.QUERY_TOO_COMPLEX, complexity, maxComplexity: config.maxComplexity } }
     );
   }
 }
@@ -235,7 +236,7 @@ export function formatTimeoutError(formatted: GraphQLFormattedError, error: unkn
     ...formatted,
     message:
       'The query took too long and was cancelled. Narrow the request (smaller limit, fewer nested fields) and retry.',
-    extensions: { ...formatted.extensions, code: 'QUERY_TIMEOUT' },
+    extensions: { ...formatted.extensions, code: ERROR_CODES.QUERY_TIMEOUT },
   };
 }
 
@@ -258,7 +259,7 @@ export function requestTimeoutMiddleware(timeoutMs: number) {
         errors: [
           {
             message: `Request timed out after ${timeoutMs}ms`,
-            extensions: { code: 'REQUEST_TIMEOUT' },
+            extensions: { code: ERROR_CODES.REQUEST_TIMEOUT },
           },
         ],
       });

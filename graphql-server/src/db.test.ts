@@ -160,21 +160,21 @@ test('getTransactions maps rows and passes limit/cursor params', async () => {
   assert.doesNotMatch(queries[0]?.sql ?? '', /indexed_at|\*/);
   // The network is bound first and repeated in the cursor subquery: the same
   // hash exists on every network, so the keyset has to know which one.
-  assert.deepEqual(queries[0]?.params, ['mainnet', 'cursor-hash', 20]);
-  assert.match(queries[0]?.sql ?? '', /\(ledger, hash\) </);
+  assert.deepEqual(queries[0]?.params, ['mainnet', 500, 'cursor-hash', 20]);
+  assert.match(queries[0]?.sql ?? '', /\(ledger, hash\) < \(\$2::bigint, \$3::text\)/);
   assert.match(queries[0]?.sql ?? '', /ORDER BY ledger DESC, hash DESC/);
 });
 
 test('getTransactions uses an ascending tuple keyset when requested', async () => {
   const { pool, queries } = fakePool([]);
-  await getTransactions(pool, 'mainnet', 20, 'cursor-hash', { order: 'ASC' });
-  assert.match(queries[0]?.sql ?? '', /\(ledger, hash\) >/);
+  await getTransactions(pool, 'mainnet', 20, encodeCursor('transactions', [500, 'cursor-hash']), { order: 'ASC' });
+  assert.match(queries[0]?.sql ?? '', /\(ledger, hash\) > \(\$2::bigint, \$3::text\)/);
   assert.match(queries[0]?.sql ?? '', /ORDER BY ledger ASC, hash ASC/);
 });
 
 test('getTransactions composes filters with its stable keyset cursor', async () => {
   const { pool, queries } = fakePool([]);
-  await getTransactions(pool, 'mainnet', 10, 'cursor-hash', {
+  await getTransactions(pool, 'mainnet', 10, encodeCursor('transactions', [500, 'cursor-hash']), {
     order: 'ASC',
     successful: false,
     from: '2026-01-01T00:00:00Z',
@@ -184,14 +184,15 @@ test('getTransactions composes filters with its stable keyset cursor', async () 
 
   assert.equal(
     queries[0]?.sql.replace(/\s+/g, ' ').trim(),
-    'SELECT * FROM transactions WHERE network = $1 AND successful = $2 ' +
+    'SELECT hash, network, ledger, created_at, source_account, fee_charged, operation_count, successful, memo_type, memo ' +
+      'FROM transactions WHERE network = $1 AND successful = $2 ' +
       'AND created_at >= $3::timestamptz AND created_at <= $4::timestamptz ' +
       'AND source_account = $5 AND (ledger, hash) > ' +
-      '(SELECT ledger, hash FROM transactions WHERE hash = $6 AND network = $1) ' +
-      'ORDER BY ledger ASC, hash ASC LIMIT $7'
+      '($6::bigint, $7::text) ' +
+      'ORDER BY ledger ASC, hash ASC LIMIT $8'
   );
   assert.deepEqual(queries[0]?.params, [
-    'mainnet', false, '2026-01-01T00:00:00Z', '2026-01-31T23:59:59Z', 'GACCOUNT', 'cursor-hash', 10,
+    'mainnet', false, '2026-01-01T00:00:00Z', '2026-01-31T23:59:59Z', 'GACCOUNT', 500, 'cursor-hash', 10,
   ]);
 });
 
@@ -220,7 +221,7 @@ test('getTransactions binds filter values and pages by keyset, never OFFSET', as
   assert.deepEqual(params.slice(0, 5), [
     'mainnet', true, '2026-01-01T00:00:00Z', '2026-01-31T23:59:59Z', sourceAccount,
   ]);
-  assert.equal(params.length, 7);
+  assert.equal(params.length, 8);
   assert.equal(params.at(-1), 10, 'limit is the last bound parameter');
   assert.ok(!sql.includes(sourceAccount));
   assert.ok(!sql.includes('2026-01-01T00:00:00Z'));
@@ -228,7 +229,7 @@ test('getTransactions binds filter values and pages by keyset, never OFFSET', as
   // Paging resumes on the (ledger, hash) tuple — an OFFSET would shift every
   // subsequent page as new transactions land, duplicating a row across the seam.
   assert.ok(!/OFFSET/i.test(sql));
-  assert.match(sql, /\(ledger, hash\) < \(SELECT ledger, hash FROM transactions WHERE hash = \$\d+ AND network = \$1\)/);
+  assert.match(sql, /\(ledger, hash\) < \(\$6::bigint, \$7::text\)/);
 });
 
 test('getOperations binds provided filters without interpolating values', async () => {
@@ -351,7 +352,7 @@ test('accounts paginate on activity with a bound keyset, not a row lookup', asyn
   assert.ok(!/OFFSET/i.test(queries[0]?.sql ?? ''));
   // No subquery: the cursor carries the sort key, so a cursor survives the row
   // it names being re-indexed.
-  assert.ok(!/SELECT/i.test((queries[0]?.sql ?? '').replace(/SELECT \* FROM accounts/, '')));
+  assert.equal((queries[0]?.sql.match(/\bSELECT\b/gi) ?? []).length, 1);
 });
 
 test('accounts can be listed in address order instead', async () => {
@@ -360,16 +361,16 @@ test('accounts can be listed in address order instead', async () => {
   await getAccounts(pool, { network: 'mainnet', orderBy: 'ADDRESS', limit: 5, cursor: encodeCursor('accounts', ['GABC']) });
 
   assert.match(queries[0]?.sql ?? '', /ORDER BY address ASC/);
-  assert.match(queries[0]?.sql ?? '', /\(address\) < \(\$2::text\)/);
+  assert.match(queries[0]?.sql ?? '', /\(address\) > \(\$2::text\)/);
   assert.deepEqual(queries[0]?.params, ['mainnet', 'GABC', 5]);
 });
 
 test('getOperations uses an ascending tuple keyset when requested', async () => {
   const { pool, queries } = fakePool([]);
-  await getOperations(pool, { network: 'mainnet', cursor: 'op-9', limit: 10, order: 'ASC' });
-  assert.match(queries[0]?.sql ?? '', /\(ledger, id\) > \(SELECT ledger, id FROM operations WHERE id = \$2 AND network = \$1\)/);
-  assert.match(queries[0]?.sql ?? '', /ORDER BY ledger ASC, id ASC LIMIT \$3/);
-  assert.deepEqual(queries[0]?.params, ['mainnet', 'op-9', 10]);
+  await getOperations(pool, { network: 'mainnet', cursor: encodeCursor('operations', [900, 'op-9']), limit: 10, order: 'ASC' });
+  assert.match(queries[0]?.sql ?? '', /\(ledger, id\) > \(\$2::bigint, \$3::text\)/);
+  assert.match(queries[0]?.sql ?? '', /ORDER BY ledger ASC, id ASC LIMIT \$4/);
+  assert.deepEqual(queries[0]?.params, ['mainnet', 900, 'op-9', 10]);
   assert.doesNotMatch(queries[0]?.sql ?? '', /OFFSET/i);
 });
 
@@ -387,8 +388,8 @@ test('getEventsByContract emits exactly the expected statement with every filter
 
 test('getEventsByContract uses an ascending tuple keyset when requested', async () => {
   const { pool, queries } = fakePool([]);
-  await getEventsByContract(pool, { network: 'mainnet', contractId: 'CABC', cursor: 'evt-9', limit: 20, order: 'ASC' });
-  assert.match(queries[0]?.sql ?? '', /\(ledger, id\) >/);
+  await getEventsByContract(pool, { network: 'mainnet', contractId: 'CABC', cursor: encodeCursor('events', [900, 'evt-9']), limit: 20, order: 'ASC' });
+  assert.match(queries[0]?.sql ?? '', /\(ledger, id\) > \(\$3::bigint, \$4::text\)/);
   assert.match(queries[0]?.sql ?? '', /ORDER BY ledger ASC, id ASC/);
 });
 

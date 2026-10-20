@@ -672,20 +672,31 @@ client.subscribe(
 The GraphQL API returns errors in the standard GraphQL error format. Each error has:
 
 - `message` — a human-readable description
-- `extensions.code` — a machine-readable error category
+- `extensions.code` — a stable, machine-readable code
+
+**Branch on `extensions.code`, never on `message`**: messages are for humans
+and may be reworded at any time. The full taxonomy — which category each code
+belongs to and what to do about it — is in
+[`ERROR_CODES.md`](ERROR_CODES.md).
 
 ### Common error codes
 
-| Code | Meaning | Example |
+| Code | Category | Meaning |
 | --- | --- | --- |
-| `GRAPHQL_VALIDATION_FAILED` | Query is malformed or violates the schema | Missing required field, wrong type |
-| `GRAPHQL_PARSE_FAILED` | Query syntax is invalid | Unmatched braces, invalid tokens |
-| `INTERNAL_SERVER_ERROR` | Server error | Database connection failure |
-| `BAD_REQUEST` | Client request error | Invalid asset format, empty search query |
-| `BAD_USER_INPUT` | The request named something the server does not serve | `network: RANKENET` when only `MAINNET`, `TESTNET` are configured |
-| `INVALID_CURSOR` | A pagination cursor the server could not use | A truncated cursor, a hand-built one, or one issued by a different query — see [Pagination](#invalid-cursors-are-errors) |
-| `UNAUTHENTICATED` | API key is malformed, unknown, or revoked | See [`AUTHENTICATION.md`](AUTHENTICATION.md#authentication-errors) |
-| `RATE_LIMITED` | Rate limit exceeded; wait `extensions.retryAfter` seconds | See [`AUTHENTICATION.md`](AUTHENTICATION.md#when-you-are-throttled) |
+| `BAD_USER_INPUT` | invalid input | The request named an unknown network, or contained an argument the server cannot use (bad asset filter, out-of-range page size, invalid custom-event filter) |
+| `INVALID_CURSOR` | invalid input | A pagination cursor the server could not use — see [Pagination](#invalid-cursors-are-errors) |
+| `QUERY_TOO_DEEP`, `QUERY_TOO_COMPLEX` | invalid input | The operation exceeds this deployment's depth or cost budget |
+| `NOT_FOUND` | not found | The contract has no registered custom-event schema, or the event is not declared |
+| `RATE_LIMITED` | rate limited | A request budget or the subscription ceiling turned the request away; wait `extensions.retryAfter` |
+| `UNAUTHENTICATED` | authentication | API key is malformed, unknown, or revoked — see [`AUTHENTICATION.md`](AUTHENTICATION.md#authentication-errors) |
+| `QUERY_TIMEOUT`, `REQUEST_TIMEOUT` | internal | The database or the HTTP request exceeded its time budget |
+| `INTERNAL_SERVER_ERROR` | internal | Unexpected server failure; in production the message is masked and `extensions.correlationId` names the log entry |
+
+Apollo and graphql-js add their own stable codes for malformed requests
+(`GRAPHQL_PARSE_FAILED`, `GRAPHQL_VALIDATION_FAILED`, `BAD_REQUEST`,
+`OPERATION_RESOLUTION_FAILURE`, `PERSISTED_QUERY_NOT_FOUND`,
+`PERSISTED_QUERY_NOT_SUPPORTED`); they are listed with the rest in
+[`ERROR_CODES.md`](ERROR_CODES.md#framework-codes).
 
 ### Example error response
 
@@ -693,9 +704,9 @@ The GraphQL API returns errors in the standard GraphQL error format. Each error 
 {
   "errors": [
     {
-      "message": "Asset filter must be in format CODE:ISSUER or XLM",
+      "message": "Asset filter must be \"CODE:ISSUER\" (or \"XLM\" for the native asset), got \"USDC\".",
       "extensions": {
-        "code": "BAD_REQUEST"
+        "code": "BAD_USER_INPUT"
       }
     }
   ]
@@ -704,11 +715,18 @@ The GraphQL API returns errors in the standard GraphQL error format. Each error 
 
 ### Search-specific errors
 
+Both search-input failures are `BAD_USER_INPUT`:
+
 - **Empty query:** Search queries must not be empty or whitespace-only
 - **Query too long:** Search queries have a maximum length to prevent performance issues
-- **Invalid cursor:** returned as `INVALID_CURSOR` on every paginated query, search included — see [Pagination](#invalid-cursors-are-errors)
+
+An invalid cursor is returned as `INVALID_CURSOR` on every paginated query,
+search included — see [Pagination](#invalid-cursors-are-errors).
 
 ### Custom event filter errors
+
+All of these are `BAD_USER_INPUT`; a missing registered schema or an undeclared
+event is `NOT_FOUND`:
 
 - **Invalid field:** The field does not exist in the contract's registered schema
 - **Invalid operator:** The operator does not match the field type (e.g., `GT` on a string field)

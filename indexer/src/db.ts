@@ -846,6 +846,39 @@ export async function upsertContractStorageEntries(
 }
 
 /**
+ * Append a contract storage entry change to the history table.
+ *
+ * The history table is an append-only log of value changes; the live table
+ * (`contract_storage_entries`) only carries the current value and state.
+ */
+export async function recordContractStorageHistory(
+  pool: Pool,
+  network: string,
+  entries: ContractStorageEntry[]
+): Promise<void> {
+  if (entries.length === 0) return;
+
+  for (const entry of entries) {
+    await pool.query(
+      `INSERT INTO contract_storage_history
+         (contract_id, key, durability, value, value_xdr, live_until_ledger, last_modified_ledger, indexed_at, network)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, NOW(), $8)
+       ON CONFLICT (contract_id, key, last_modified_ledger, network) DO NOTHING`,
+      [
+        entry.contractId,
+        entry.key,
+        entry.durability,
+        entry.value === null ? null : JSON.stringify(entry.value, bigintReplacer),
+        entry.valueXdr,
+        entry.liveUntilLedgerSeq,
+        entry.lastModifiedLedgerSeq,
+        network,
+      ]
+    );
+  }
+}
+
+/**
  * Mark the given storage keys as `archived`, keeping the rows.
  *
  * Soroban archives a persistent entry once its TTL expires: the entry is not
@@ -2060,13 +2093,6 @@ export async function processRevokeSponsorshipOperation(
                      (operation.claimable_balance_id as string) ||
                      (operation.offer_id as string) ||
                      '';
-
-  let sponsoredType = 'unknown';
-  if (operation.account_id) sponsoredType = 'account';
-  else if (operation.trustline_account_id && operation.asset) sponsoredType = 'trustline';
-  else if (operation.data_account_id && operation.data_name) sponsoredType = 'data';
-  else if (operation.claimable_balance_id) sponsoredType = 'claimable_balance';
-  else if (operation.offer_id) sponsoredType = 'offer';
 
   if (sponsoredId) {
     // Remove the sponsorship relationship

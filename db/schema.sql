@@ -679,10 +679,10 @@ CREATE INDEX IF NOT EXISTS idx_admin_operations_network ON admin_operations (net
 -- transactions vacuums on a fixed row count so the visibility map keeps up with
 -- the newest pages, which the covering listing index needs to skip the heap.
 ALTER TABLE transactions SET (
-    autovacuum_vacuum_insert_threshold = 50000,
-    autovacuum_vacuum_insert_scale_factor = 0,
     autovacuum_analyze_threshold = 5000,
-    autovacuum_analyze_scale_factor = 0.02
+    autovacuum_analyze_scale_factor = 0.02,
+    autovacuum_vacuum_insert_threshold = 50000,
+    autovacuum_vacuum_insert_scale_factor = 0
 );
 
 ALTER TABLE operations SET (
@@ -691,3 +691,261 @@ ALTER TABLE operations SET (
     autovacuum_analyze_threshold = 5000,
     autovacuum_analyze_scale_factor = 0.02
 );
+
+-- ─── Consolidated from migrations ────────────────────────────────────────────
+
+CREATE TABLE IF NOT EXISTS api_usage (
+    id BIGSERIAL PRIMARY KEY,
+    key_id INTEGER REFERENCES api_keys(id) ON DELETE CASCADE,
+    operation_name TEXT,
+    response_time_ms INTEGER,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    network TEXT NOT NULL DEFAULT 'mainnet'
+);
+
+CREATE INDEX IF NOT EXISTS idx_api_usage_key_time
+    ON api_usage (key_id, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS backfill_progress (
+    network             TEXT NOT NULL,
+    start_ledger        BIGINT NOT NULL,
+    end_ledger          BIGINT NOT NULL,
+    current_ledger      BIGINT NOT NULL,
+    completed_at        TIMESTAMPTZ,
+    updated_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (network, start_ledger, end_ledger),
+    CONSTRAINT backfill_progress_range_check CHECK (start_ledger <= end_ledger),
+    CONSTRAINT backfill_progress_current_check CHECK (current_ledger >= start_ledger - 1 AND current_ledger <= end_ledger)
+);
+
+CREATE INDEX IF NOT EXISTS idx_backfill_progress_network
+    ON backfill_progress (network)
+    WHERE completed_at IS NULL;
+
+CREATE TABLE IF NOT EXISTS contract_interfaces (
+    contract_id          TEXT NOT NULL,
+    wasm_hash            TEXT NOT NULL,
+    functions            JSONB NOT NULL DEFAULT '[]',
+    created_at           TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at           TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    network              TEXT NOT NULL DEFAULT 'mainnet',
+    PRIMARY KEY (contract_id, network)
+);
+
+CREATE INDEX IF NOT EXISTS idx_contract_interfaces_wasm ON contract_interfaces (wasm_hash, network);
+
+CREATE TABLE IF NOT EXISTS contract_storage_history (
+    contract_id          TEXT NOT NULL,
+    key                  TEXT NOT NULL,
+    durability           TEXT NOT NULL,
+    value                JSONB,
+    value_xdr            TEXT,
+    live_until_ledger    BIGINT,
+    last_modified_ledger BIGINT NOT NULL,
+    indexed_at           TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    network              TEXT NOT NULL DEFAULT 'mainnet',
+    PRIMARY KEY (contract_id, key, last_modified_ledger, network),
+    CONSTRAINT contract_storage_history_durability_check CHECK (durability IN ('persistent', 'temporary')),
+    CONSTRAINT contract_storage_history_ledger_check     CHECK (last_modified_ledger > 0)
+);
+
+CREATE INDEX IF NOT EXISTS idx_contract_storage_history_time_range
+    ON contract_storage_history (contract_id, network, last_modified_ledger DESC);
+
+CREATE INDEX IF NOT EXISTS idx_contract_storage_history_key_lookup
+    ON contract_storage_history (contract_id, key, network, last_modified_ledger DESC);
+
+CREATE TABLE IF NOT EXISTS export_jobs (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    requested_by TEXT,
+    status TEXT NOT NULL CHECK (status IN ('pending', 'running', 'complete', 'failed')),
+    filters JSONB,
+    format TEXT NOT NULL CHECK (format IN ('csv', 'parquet')),
+    output_location TEXT,
+    error_message TEXT,
+    row_count INTEGER,
+    network TEXT NOT NULL DEFAULT 'mainnet',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    started_at TIMESTAMPTZ,
+    completed_at TIMESTAMPTZ,
+    CONSTRAINT export_jobs_completion_check CHECK (
+        (status = 'complete' AND completed_at IS NOT NULL) OR
+        (status != 'complete')
+    )
+);
+
+CREATE INDEX IF NOT EXISTS idx_export_jobs_status
+    ON export_jobs (status, created_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_export_jobs_requested_by
+    ON export_jobs (requested_by, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS soroban_ttl (
+    key                  TEXT NOT NULL,
+    contract_id          TEXT NOT NULL,
+    live_until_ledger    BIGINT NOT NULL,
+    last_ledger          BIGINT NOT NULL,
+    operation_type       TEXT NOT NULL,
+    created_at           TIMESTAMPTZ NOT NULL,
+    network              TEXT NOT NULL DEFAULT 'mainnet',
+    PRIMARY KEY (key, network)
+);
+
+CREATE INDEX IF NOT EXISTS idx_soroban_ttl_contract ON soroban_ttl (contract_id, network);
+
+CREATE INDEX IF NOT EXISTS idx_soroban_ttl_expiry ON soroban_ttl (live_until_ledger, network);
+
+CREATE TABLE IF NOT EXISTS sponsorships (
+    sponsor              TEXT NOT NULL,
+    sponsored_id         TEXT NOT NULL,
+    sponsored_type       TEXT NOT NULL,
+    ledger               BIGINT NOT NULL,
+    created_at           TIMESTAMPTZ NOT NULL,
+    network              TEXT NOT NULL DEFAULT 'mainnet',
+    PRIMARY KEY (sponsored_id, network)
+);
+
+CREATE INDEX IF NOT EXISTS idx_sponsorships_sponsor ON sponsorships (sponsor, network);
+
+CREATE INDEX IF NOT EXISTS idx_sponsorships_type ON sponsorships (sponsored_type, network);
+
+CREATE TABLE IF NOT EXISTS trades (
+    id                  TEXT NOT NULL,
+    paging_token        TEXT NOT NULL,
+    ledger_close_time   TIMESTAMPTZ NOT NULL,
+    trade_type          TEXT NOT NULL DEFAULT 'orderbook',
+    base_account        TEXT NOT NULL,
+    base_amount         NUMERIC(20, 7) NOT NULL,
+    base_asset_type     TEXT NOT NULL,
+    base_asset_code     TEXT,
+    base_asset_issuer   TEXT,
+    base_offer_id       TEXT,
+    counter_account     TEXT,
+    counter_amount      NUMERIC(20, 7) NOT NULL,
+    counter_asset_type  TEXT NOT NULL,
+    counter_asset_code  TEXT,
+    counter_asset_issuer TEXT,
+    counter_offer_id    TEXT,
+    base_is_seller      BOOLEAN,
+    price_n             BIGINT,
+    price_d             BIGINT,
+    price               NUMERIC(20, 7),
+    network             TEXT NOT NULL DEFAULT 'mainnet',
+    indexed_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (id, network),
+    CONSTRAINT trades_id_check           CHECK (id <> ''),
+    CONSTRAINT trades_base_account_check CHECK (base_account <> ''),
+    CONSTRAINT trades_base_amount_check  CHECK (base_amount >= 0),
+    CONSTRAINT trades_counter_amount_check CHECK (counter_amount >= 0)
+);
+
+CREATE INDEX IF NOT EXISTS idx_trades_pair
+    ON trades (base_asset_code, counter_asset_code, network, ledger_close_time DESC);
+
+CREATE INDEX IF NOT EXISTS idx_trades_base_asset
+    ON trades (base_asset_type, base_asset_code, base_asset_issuer, network);
+
+CREATE INDEX IF NOT EXISTS idx_trades_counter_asset
+    ON trades (counter_asset_type, counter_asset_code, counter_asset_issuer, network);
+
+CREATE INDEX IF NOT EXISTS idx_trades_base_account
+    ON trades (base_account, network, ledger_close_time DESC);
+
+CREATE INDEX IF NOT EXISTS idx_trades_counter_account
+    ON trades (counter_account, network, ledger_close_time DESC);
+
+CREATE INDEX IF NOT EXISTS idx_trades_ledger_close_time
+    ON trades (ledger_close_time DESC);
+
+CREATE TABLE IF NOT EXISTS trustline_changes (
+    id BIGSERIAL PRIMARY KEY,
+    account_address TEXT NOT NULL,
+    asset_code TEXT NOT NULL,
+    asset_issuer TEXT NOT NULL,
+    operation_id TEXT NOT NULL,
+    ledger_sequence BIGINT NOT NULL,
+    limit_before NUMERIC(20,7),
+    limit_after NUMERIC(20,7) NOT NULL,
+    changed_at TIMESTAMPTZ NOT NULL,
+    network TEXT NOT NULL DEFAULT 'mainnet',
+    CONSTRAINT trustline_changes_ledger_check CHECK (ledger_sequence > 0),
+    CONSTRAINT trustline_changes_limit_check CHECK (limit_after >= 0)
+);
+
+CREATE INDEX IF NOT EXISTS idx_trustline_changes_asset
+    ON trustline_changes (asset_code, asset_issuer, changed_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_trustline_changes_account
+    ON trustline_changes (account_address, changed_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_trustline_changes_ledger
+    ON trustline_changes (ledger_sequence);
+
+CREATE INDEX IF NOT EXISTS idx_trustline_changes_network
+    ON trustline_changes (network);
+
+CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_transactions_network_successful_page
+    ON transactions (network, successful, ledger DESC, hash DESC);
+
+CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_transactions_network_source_page
+    ON transactions (network, source_account, ledger DESC, hash DESC);
+
+CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_transactions_network_created_at
+    ON transactions (network, created_at DESC);
+
+
+-- ─── Signers, contract deployments, activity rollups (017) ───────────────────
+
+CREATE TABLE IF NOT EXISTS account_signers (
+  network text NOT NULL,
+  account_address text NOT NULL,
+  key text NOT NULL,
+  type text NOT NULL,
+  weight integer NOT NULL,
+  last_modified_ledger integer NOT NULL,
+  PRIMARY KEY (network, account_address, key)
+);
+
+CREATE INDEX IF NOT EXISTS idx_account_signers_lookup
+  ON account_signers (network, account_address);
+
+CREATE INDEX IF NOT EXISTS idx_sponsorships_by_sponsored
+  ON sponsorships (network, sponsored_id);
+
+CREATE TABLE IF NOT EXISTS contract_deployments (
+  network text NOT NULL,
+  contract_id text NOT NULL,
+  deployer text NOT NULL,
+  wasm_hash text NOT NULL,
+  deployed_ledger integer NOT NULL,
+  deployed_at timestamptz NOT NULL DEFAULT now(),
+  PRIMARY KEY (network, contract_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_contract_deployments_by_wasm
+  ON contract_deployments (network, wasm_hash);
+
+CREATE INDEX IF NOT EXISTS idx_contract_deployments_by_ledger
+  ON contract_deployments (network, deployed_ledger DESC);
+
+CREATE INDEX IF NOT EXISTS idx_contract_deployments_by_deployer
+  ON contract_deployments (network, deployer);
+
+CREATE TABLE IF NOT EXISTS activity_rollups (
+  network text NOT NULL,
+  granularity text NOT NULL CHECK (granularity IN ('hour', 'day')),
+  bucket_start timestamptz NOT NULL,
+  transaction_count integer NOT NULL DEFAULT 0,
+  operation_count integer NOT NULL DEFAULT 0,
+  active_accounts integer NOT NULL DEFAULT 0,
+  total_volume numeric NOT NULL DEFAULT 0,
+  updated_at timestamptz NOT NULL DEFAULT now(),
+  PRIMARY KEY (network, granularity, bucket_start)
+);
+
+CREATE INDEX IF NOT EXISTS idx_activity_rollups_range
+  ON activity_rollups (network, granularity, bucket_start);
+
+COMMENT ON TABLE activity_rollups IS
+  'Rolled-up activity aggregates for network statistics (#228, #229). '
+  'Updated as ledgers are indexed; read by networkStats and activityRollups queries.';

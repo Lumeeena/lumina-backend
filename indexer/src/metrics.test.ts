@@ -245,12 +245,12 @@ test('recordBackfillLedger advances backfill counters and gauge', async () => {
 
 test('recordBackfillLedger keeps each network independent', async () => {
   recordBackfillLedger('mainnet', 50_000, 1, 1);
-  recordBackfillLedger('testnet', 500, 1, 1);
+  recordBackfillLedger('futurenet', 500, 1, 1);
 
   assert.equal(await value('lumina_backfill_current_ledger', { network: 'mainnet' }), 50_000);
-  assert.equal(await value('lumina_backfill_current_ledger', { network: 'testnet' }), 500);
+  assert.equal(await value('lumina_backfill_current_ledger', { network: 'futurenet' }), 500);
   assert.equal(await value('lumina_backfilled_ledgers_total', { network: 'mainnet' }), 1);
-  assert.equal(await value('lumina_backfilled_ledgers_total', { network: 'testnet' }), 1);
+  assert.equal(await value('lumina_backfilled_ledgers_total', { network: 'futurenet' }), 1);
 });
 
 test('metricsContentType returns a valid Prometheus content type', () => {

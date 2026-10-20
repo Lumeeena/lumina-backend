@@ -16,7 +16,6 @@ import {
   dbPoolWaiting,
   graphqlOperationDuration,
   graphqlOperations,
-  deprecatedFieldUsage,
 } from './metrics';
 import type { Context } from './resolvers';
 
@@ -39,33 +38,10 @@ export function metricsPlugin(): ApolloServerPlugin<Context> {
           graphqlOperationDuration.observe({ operation, type }, seconds);
           graphqlOperations.inc({ operation, type, outcome: failed ? 'error' : 'ok' });
 
-          // Track usage of deprecated fields
-          // This is a placeholder for full AST-based tracking
-          // Currently requires manual configuration of deprecated fields
-          trackDeprecatedFieldsManual(requestContext);
         },
       };
     },
   };
-}
-
-/**
- * Manual tracking of deprecated field usage.
- * 
- * This is a simplified implementation that requires explicit configuration.
- * A full implementation would parse the schema.graphql file and automatically
- * detect @deprecated directives by traversing the request AST.
- * 
- * To use: add deprecated field names to the set below as they are marked.
- */
-function trackDeprecatedFieldsManual(requestContext: GraphQLRequestListener<Context>): void {
-  const deprecatedFields = new Set<string>();
-  
-  // Example: when a field is marked @deprecated, add it here:
-  // deprecatedFields.add('Account.sequence');
-  
-  // This would be expanded to check the actual query against the set
-  // For now, the metric is available for future use
 }
 
 /**

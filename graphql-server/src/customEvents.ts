@@ -27,6 +27,7 @@
  * below — a value not present in them is rejected before any SQL is built.
  */
 import type { Pool } from 'pg';
+import { ERROR_CODES, LuminaError, type ErrorCode } from './errorCodes';
 import { cursorCondition, KEYSETS, type PaginationDirection } from './pagination';
 
 export const NUMERIC_TYPES = new Set(['i32', 'u32', 'i64', 'u64', 'i128', 'u128']);
@@ -68,9 +69,16 @@ export interface CustomEventFilter {
   value: string;
 }
 
-export class CustomQueryError extends Error {
-  constructor(message: string) {
-    super(message);
+/**
+ * A custom-events query the server cannot serve.
+ *
+ * Bad filters are `BAD_USER_INPUT`; a contract or event the registered schema
+ * does not know is `NOT_FOUND`, because the identifier is the problem and a
+ * client can act on the difference.
+ */
+export class CustomQueryError extends LuminaError {
+  constructor(message: string, code: ErrorCode = ERROR_CODES.BAD_USER_INPUT) {
+    super(message, code);
     this.name = 'CustomQueryError';
   }
 }
@@ -173,17 +181,20 @@ export async function getCustomEvents(pool: Pool, query: CustomEventQuery) {
   const direction = query.direction ?? 'FORWARD';
   const isForward = direction === 'FORWARD';
   const queryOrder = isForward ? baseOrder : (baseOrder === 'DESC' ? 'ASC' : 'DESC');
-  const cursorOperator = baseOrder === 'ASC' ? (isForward ? '>' : '<') : (isForward ? '<' : '>');
   const schema = await getContractSchema(pool, query.network, query.contractId);
   if (!schema) {
-    throw new CustomQueryError(`No custom schema registered for contract ${query.contractId}`);
+    throw new CustomQueryError(
+      `No custom schema registered for contract ${query.contractId}`,
+      ERROR_CODES.NOT_FOUND
+    );
   }
 
   const event = schema.events.find(e => e.name === query.event);
   if (!event) {
     throw new CustomQueryError(
       `Contract ${query.contractId} has no event "${query.event}". ` +
-        `Available: ${schema.events.map(e => e.name).join(', ')}`
+        `Available: ${schema.events.map(e => e.name).join(', ')}`,
+      ERROR_CODES.NOT_FOUND
     );
   }
 
@@ -193,10 +204,8 @@ export async function getCustomEvents(pool: Pool, query: CustomEventQuery) {
   conditions.push(...buildFilterClause(event, query.where ?? [], params));
 
   if (query.cursor) {
-    params.push(query.cursor);
-    conditions.push(
-      `(ledger, event_id) ${cursorOperator} (SELECT ledger, event_id FROM custom_events WHERE event_id = $${params.length} AND network = $3 LIMIT 1)`
-    );
+    const condition = cursorCondition(params, KEYSETS.customEvents, query.cursor, direction, baseOrder);
+    if (condition) conditions.push(condition);
   }
 
   params.push(query.limit);

@@ -21,32 +21,6 @@ export const WELL_KNOWN_ASSETS = [
 ];
 
 /**
- * Fetch stellar.toml from a domain.
- *
- * Stellar.toml is served at https://domain/.well-known/stellar.toml
- * This is a minimal implementation that fetches and parses the file.
- */
-async function fetchStellarToml(domain: string): Promise<Record<string, unknown> | null> {
-  try {
-    const url = `https://${domain}/.well-known/stellar.toml`;
-    const response = await fetch(url);
-
-    if (!response.ok) {
-      log.warn({ domain, status: response.status }, 'Failed to fetch stellar.toml');
-      return null;
-    }
-
-    const text = await response.text();
-    // Simple TOML-like parsing - in production, use a proper TOML parser
-    // For now, return the raw text as a fallback
-    return { raw: text, domain };
-  } catch (err) {
-    log.warn({ domain, err: err instanceof Error ? err.message : String(err) }, 'Error fetching stellar.toml');
-    return null;
-  }
-}
-
-/**
  * Update issuer metadata for an asset.
  *
  * Fetches the issuer's home domain and stellar.toml, then updates the assets table.

@@ -22,6 +22,7 @@
 import crypto from 'crypto';
 import type { RequestHandler } from 'express';
 import type { Pool } from 'pg';
+import { ERROR_CODES, LuminaError } from './errorCodes';
 import { findApiKeyByHash, hashApiKey } from './keys';
 import { subsystem } from './logger';
 import { authAttempts } from './metrics';
@@ -84,13 +85,13 @@ const AUTH_FAILED_MESSAGE = 'Invalid or revoked API key.';
 /** Why a request was refused, for logs and metrics rather than for the client. */
 export type AuthFailureReason = 'missing' | 'invalid' | 'revoked' | 'hash-mismatch';
 
-/** A request that could not be attributed to a caller. Always a 401. */
-export class ApiKeyError extends Error {
+/** A request that could not be attributed to a caller. Always a 401 with `UNAUTHENTICATED`. */
+export class ApiKeyError extends LuminaError {
   readonly status = 401;
   readonly reason: AuthFailureReason;
 
   constructor(message: string, reason: AuthFailureReason) {
-    super(message);
+    super(message, ERROR_CODES.UNAUTHENTICATED);
     this.name = 'ApiKeyError';
     this.reason = reason;
   }
@@ -281,7 +282,7 @@ export function apiKeyAuthMiddleware(options: ApiKeyAuthOptions): RequestHandler
               message: err.message,
               // Uniform code: a client branches on this, not on prose, and the
               // per-reason detail stays in the log where it is safe to be specific.
-              extensions: { code: 'UNAUTHENTICATED' },
+              extensions: { code: ERROR_CODES.UNAUTHENTICATED },
             },
           ],
         });

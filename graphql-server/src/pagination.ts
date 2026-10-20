@@ -8,6 +8,7 @@
  * and looks like a bug in their code rather than in the request.
  */
 import { GraphQLError } from 'graphql';
+import { ERROR_CODES } from './errorCodes';
 
 /** Page size a query uses when the caller does not ask for one. */
 export const DEFAULT_PAGE_LIMIT = 20;
@@ -21,13 +22,13 @@ export function getPageSize(limit: number | null | undefined, defaultLimit = DEF
   const pageSize = limit ?? defaultLimit;
   if (!Number.isSafeInteger(pageSize) || pageSize < 1) {
     throw new GraphQLError(`Page size must be a positive integer; received ${pageSize}.`, {
-      extensions: { code: 'BAD_USER_INPUT' },
+      extensions: { code: ERROR_CODES.BAD_USER_INPUT },
     });
   }
   if (pageSize > MAX_PAGE_SIZE) {
     throw new GraphQLError(
       `Requested page size ${pageSize} exceeds the maximum of ${MAX_PAGE_SIZE}.`,
-      { extensions: { code: 'BAD_USER_INPUT' } }
+      { extensions: { code: ERROR_CODES.BAD_USER_INPUT } }
     );
   }
   return pageSize;
@@ -47,7 +48,7 @@ export type CursorValue = number | string;
 export class InvalidCursorError extends GraphQLError {
   constructor(detail: string) {
     super(`Invalid cursor: ${detail} Cursors are opaque — pass back the one a previous page returned.`, {
-      extensions: { code: 'INVALID_CURSOR' },
+      extensions: { code: ERROR_CODES.INVALID_CURSOR },
     });
     this.name = 'InvalidCursorError';
   }
@@ -175,6 +176,9 @@ export function decodeCursor(raw: string, query: string, arity: number): CursorV
 
 export interface PageInfo {
   hasNextPage: boolean;
+  hasPreviousPage: boolean;
+  startCursor: string | null;
+  endCursor: string | null;
   cursor: string | null;
   totalCount?: TotalCount | null;
 }
@@ -182,11 +186,11 @@ export interface PageInfo {
 /**
  * The `pageInfo` for one page of results.
  *
- * `hasNextPage` is "a full page came back", which costs nothing extra and is
- * what every other paginated query has always reported. The cursor is the last
- * row's sort key whenever there is one, including on a short final page: a client
- * that stops because `hasNextPage` is false has nothing to do with it, and a
- * client that pages anyway gets the empty page that means it is done.
+ * `hasNextPage` and `hasPreviousPage` describe the page in the traversal
+ * direction: a full page going forward means there is more after it, a full
+ * page going backward means there is more before it. `startCursor` and
+ * `endCursor` name the first and last rows on the page; `cursor` is the one to
+ * pass back for the next page (the end cursor in a forward traversal).
  *
  * `keyOf` returns the columns the query keysets on, in the same order — one
  * value for a single-column ordering, a tuple for a composite one.
@@ -196,22 +200,46 @@ export function pageInfo<T>(
   items: readonly T[],
   limit: number,
   keyOf: (item: T) => CursorValue | readonly CursorValue[],
+  direction: PaginationDirection = 'FORWARD',
+  hasPrior = false,
   totalCount?: TotalCount | null
 ): PageInfo {
+  const first = items.at(0);
   const last = items.at(-1);
-  if (last === undefined) return { hasNextPage: false, cursor: null, totalCount: totalCount ?? null };
-  const key = keyOf(last);
-  const values = typeof key === 'string' || typeof key === 'number' ? [key] : [...key];
-  if (values.length !== keyset.columns.length) {
+
+  if (first === undefined || last === undefined) {
+    return {
+      hasNextPage: false,
+      hasPreviousPage: hasPrior,
+      startCursor: null,
+      endCursor: null,
+      cursor: null,
+      totalCount: totalCount ?? null,
+    };
+  }
+
+  const firstKey = keyOf(first);
+  const firstValues = typeof firstKey === 'string' || typeof firstKey === 'number' ? [firstKey] : [...firstKey];
+  const lastKey = keyOf(last);
+  const lastValues = typeof lastKey === 'string' || typeof lastKey === 'number' ? [lastKey] : [...lastKey];
+  if (firstValues.length !== keyset.columns.length || lastValues.length !== keyset.columns.length) {
     // A resolver minting the wrong number of values would issue cursors its own
     // query rejects; failing here names the mistake at its source.
     throw new Error(
-      `${keyset.query}: cursor has ${values.length} sort keys but its keyset has ${keyset.columns.length}.`
+      `${keyset.query}: cursor has ${lastValues.length} sort keys but its keyset has ${keyset.columns.length}.`
     );
   }
+
+  const startCursor = encodeCursor(keyset.query, firstValues);
+  const endCursor = encodeCursor(keyset.query, lastValues);
+  const isFullPage = items.length === limit;
+
   return {
-    hasNextPage: items.length === limit,
-    cursor: encodeCursor(keyset.query, values),
+    hasNextPage: direction === 'FORWARD' ? isFullPage : hasPrior,
+    hasPreviousPage: direction === 'FORWARD' ? hasPrior : isFullPage,
+    startCursor,
+    endCursor,
+    cursor: endCursor,
     totalCount: totalCount ?? null,
   };
 }

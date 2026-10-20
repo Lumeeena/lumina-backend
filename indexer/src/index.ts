@@ -37,6 +37,7 @@
  *   <NAME>_REGISTRY_NETWORK_PASSPHRASE — Overrides the passphrase used for this network's registry simulation (default: that network's own)
  */
 
+import type { Pool } from 'pg';
 import {
   createPool,
   getAccountsNeedingRefresh,
@@ -52,7 +53,6 @@ import {
   enqueueLedgerRetry,
   recordContractStorageHistory,
   recordFailedLedger,
-  clearLedgerFailures,
   findLedgerGaps,
   countLedgerGaps,
   getIndexerCursor,
@@ -71,9 +71,9 @@ import {
   indexingErrors,
   ledgerIndexDuration,
   recordHorizonTip,
+  recordBackfillLedger,
   recordIndexedLedger,
   recordLedgerGaps,
-  ledgerGapsCount,
   accountCacheSize,
   sorobanEventsTruncated,
   contractsWatched,
@@ -99,7 +99,6 @@ import { initErrorTracking, captureException, shutdownErrorTracking } from './er
 import { LeaderLock } from './leaderLock';
 import { getRetentionInfo, getContractStorageEntries } from './soroban';
 import { getLatestLedgerSequence, getLedger, getLedgerOperations, getLedgerTransactions, getTrades, initializeHorizonClient } from './horizon';
-import type { RequestPurpose } from './throttle';
 import { getActiveContracts, resolveRegistryConfigs, type RegistryConfig } from './registry';
 import { getEvents, getLatestLedgerSequence as getLatestRpcLedgerSequence, type ContractEvent } from './soroban';
 import { resolveNetworks, type NetworkConfig } from './networks';
@@ -286,14 +285,11 @@ function pruneAccountCache(cache: Map<string, number>, order: string[], now: num
 async function fetchAndIndexLedger(loop: NetworkLoop, sequence: number, isBackfillMode = false): Promise<void> {
   const name = loop.network.name;
   log.debug({ network: name, ledger: sequence, isBackfill: isBackfillMode }, 'indexing ledger');
-  
-  const isBackfill = isBackfillMode || (loop.state.latestHorizonLedger - sequence > 10);
-  const purpose: RequestPurpose = isBackfill ? 'backfill' : 'tip';
-  
+
   const [ledger, transactions, operations] = await Promise.all([
-    getLedger(loop.network.horizonUrl, sequence, purpose),
-    getLedgerTransactions(loop.network.horizonUrl, sequence, purpose),
-    getLedgerOperations(loop.network.horizonUrl, sequence, purpose),
+    getLedger(loop.network.horizonUrl, sequence),
+    getLedgerTransactions(loop.network.horizonUrl, sequence),
+    getLedgerOperations(loop.network.horizonUrl, sequence),
   ]);
 
   const addresses = new Set<string>();
@@ -355,7 +351,7 @@ export function calculateBackoffWithJitter(
   if (baseMs <= 0) return 0;
   const ceiling = Math.min(maxDelayMs, baseMs * 2 ** (attempt - 1));
   const half = Math.floor(ceiling / 2);
-  return half + Math.floor(randomFn() * (ceiling - half + 1));
+  return Math.min(ceiling, half + Math.floor(randomFn() * (ceiling - half + 1)));
 }
 
 /** Records a ledger that exhausted its retries for the durable retry worker to pick up. */
@@ -1050,6 +1046,10 @@ async function run() {
       log.info('shutdown requested while waiting for the leader lock');
       return;
     }
+  }
+
+  if (isRetentionEnabled(RETENTION_WINDOWS)) {
+    void runRetentionLoop();
   }
 
   isLoopRunning = true;
