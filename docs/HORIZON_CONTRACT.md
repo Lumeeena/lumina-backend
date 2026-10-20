@@ -62,6 +62,7 @@ Fetched with automatic pagination (`_links.next.href`) and stored in the `transa
 | `successful` | `boolean` | `successful` (`boolean`, NOT NULL) | **Yes** | Success/failure filtering (`successful: Boolean`) fails. |
 | `memo_type` | `string` | `memo_type` (`text`, NOT NULL) | **Yes** | Memo type classification fails. |
 | `memo` | `string` (optional) | `memo` (`text`, nullable) | No (nullable) | If omitted when `memo_type` indicates a memo, trigram full-text search cannot match the transaction. |
+| `source_account_sequence` | `string` (integer) | Not stored | No | A `create_claimable_balance` in the transaction cannot be given its real balance id (Horizon's operation record omits it), so a later `claim_claimable_balance` will not mark it claimed. |
 
 ---
 

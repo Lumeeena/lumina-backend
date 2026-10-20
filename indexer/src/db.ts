@@ -9,6 +9,7 @@ import { PREPARED_STATEMENTS } from './preparedStatements';
 const log = subsystem('db');
 import { parseContractSchema, type ContractSchema } from './customSchema';
 import type { DecodedCustomEvent } from './customDecode';
+import { claimableBalanceId } from './claimableBalanceId';
 
 /**
  * Postgres SQLSTATE for a CHECK constraint violation.
@@ -455,6 +456,8 @@ export async function indexLedger(
   operations: HorizonOperation[],
   accountAddresses: string[] = []
 ): Promise<void> {
+  // A created claimable balance's id is derived from its transaction.
+  const transactionsByHash = new Map(transactions.map(tx => [tx.hash, tx]));
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
@@ -561,7 +564,7 @@ export async function indexLedger(
 
         // Process liquidity pools, claimable balances, path payments, and set_options operations
         await processLiquidityPoolOperation(client, network, ledger.sequence, op);
-        await processClaimableBalanceOperation(client, network, ledger.sequence, op);
+        await processClaimableBalanceOperation(client, network, ledger.sequence, op, transactionsByHash.get(op.transaction_hash));
         await processPathPaymentOperation(client, network, ledger.sequence, op);
         await processSetOptionsOperation(client, network, ledger.sequence, op);
 
@@ -1694,18 +1697,45 @@ export async function getAccountPoolShares(
 
 // ─── Claimable Balances (Issue #202) ──────────────────────────────────────────
 
+/**
+ * The id of the balance a claimable-balance operation creates or claims.
+ *
+ * A claim carries it as `balance_id`. A create does not (Horizon's operation
+ * record omits it), so it is derived from the containing transaction; keying a
+ * created balance by anything else means its claim never finds it. The
+ * operation id is only a last resort for a transaction Horizon returned
+ * without `source_account_sequence`.
+ */
+function balanceIdFor(operation: HorizonOperation, transaction?: HorizonTransaction): string {
+  const reported = (operation.balance_id as string) || (operation.claimable_balance_id as string);
+  if (reported) return reported;
+  if (transaction?.source_account && transaction.source_account_sequence) {
+    return claimableBalanceId(transaction.source_account, transaction.source_account_sequence, operation.id);
+  }
+  log.warn(
+    { operationId: operation.id, transactionHash: operation.transaction_hash },
+    'claimable balance id could not be derived (no source_account_sequence); keyed by operation id, so its claim will not match'
+  );
+  return operation.id;
+}
+
 export async function processClaimableBalanceOperation(
   client: PoolClient,
   network: string,
   ledger: number,
-  operation: HorizonOperation
+  operation: HorizonOperation,
+  transaction?: HorizonTransaction
 ): Promise<void> {
   const opType = operation.type;
-  if (opType !== 'create_claimable_balance' && opType !== 'claim_claimable_balance') {
+  if (
+    opType !== 'create_claimable_balance' &&
+    opType !== 'claim_claimable_balance' &&
+    opType !== 'clawback_claimable_balance'
+  ) {
     return;
   }
 
-  const balanceId = (operation.balance_id as string) || (operation.claimable_balance_id as string) || operation.id;
+  const balanceId = balanceIdFor(operation, transaction);
   if (!balanceId) return;
 
   if (opType === 'create_claimable_balance') {
@@ -1761,6 +1791,18 @@ export async function processClaimableBalanceOperation(
            claimed_ledger = $3
        WHERE balance_id = $4 AND network = $5`,
       [claimant, operation.created_at, ledger, balanceId, network]
+    );
+  } else {
+    // The issuer took it back: it has left the ledger as surely as a claimed
+    // one, so it must stop reading as claimable. Nobody claimed it, so
+    // claimed_by stays null; claimed_at/claimed_ledger record when it left.
+    await client.query(
+      `UPDATE claimable_balances
+       SET status = 'clawed_back',
+           claimed_at = $1,
+           claimed_ledger = $2
+       WHERE balance_id = $3 AND network = $4`,
+      [operation.created_at, ledger, balanceId, network]
     );
   }
 }

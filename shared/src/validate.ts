@@ -130,6 +130,7 @@ export const TRANSACTION_SPEC: RecordSpec = {
   successful: 'boolean',
   memo_type: 'string',
   memo: 'string?',
+  source_account_sequence: 'string?',
 };
 
 export const OPERATION_SPEC: RecordSpec = {

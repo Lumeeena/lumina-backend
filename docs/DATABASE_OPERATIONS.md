@@ -73,6 +73,47 @@ index has been removed based on unobserved production usage. Run the report
 against a representative deployment and attach its output before deciding on
 any unused-index removal.
 
+### Transactions index use and growth
+
+The transactions-specific result sets at the end of
+[`db/audit-index-usage.sql`](../db/audit-index-usage.sql) report each index's
+scan counters, size, validity and constraint role, plus table insert/update/
+delete and sequential-scan counters, vacuum timestamps and heap/index/total
+sizes. `stats_reset` is included because these counters are cumulative and
+cannot be interpreted without their observation window.
+
+Static query-to-index mapping from the current schema and application query
+code (not measured deployment usage):
+
+| Index | Application query shape | Static assessment |
+| --- | --- | --- |
+| `transactions_pkey (hash, network)` | Lookup by transaction hash and network | Required lookup/uniqueness path |
+| `idx_transactions_network_ledger_hash (network, ledger, hash)` | Network-scoped list pages and ledger cursors | Matches the default list ordering and keyset |
+| `idx_transactions_network_successful_page (network, successful, ledger, hash)` | List pages filtered by success | Matches the success-filtered list shape |
+| `idx_transactions_network_source_page (network, source_account, ledger, hash)` | List pages filtered by account | Matches the source-account list shape |
+| `idx_transactions_network_created_at (network, created_at)` | Network plus date-range predicates | Can narrow date bounds; the list remains ordered by ledger |
+| `idx_transactions_memo_trgm` | Memo similarity search | Supports the trigram predicate |
+| `idx_transactions_ledger`, `idx_transactions_source`, `idx_transactions_created_at` | Legacy non-network-prefixed paths | Overlap with newer network-prefixed indexes for application paths; keep pending deployment counters and external-consumer review |
+
+This mapping is a hypothesis from SQL shape, not proof that an index is unused
+or redundant. In particular, a network-leading index is not a replacement for
+a legacy index for a query that omits `network`, and an index may be consumed
+by reporting outside this repository. Do not remove any of the overlapping
+indexes until the production report confirms usage over a representative
+window and the relevant owners have checked external queries.
+
+Take and retain dated snapshots of the result sets across a representative
+workload window; `pg_stat_user_tables` exposes cumulative row estimates, not
+historical table-size growth. Do not remove a zero-scan index if it enforces a
+unique/primary-key constraint, and do not call an index redundant based only on
+matching key columns without checking its predicate, operator class, included
+columns, and ordering. Run the plans in [`QUERY_PLANS.md`](QUERY_PLANS.md) as
+well: the seeded EXPLAIN dataset tests query shapes, but does not substitute for
+deployment statistics. Transactions already participate in the configurable,
+opt-in retention job; see [`RETENTION.md`](RETENTION.md). Its default remains
+unlimited, so deployments that do not configure a window intentionally retain
+all transaction history.
+
 ## Asynchronous account refreshes
 
 Ledger, transaction, and operation rows are committed together with durable

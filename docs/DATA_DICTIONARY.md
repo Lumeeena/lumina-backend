@@ -51,6 +51,7 @@ This document is the authoritative data dictionary for the Lumina PostgreSQL dat
 23. [account_signer_changes](#23-account_signer_changes)
 24. [account_threshold_changes](#24-account_threshold_changes)
 25. [account_state_history](#25-account_state_history)
+26. [effects](#26-effects)
 
 ---
 
@@ -346,15 +347,15 @@ Stellar claimable balance entries (escrowed balances waiting to be claimed).
 
 | Column | Type | Nullable | Default | Units / Format | Source | Description |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| `balance_id` | `TEXT` | No (PK) | None | 64-char Hex ID | Horizon (`id`) | Unique claimable balance identifier. |
+| `balance_id` | `TEXT` | No (PK) | None | Hex `ClaimableBalanceID` (`00000000` + 64 hex) | Derived for a create (Horizon's operation record omits it; see `indexer/src/claimableBalanceId.ts`); Horizon (`balance_id`) for a claim | Unique claimable balance identifier, as Horizon reports it. Rows indexed before #224 hold the creating operation's id instead and need re-indexing. |
 | `asset` | `TEXT` | No | None | Asset string | Horizon (`asset`) | Asset escrowed in the balance. |
 | `amount` | `NUMERIC(20, 7)`| No | None | Asset units ($10^{-7}$) | Horizon (`amount`) | Escrowed asset amount. |
 | `sponsor` | `TEXT` | Yes | None | Stellar address (`G...`) | Horizon (`sponsor`) | Account providing the base reserve. |
 | `claimants` | `JSONB` | No | `'[]'::jsonb`| JSONB Array | Horizon (`claimants`) | Array of valid claimants and release conditions. |
-| `status` | `TEXT` | No | `'unclaimed'`| String enum | Internal tracking | Current state: `'unclaimed'` or `'claimed'`. |
+| `status` | `TEXT` | No | `'unclaimed'`| String enum | Internal tracking | Current state: `'unclaimed'`, `'claimed'`, or `'clawed_back'` (taken back by the issuer). |
 | `claimed_by` | `TEXT` | Yes | None | Stellar address (`G...`) | Horizon / Inferred | Account that successfully claimed the balance. |
-| `claimed_at` | `TIMESTAMPTZ` | Yes | None | ISO 8601 UTC | Horizon / Inferred | Timestamp balance was claimed. |
-| `claimed_ledger`| `BIGINT` | Yes | None | Ledger sequence | Horizon / Inferred | Ledger sequence in which the claim occurred. |
+| `claimed_at` | `TIMESTAMPTZ` | Yes | None | ISO 8601 UTC | Horizon / Inferred | Timestamp balance was claimed or clawed back. |
+| `claimed_ledger`| `BIGINT` | Yes | None | Ledger sequence | Horizon / Inferred | Ledger sequence in which the claim or clawback occurred. |
 | `created_ledger`| `BIGINT` | No | None | Ledger sequence | Horizon | Ledger sequence in which balance was created. |
 | `created_at` | `TIMESTAMPTZ` | No | None | ISO 8601 UTC | Horizon | Creation timestamp. |
 | `network` | `TEXT` | No (PK) | `'mainnet'` | Text name | Internal | Network identifier. |
@@ -464,3 +465,22 @@ Stored copies of an account, one per observed last-modified ledger. Written by t
 | `flags` | `JSONB` | No | `'{}'` | JSONB Object | Horizon (`flags`) | Authorization flags at that state. |
 | `thresholds` | `JSONB` | No | `'{}'` | JSONB Object | Horizon (`thresholds`) | Signing thresholds at that state. |
 | `recorded_at` | `TIMESTAMPTZ` | No | `NOW()` | ISO 8601 UTC | Internal | Wall-clock time the copy was stored. Retention prunes on this column. |
+
+---
+
+### 26. `effects`
+Horizon effects: what each operation did to each account it touched (one payment is an `account_debited` on the sender and an `account_credited` on the recipient). Read by the `effects` query (#225); populated per ledger by the indexer (#203). The API maps `details` to a typed GraphQL shape per `type`.
+
+| Column | Type | Nullable | Default | Units / Format | Source | Description |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| `id` | `TEXT` | No (PK) | None | `<operation id>-<order>`, zero-padded | Horizon (`id`) | Effect id; sorts in chain order within a ledger. |
+| `paging_token` | `TEXT` | No | None | Opaque string | Horizon (`paging_token`) | Horizon's paging token for the effect. |
+| `operation_id` | `TEXT` | No | None | String Integer | Horizon (`id`, first half) | Operation that produced the effect. |
+| `ledger` | `BIGINT` | No | None | Ledger sequence | Derived from `operation_id` | Ledger the operation closed in; with `id`, the keyset the API pages by. |
+| `account` | `TEXT` | No | None | Stellar address | Horizon (`account`) | Account the effect happened to. |
+| `type` | `TEXT` | No | None | Horizon effect type name | Horizon (`type`) | e.g. `account_credited`, `trade`. |
+| `type_i` | `INTEGER` | No | None | Integer code | Horizon (`type_i`) | Horizon's numeric code for `type`. |
+| `created_at` | `TIMESTAMPTZ` | No | None | ISO 8601 UTC | Horizon (`created_at`) | When the ledger closed. |
+| `details` | `JSONB` | No | `'{}'` | JSONB Object | Horizon (type-specific fields) | The effect's type-specific fields, verbatim (amounts as decimal strings). |
+| `network` | `TEXT` | No (PK) | `'mainnet'` | Text name | Internal | Network identifier. |
+| `indexed_at` | `TIMESTAMPTZ` | No | `NOW()` | ISO 8601 UTC | Internal | Wall-clock time the row was written. |
