@@ -120,3 +120,53 @@ groups:
           severity: warning
         annotations:
           summary: "GraphQL PostgreSQL pool is replacing failed clients"
+
+  - name: lumina-backups
+    rules:
+      # Metrics are pushed by db/backup/lumina-backup.sh; see docs/BACKUPS.md.
+      # The database is the only copy of everything the indexer has collected, so
+      # a backup that has quietly stopped is a data-loss risk, not a nuisance.
+      - alert: BackupTooOld
+        # The daily job plus a few hours of grace. A failed run deliberately does
+        # not clear lumina_backup_last_success_timestamp_seconds, so this fires on
+        # the real condition — no successful backup — rather than on one failure.
+        expr: time() - lumina_backup_last_success_timestamp_seconds > 26 * 3600
+        for: 10m
+        labels:
+          severity: critical
+        annotations:
+          summary: "No successful database backup in over 26 hours"
+          runbook: "See docs/BACKUPS.md — check the lumina-backup CronJob and the backup job logs"
+
+      - alert: BackupFailed
+        # One run in a row, so the failure is visible before it becomes BackupTooOld.
+        expr: lumina_backup_last_run_success == 0
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "The last database backup run failed"
+          runbook: "See docs/BACKUPS.md — the failure is in the lumina-backup job logs and reported by name"
+
+      - alert: BackupVerifyFailed
+        # A failed weekly restore test means the newest backup is not proven
+        # restorable: treat it as critical, because a backup nobody has restored
+        # is a hypothesis, and this is the alert that says the hypothesis broke.
+        expr: lumina_backup_last_run_success{operation="verify"} == 0
+        for: 10m
+        labels:
+          severity: critical
+        annotations:
+          summary: "The database backup restore-verification failed"
+          runbook: "See docs/BACKUPS.md and docs/DISASTER_RECOVERY.md — the newest backup did not restore or did not match its manifest"
+
+      - alert: BackupMissing
+        # No backup metric at all: the job has never reported. Distinct from
+        # BackupTooOld, which assumes it reported successfully at least once.
+        expr: absent(lumina_backup_last_success_timestamp_seconds)
+        for: 1h
+        labels:
+          severity: critical
+        annotations:
+          summary: "No database backup has ever reported success"
+          runbook: "See docs/BACKUPS.md — is PUSHGATEWAY_URL reachable and the lumina-backup CronJob scheduled?"

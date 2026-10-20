@@ -1,0 +1,34 @@
+# Backup and restore-verification job: db/backup/lumina-backup.sh.
+#
+# Built on the same Postgres image the stack runs, pinned by digest, because
+# pg_dump refuses to dump a server newer than itself and a restore test should
+# exercise the same pg_restore an operator would reach for. Building against a
+# newer server is a build argument, not an edit:
+#
+#   docker build -f docker/Dockerfile.backup \
+#     --build-arg POSTGRES_IMAGE=postgres:17-alpine .
+#
+# The image also carries the server binaries, which is what lets `verify`
+# start a throwaway cluster inside its own container instead of needing a
+# second database to restore into.
+ARG POSTGRES_IMAGE=postgres:16-alpine@sha256:721873c34ceb9f8d8fc265984940dc982404c105f19ad51be9fdc5970a6080ea
+
+# rclone gives one upload path for a mounted volume and every object store it
+# supports (S3 and S3-compatible, GCS, Azure Blob, …). Taken from the upstream
+# image, pinned by digest, rather than from Alpine's community repository: it
+# is a static binary, so the version is exactly the one named here whatever
+# Alpine release the Postgres image is built on.
+FROM rclone/rclone:1.71.2@sha256:3103526c506266a9ecdf064efe99bf3677d92ef6407af124d8c56b4f49cbaa51 AS rclone
+
+FROM ${POSTGRES_IMAGE}
+COPY --from=rclone /usr/local/bin/rclone /usr/local/bin/rclone
+# curl pushes metrics to a Pushgateway.
+RUN apk add --no-cache curl
+
+COPY db/backup/lumina-backup.sh /usr/local/bin/lumina-backup
+# initdb refuses to run as root, and nothing here needs it: run as the image's
+# own unprivileged postgres user (uid 70).
+USER postgres
+WORKDIR /tmp
+ENTRYPOINT ["/usr/local/bin/lumina-backup"]
+CMD ["backup"]

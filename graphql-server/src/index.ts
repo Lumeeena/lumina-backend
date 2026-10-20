@@ -49,6 +49,7 @@ import { ERROR_CODES, errorWithStableCode, withStableErrorCode } from './errorCo
 import { loadSlowOperationThresholdMs, slowOperationPlugin } from './slowOperations';
 import { scheduledExportOptions, startScheduledExports } from './scheduledExport';
 import { loadMigrations, runMigrations } from './migrations';
+import { resolveDatabaseUrl } from '@lumina/shared';
 
 interface Context extends BaseContext {
   correlationId?: string;
@@ -64,12 +65,15 @@ const VERSION = packageJson.version;
 
 const typeDefs = readFileSync(join(__dirname, 'schema.graphql'), 'utf-8');
 
-const DATABASE_URL = process.env['DATABASE_URL'] ?? 'postgresql://localhost:5432/lumina';
+// Each URL may instead come from a file (`DATABASE_URL_FILE`), or have its
+// password come from one (`DATABASE_PASSWORD_FILE`), so a secret store never
+// has to put the credential in the environment. See docs/SECRETS.md.
+const DATABASE_URL = databaseUrlOrExit('DATABASE_URL') ?? 'postgresql://localhost:5432/lumina';
 // Optional read-only connection string. When set, HTTP queries are served from
 // the replica; writes, migrations, health/metrics sampling, the export COPY
 // stream and LISTEN all stay on the primary below. See
 // docs/DATABASE_OPERATIONS.md for the replication-lag caveats.
-const READ_DATABASE_URL = process.env['READ_DATABASE_URL']?.trim() || null;
+const READ_DATABASE_URL = databaseUrlOrExit('READ_DATABASE_URL')?.trim() || null;
 const PORT = parseInt(process.env['PORT'] ?? '4000', 10);
 const MAX_SUBSCRIPTIONS = parseInt(process.env['MAX_SUBSCRIPTIONS'] ?? '500', 10);
 const SUBSCRIPTION_QUEUE_LIMIT = parseInt(process.env['SUBSCRIPTION_QUEUE_LIMIT'] ?? '64', 10);
@@ -228,6 +232,15 @@ async function main() {
 
   // Ahead of the GraphQL middleware so an operator can always reach them, even
   // while the schema layer is unhappy.
+  //
+  // `/live` is the liveness probe: answering at all is the whole check. It
+  // deliberately ignores the database, which `/health` (the readiness probe)
+  // covers — a database outage should take replicas out of rotation, not
+  // restart every one of them at once.
+  app.get('/live', (_req, res) => {
+    res.json({ status: 'ok', uptimeSeconds: Math.round((Date.now() - startedAt) / 1000) });
+  });
+
   app.get('/health', (_req, res) => {
     buildServerHealth({
       pool,
@@ -373,6 +386,16 @@ main().catch(err => {
   log.fatal({ err: err instanceof Error ? err.message : err }, 'failed to start graphql server');
   process.exit(1);
 });
+
+/** A misconfigured secret is a startup failure, reported without the value. */
+function databaseUrlOrExit(name: string): string | undefined {
+  try {
+    return resolveDatabaseUrl(name);
+  } catch (err) {
+    log.fatal({ err: err instanceof Error ? err.message : err }, 'invalid database configuration');
+    process.exit(1);
+  }
+}
 
 /** Never log a database URL with its password in it. */
 function redactUrl(url: string): string {

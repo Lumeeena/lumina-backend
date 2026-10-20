@@ -1,0 +1,81 @@
+# Daily logical backup: pg_dump through an exported snapshot, uploaded with a
+# checksum and a manifest of row counts, then pruned to the retention window.
+# See docs/BACKUPS.md.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: lumina-backup
+  labels:
+    app.kubernetes.io/name: lumina-backup
+    app.kubernetes.io/component: backup
+spec:
+  # Off-peak, and in UTC regardless of the controller's local time zone.
+  schedule: "0 2 * * *"
+  timeZone: Etc/UTC
+  # Two dumps of one database at once only double the load; a run still going
+  # when the next is due means something is wrong, and the metrics will say so.
+  concurrencyPolicy: Forbid
+  # If the controller was down at 02:00, still run as long as it is within an
+  # hour, rather than skipping the day.
+  startingDeadlineSeconds: 3600
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      activeDeadlineSeconds: 14400
+      template:
+        metadata:
+          labels:
+            app.kubernetes.io/name: lumina-backup
+            app.kubernetes.io/component: backup
+        spec:
+          restartPolicy: Never
+          serviceAccountName: lumina-backup
+          automountServiceAccountToken: false
+          enableServiceLinks: false
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 70 # `postgres` in postgres:16-alpine
+            runAsGroup: 70
+            fsGroup: 70
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+            - name: backup
+              image: lumina-backup
+              args: ["backup"]
+              envFrom:
+                - configMapRef:
+                    name: lumina-backup
+              resources:
+                requests:
+                  cpu: 250m
+                  memory: 256Mi
+                limits:
+                  cpu: "2"
+                  memory: 1Gi
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop: ["ALL"]
+              volumeMounts:
+                - name: database-credentials
+                  mountPath: /var/run/secrets/lumina/database
+                  readOnly: true
+                - name: work
+                  mountPath: /work
+          volumes:
+            - name: database-credentials
+              secret:
+                secretName: lumina-backup-db
+                defaultMode: 0440
+                items:
+                  - key: password
+                    path: password
+            # Holds one compressed dump before upload. docs/DISASTER_RECOVERY.md
+            # records archive sizes to size this from.
+            - name: work
+              emptyDir:
+                sizeLimit: 20Gi

@@ -7,6 +7,7 @@ import {
   buildDebugConfiguration,
   buildHealthReport,
   healthStatusCode,
+  livenessStatusCode,
   startHealthServer,
   type DebugConfiguration,
   type IndexerState,
@@ -349,4 +350,83 @@ test('startToleranceSeconds threshold is honoured as configured', async () => {
 
   // Expired under the default threshold but still within the configured one.
   assert.equal(report.status, 'starting');
+});
+
+// ── /live: the liveness probe ────────────────────────────────────────────────
+
+test('liveness ignores lag, so a restored indexer catching up is not restarted', async () => {
+  // Hundreds of ledgers behind, but indexing one every few seconds: the state
+  // straight after a restore. /health is right to call this degraded; a
+  // liveness probe that agreed would kill the catch-up and crash-loop.
+  const report = await buildHealthReport(
+    state({ latestIndexedLedger: 500, latestHorizonLedger: 1000 }),
+    null,
+    THRESHOLDS,
+    NOW
+  );
+  assert.equal(healthStatusCode(report), 503);
+  assert.equal(livenessStatusCode(report), 200);
+});
+
+test('liveness fails when the loop has stopped making progress', async () => {
+  const report = await buildHealthReport(state({ lastIndexedAt: NOW - 120_000 }), null, THRESHOLDS, NOW);
+  assert.equal(livenessStatusCode(report), 503);
+});
+
+test('liveness tolerates a cold start but not one that never indexes', async () => {
+  const booting = await buildHealthReport(
+    state({ lastIndexedAt: null, startedAt: NOW - 30_000 }),
+    null,
+    THRESHOLDS,
+    NOW
+  );
+  assert.equal(livenessStatusCode(booting), 200);
+
+  const neverIndexed = await buildHealthReport(
+    state({ lastIndexedAt: null, startedAt: NOW - 600_000 }),
+    null,
+    THRESHOLDS,
+    NOW
+  );
+  assert.equal(livenessStatusCode(neverIndexed), 503);
+});
+
+test('GET /live never touches the database', async () => {
+  let queries = 0;
+  const countingDeadPool = {
+    query: async () => {
+      queries++;
+      throw new Error('connection refused');
+    },
+  } as unknown as Pool;
+  const server = startHealthServer({
+    port: 0,
+    // The server reads the real clock, so the state has to be fresh against it.
+    getState: () => state({
+      latestIndexedLedger: 10,
+      latestHorizonLedger: 1000,
+      lastIndexedAt: Date.now() - 5_000,
+      startedAt: Date.now() - 120_000,
+    }),
+    getDebugConfiguration: () => buildDebugConfiguration(debugConfig, 'testnet', []),
+    pool: countingDeadPool,
+  });
+  await new Promise<void>(resolve => server.once('listening', resolve));
+  const address = server.address();
+  assert.ok(address && typeof address !== 'string');
+
+  try {
+    const live = await fetch(`http://127.0.0.1:${address.port}/live`);
+    assert.equal(live.status, 200);
+    assert.equal(queries, 0);
+
+    // The same state is not ready: the database is down and it is far behind.
+    const ready = await fetch(`http://127.0.0.1:${address.port}/ready`);
+    assert.equal(ready.status, 503);
+    assert.equal(queries, 1);
+  } finally {
+    await new Promise<void>((resolve, reject) => {
+      server.close(err => err ? reject(err) : resolve());
+    });
+  }
 });

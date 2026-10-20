@@ -23,9 +23,10 @@
 import { readFileSync } from 'fs';
 import { join } from 'path';
 import { Pool } from 'pg';
+import { resolveDatabaseUrl } from '@lumina/shared';
 import { createPool } from './db';
 
-const DATABASE_URL = process.env['DATABASE_URL'] ?? 'postgresql://localhost:5432/lumina';
+const DATABASE_URL = resolveDatabaseUrl() ?? 'postgresql://localhost:5432/lumina';
 
 interface SchemaDifference {
   type: 'missing_table' | 'missing_column' | 'missing_index';

@@ -1,5 +1,5 @@
 /**
- * The indexer's HTTP surface: `/health`, `/ready` and `/metrics`.
+ * The indexer's HTTP surface: `/health`, `/ready`, `/live` and `/metrics`.
  *
  * The indexer is a polling loop with no server of its own, which meant nothing
  * outside the process could tell a working one from a wedged one — Docker's
@@ -362,6 +362,23 @@ export function healthStatusCode(report: HealthReport): number {
   return report.status === 'degraded' ? 503 : 200;
 }
 
+/**
+ * HTTP status for `/live`: 503 only when the loop has stopped making progress.
+ *
+ * A liveness failure restarts the container, so it answers only the question a
+ * restart can fix — is this process wedged? Lag is left out on purpose: after a
+ * restore or an outage the indexer is legitimately hundreds of ledgers behind
+ * while it catches up, and restarting it then throws that progress away and
+ * crash-loops. The database is left out too (the report is built without a
+ * pool), because restarting every indexer during a database outage repairs
+ * nothing and adds reconnect load to a database that is already struggling.
+ * Both still fail `/health` and `/ready`, which is where an alert belongs.
+ */
+export function livenessStatusCode(report: HealthReport): number {
+  const freshness = report.checks.find(check => check.name === 'indexing-freshness');
+  return freshness === undefined || freshness.ok ? 200 : 503;
+}
+
 export interface HealthServerOptions {
   port: number;
   getState: () => IndexerState;
@@ -403,6 +420,20 @@ export function startHealthServer(options: HealthServerOptions): Server {
         res.writeHead(500, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ error: 'debug configuration unavailable' }));
       }
+      return;
+    }
+
+    if (url === '/live') {
+      buildHealthReport(options.getState(), null, options.thresholds)
+        .then(report => {
+          res.writeHead(livenessStatusCode(report), { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify(report, null, 2));
+        })
+        .catch(err => {
+          log.error({ err: err instanceof Error ? err.message : err }, 'liveness check failed');
+          res.writeHead(500, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ status: 'degraded', error: 'liveness check failed' }));
+        });
       return;
     }
 

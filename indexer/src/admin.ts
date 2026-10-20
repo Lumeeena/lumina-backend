@@ -19,10 +19,11 @@
  * Reads DATABASE_URL from the environment.
  */
 import { Pool } from 'pg';
+import { resolveDatabaseUrl } from '@lumina/shared';
 import { createPool, getLatestIndexedLedger, getEarliestIndexedLedger, findLedgerGaps, countLedgerGaps, indexLedger } from './db';
 import { getLedger, getLedgerTransactions, getLedgerOperations } from './horizon';
 
-const DATABASE_URL = process.env['DATABASE_URL'] ?? 'postgresql://localhost:5432/lumina';
+const DATABASE_URL = resolveDatabaseUrl() ?? 'postgresql://localhost:5432/lumina';
 
 function usage(): never {
   console.error(

@@ -1,0 +1,52 @@
+# Rejects any attempt to run the indexer with more than one replica.
+#
+# `replicas: 1` in a manifest is a default, not a constraint: `kubectl scale`,
+# an autoscaler or a well-meaning edit changes it without anyone reading the
+# comment that explains why it must not. This makes the API server refuse the
+# change instead, through both doors replicas can be changed by:
+#
+# - the StatefulSet itself (create, update, apply, edit), and
+# - its /scale subresource, which `kubectl scale` and every autoscaler use and
+#   which never passes through validation of the StatefulSet object.
+#
+# ValidatingAdmissionPolicy is built in and GA since Kubernetes 1.30; no webhook
+# or extra controller is involved. Cluster-scoped, so applying it needs
+# cluster-admin. Matched by name, because a /scale request carries the
+# StatefulSet's name but not its labels — rename the StatefulSet (for example
+# with a kustomize namePrefix) and the expression below must follow.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: lumina-indexer-single-replica
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: ["apps"]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["statefulsets", "statefulsets/scale"]
+  matchConditions:
+    - name: is-lumina-indexer
+      expression: request.name == 'lumina-indexer' || object.metadata.name == 'lumina-indexer'
+  validations:
+    # Both a StatefulSet and an autoscaling/v1 Scale keep the count at
+    # spec.replicas, so one expression covers both.
+    - expression: "!has(object.spec.replicas) || object.spec.replicas <= 1"
+      messageExpression: >-
+        'lumina-indexer is a single writer and cannot run ' + string(object.spec.replicas) +
+        ' replicas; see deploy/kubernetes/base/indexer/statefulset.yaml'
+      reason: Forbidden
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: lumina-indexer-single-replica
+spec:
+  policyName: lumina-indexer-single-replica
+  validationActions: ["Deny"]
+  matchResources:
+    namespaceSelector:
+      matchLabels:
+        # Keep in step with the overlay's namespace if it changes.
+        kubernetes.io/metadata.name: lumina
