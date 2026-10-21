@@ -540,6 +540,103 @@ export async function getLedgerBySequence(pool: Pool, network: string, sequence:
   return rows[0] ? mapLedger(rows[0]) : null;
 }
 
+export interface LedgerSequenceRange {
+  startLedger: number;
+  endLedger: number;
+}
+
+export interface LedgerCoverage {
+  network: string;
+  startLedger: number;
+  endLedger: number;
+  complete: boolean;
+  indexedLedgerCount: number;
+  indexedRanges: LedgerSequenceRange[];
+  gaps: LedgerSequenceRange[];
+}
+
+/** Reports indexed segments and missing intervals within an inclusive request range. */
+export async function getLedgerCoverage(
+  pool: Pool,
+  network: string,
+  startLedger: number,
+  endLedger: number
+): Promise<LedgerCoverage> {
+  const { rows } = await pool.query<{
+    is_indexed: boolean;
+    range_start: string;
+    range_end: string;
+    indexed_count: string;
+  }>(
+    `WITH numbered AS (
+       SELECT sequence,
+              sequence - ROW_NUMBER() OVER (ORDER BY sequence) AS island
+       FROM ledgers
+       WHERE network = $1 AND sequence BETWEEN $2 AND $3
+     ),
+     coverage AS (
+       SELECT MIN(sequence) AS range_start,
+              MAX(sequence) AS range_end,
+              COUNT(*)::bigint AS indexed_count
+       FROM numbered
+       GROUP BY island
+     ),
+     ordered_coverage AS (
+       SELECT range_start,
+              range_end,
+              indexed_count,
+              LAG(range_end) OVER (ORDER BY range_start) AS previous_end
+       FROM coverage
+     ),
+     segments AS (
+       SELECT TRUE AS is_indexed, range_start, range_end, indexed_count
+       FROM coverage
+       UNION ALL
+       SELECT FALSE, $2::bigint, MIN(range_start) - 1, 0::bigint
+       FROM coverage
+       HAVING MIN(range_start) > $2
+       UNION ALL
+       SELECT FALSE, previous_end + 1, range_start - 1, 0::bigint
+       FROM ordered_coverage
+       WHERE previous_end IS NOT NULL AND range_start > previous_end + 1
+       UNION ALL
+       SELECT FALSE, MAX(range_end) + 1, $3::bigint, 0::bigint
+       FROM coverage
+       HAVING MAX(range_end) < $3
+       UNION ALL
+       SELECT FALSE, $2::bigint, $3::bigint, 0::bigint
+       WHERE NOT EXISTS (SELECT 1 FROM coverage)
+     )
+     SELECT is_indexed, range_start::text, range_end::text, indexed_count::text
+     FROM segments
+     ORDER BY range_start, is_indexed DESC`,
+    [network, startLedger, endLedger]
+  );
+
+  const indexedRanges: LedgerSequenceRange[] = [];
+  const gaps: LedgerSequenceRange[] = [];
+  let indexedLedgerCount = 0;
+  for (const row of rows) {
+    const range = { startLedger: Number(row.range_start), endLedger: Number(row.range_end) };
+    if (row.is_indexed) {
+      indexedRanges.push(range);
+      indexedLedgerCount += Number(row.indexed_count);
+    } else {
+      gaps.push(range);
+    }
+  }
+
+  return {
+    network,
+    startLedger,
+    endLedger,
+    complete: gaps.length === 0,
+    indexedLedgerCount,
+    indexedRanges,
+    gaps,
+  };
+}
+
 export async function getLedgersBySequences(pool: Pool, network: string, sequences: readonly number[]) {
   if (sequences.length === 0) return new Map<number, ReturnType<typeof mapLedger>>();
   const { rows } = await pool.query<LedgerRow>(

@@ -8,6 +8,8 @@ import {
   getAccountsNeedingRefresh,
   getLatestIndexedEventLedger,
   getLatestIndexedLedger,
+  getNextLedgerForAudit,
+  getLedgerRowCounts,
   getTrackedContractStorageKeys,
   indexLedger,
   insertContractEvents,
@@ -242,6 +244,41 @@ test('getLatestIndexedLedger returns 0 when the table is empty', async () => {
 test('getLatestIndexedLedger returns the numeric max sequence', async () => {
   const pool = { query: async () => ({ rows: [{ max: '4242' }] }) } as unknown as Pool;
   assert.equal(await getLatestIndexedLedger(pool, 'mainnet'), 4242);
+});
+
+test('getNextLedgerForAudit advances by indexed sequence and wraps to the first ledger', async () => {
+  const queries: { sql: string; params: unknown[] }[] = [];
+  const pool = {
+    query: async (sql: string, params: unknown[]) => {
+      queries.push({ sql, params });
+      return { rows: queries.length === 1 ? [] : [{ sequence: '100' }] };
+    },
+  } as unknown as Pool;
+
+  assert.equal(await getNextLedgerForAudit(pool, 'testnet', 900), 100);
+  assert.equal(queries.length, 2);
+  assert.match(queries[0]!.sql, /ORDER BY sequence DESC LIMIT \$2/);
+  assert.match(queries[0]!.sql, /sequence > \$3 ORDER BY sequence ASC LIMIT 1/);
+  assert.deepEqual(queries[0]!.params, ['testnet', 100, 900]);
+  assert.match(queries[1]!.sql, /ORDER BY sequence DESC LIMIT \$2/);
+  assert.deepEqual(queries[1]!.params, ['testnet', 100]);
+});
+
+test('getLedgerRowCounts counts rows for one network and ledger', async () => {
+  let queryText = '';
+  let queryParams: unknown[] = [];
+  const pool = {
+    query: async (sql: string, params: unknown[]) => {
+      queryText = sql;
+      queryParams = params;
+      return { rows: [{ transactions: '2', operations: '7' }] };
+    },
+  } as unknown as Pool;
+
+  assert.deepEqual(await getLedgerRowCounts(pool, 'testnet', 4242), { transactions: 2, operations: 7 });
+  assert.match(queryText, /FROM transactions WHERE network = \$1 AND ledger = \$2/);
+  assert.match(queryText, /FROM operations WHERE network = \$1 AND ledger = \$2/);
+  assert.deepEqual(queryParams, ['testnet', 4242]);
 });
 
 test('getAccountsNeedingRefresh skips snapshots that already include the ledger', async () => {

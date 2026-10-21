@@ -22,7 +22,8 @@ test('loads migrations in order and expands initial schema include', () => {
     '015_operation_decoding', '015_retry_queue_network_index', '015_transactions_listing_covering_index',
     '016_assets_index_review', '016_event_transaction_context', '017_account_state_history',
     '017_signers_sponsorship_contracts_rollups', '018_dead_letters_and_cursors',
-    '019_operations_index_review', '020_effects',
+    '019_operations_index_review', '020_claimable_balances_listing', '020_effects',
+    '021_ledger_audit_window_index',
   ]);
   assert.match(migrations[0].sql, /CREATE TABLE IF NOT EXISTS ledgers/);
   assert.match(migrations[0].sql, /PRIMARY KEY \(id, network\)/);
@@ -66,6 +67,13 @@ test('concurrent migrations are sent one statement at a time', () => {
   assert.deepEqual(splitStatements(operations.sql).map((s: string) => s.split(/\s+/).slice(0, 3).join(' ')), [
     ...Array(3).fill('CREATE INDEX CONCURRENTLY'),
     ...Array(5).fill('DROP INDEX CONCURRENTLY'),
+    'INSERT INTO schema_migrations',
+  ]);
+
+  const ledgerAudit = loadMigrations().find(m => m.version === '021_ledger_audit_window_index');
+  assert.ok(ledgerAudit);
+  assert.deepEqual(splitStatements(ledgerAudit.sql).map((s: string) => s.split(/\s+/).slice(0, 3).join(' ')), [
+    'CREATE INDEX CONCURRENTLY',
     'INSERT INTO schema_migrations',
   ]);
 });

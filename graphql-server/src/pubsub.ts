@@ -74,6 +74,7 @@ export class LedgerNotifier {
   private stopped = false;
   private connecting = false;
   private attempt = 0;
+  private notificationListeners = new Set<(notification: IndexedNotification) => void>();
 
   private readonly createClient: (connectionString: string) => ListenClient;
   private readonly maxSubscribers: number;
@@ -103,6 +104,11 @@ export class LedgerNotifier {
   /** True once a LISTEN connection is established. */
   get connected(): boolean {
     return this.client !== null;
+  }
+
+  onNotification(listener: (notification: IndexedNotification) => void): () => void {
+    this.notificationListeners.add(listener);
+    return () => this.notificationListeners.delete(listener);
   }
 
   async start(): Promise<void> {
@@ -220,6 +226,13 @@ export class LedgerNotifier {
 
   /** Fan a notification out to every open subscriber. */
   publish(notification: IndexedNotification): void {
+    for (const listener of this.notificationListeners) {
+      try {
+        listener(notification);
+      } catch (err) {
+        this.log('notification listener failed', err instanceof Error ? err.message : err);
+      }
+    }
     for (const subscriber of this.subscribers) {
       if (subscriber.resolve) {
         const resolve = subscriber.resolve;

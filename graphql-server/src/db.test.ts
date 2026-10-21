@@ -9,6 +9,7 @@ import {
   getEventsByContract,
   getIndexedTip,
   getLedgers,
+  getLedgerCoverage,
   getOperations,
   getTransactions,
   handlePoolErrors,
@@ -51,6 +52,60 @@ test('mapLedger converts BIGINT strings and Date to GraphQL shape', () => {
     baseFee: 100,
     baseReserve: 5000000,
   });
+});
+
+test('getLedgerCoverage reports indexed intervals and gaps within the requested range', async () => {
+  const { pool, queries } = fakePool([
+    { is_indexed: true, range_start: '10', range_end: '12', indexed_count: '3' },
+    { is_indexed: false, range_start: '13', range_end: '14', indexed_count: '0' },
+    { is_indexed: true, range_start: '15', range_end: '15', indexed_count: '1' },
+    { is_indexed: false, range_start: '16', range_end: '20', indexed_count: '0' },
+  ]);
+
+  assert.deepEqual(await getLedgerCoverage(pool, 'testnet', 10, 20), {
+    network: 'testnet',
+    startLedger: 10,
+    endLedger: 20,
+    complete: false,
+    indexedLedgerCount: 4,
+    indexedRanges: [
+      { startLedger: 10, endLedger: 12 },
+      { startLedger: 15, endLedger: 15 },
+    ],
+    gaps: [
+      { startLedger: 13, endLedger: 14 },
+      { startLedger: 16, endLedger: 20 },
+    ],
+  });
+  assert.match(queries[0]!.sql, /sequence BETWEEN \$2 AND \$3/);
+  assert.deepEqual(queries[0]!.params, ['testnet', 10, 20]);
+});
+
+test('getLedgerCoverage reports a wholly unindexed range as one gap', async () => {
+  const { pool } = fakePool([
+    { is_indexed: false, range_start: '100', range_end: '200', indexed_count: '0' },
+  ]);
+
+  assert.deepEqual(await getLedgerCoverage(pool, 'mainnet', 100, 200), {
+    network: 'mainnet',
+    startLedger: 100,
+    endLedger: 200,
+    complete: false,
+    indexedLedgerCount: 0,
+    indexedRanges: [],
+    gaps: [{ startLedger: 100, endLedger: 200 }],
+  });
+});
+
+test('getLedgerCoverage marks a fully indexed range complete', async () => {
+  const { pool } = fakePool([
+    { is_indexed: true, range_start: '100', range_end: '102', indexed_count: '3' },
+  ]);
+
+  const coverage = await getLedgerCoverage(pool, 'mainnet', 100, 102);
+  assert.equal(coverage.complete, true);
+  assert.deepEqual(coverage.gaps, []);
+  assert.deepEqual(coverage.indexedRanges, [{ startLedger: 100, endLedger: 102 }]);
 });
 
 test('PostgreSQL TIMESTAMPTZ round-trips an offset instant as UTC', { skip: !process.env['TEST_DATABASE_URL'] }, async () => {

@@ -216,6 +216,13 @@ export const ledgerGapsCount = new Gauge({
   registers: [registry],
 });
 
+export const ledgerCountDiscrepancies = new Counter({
+  name: 'lumina_ledger_count_discrepancies_total',
+  help: 'Sampled Horizon-versus-database transaction or operation count discrepancies, by network and entity.',
+  labelNames: ['network', 'entity'] as const,
+  registers: [registry],
+});
+
 export const lastSuccessfulIndexTimestamp = new Gauge({
   name: 'lumina_last_successful_index_timestamp_seconds',
   help: 'Unix time of the last successfully indexed ledger, by network.',

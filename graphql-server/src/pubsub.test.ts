@@ -118,6 +118,25 @@ test('a notification reaches every open subscriber', async () => {
   await notifier.stop();
 });
 
+test('notification listeners receive events without consuming subscription slots', async () => {
+  const { notifier, clients } = harness({ maxSubscribers: 1 });
+  const received: IndexedNotification[] = [];
+  const unsubscribe = notifier.onNotification(notification => received.push(notification));
+  await notifier.start();
+
+  const sub = notifier.subscribe();
+  clients[0].emit(ledgerPayload(101));
+
+  assert.equal(notifier.subscriberCount, 1);
+  assert.deepEqual(received, [{ kind: 'ledger', ledger: 101, network: undefined, transactions: 1, operations: undefined, events: undefined }]);
+  assert.equal((await sub.next()).value?.ledger, 101);
+
+  unsubscribe();
+  clients[0].emit(ledgerPayload(102));
+  assert.equal(received.length, 1);
+  await notifier.stop();
+});
+
 test('notifications on another channel are ignored', async () => {
   const { notifier, clients } = harness();
   await notifier.start();

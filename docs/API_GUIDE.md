@@ -631,6 +631,31 @@ query {
   query is exactly when something is wrong, and that is when a client most wants
   an answer rather than an error.
 
+### Validate ledger range coverage
+
+Before treating an empty range query as “nothing happened,” ask whether every
+ledger in the requested inclusive interval is indexed:
+
+```graphql
+query {
+  ledgerCoverage(network: TESTNET, startLedger: 1000, endLedger: 1100) {
+    network
+    startLedger
+    endLedger
+    complete
+    indexedLedgerCount
+    indexedRanges { startLedger endLedger }
+    gaps { startLedger endLedger }
+  }
+}
+```
+
+`complete` is true only when the entire requested range is present. `indexedRanges`
+and `gaps` are inclusive contiguous intervals, so a large missing span is
+reported once rather than as one entry per ledger. A gap means the ledger is
+not indexed; it may be beyond the current chain tip, so compare with
+`indexerStatus.horizonLedger` when that distinction matters.
+
 ## Persisted queries
 
 The server accepts automatic persisted queries (APQ): send the SHA-256 of your

@@ -33,6 +33,7 @@ CREATE TABLE IF NOT EXISTS ledgers (
 -- reindex the prune cannot rely on physical order. See
 -- docs/LEDGERS_INDEX_REVIEW.md.
 CREATE INDEX idx_ledgers_closed_at ON ledgers (closed_at DESC);
+CREATE INDEX idx_ledgers_network_sequence ON ledgers (network, sequence DESC);
 
 -- ─── Transactions ─────────────────────────────────────────────────────────────
 

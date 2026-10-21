@@ -15,6 +15,7 @@ import { useServer } from 'graphql-ws/lib/use/ws';
 import { WebSocketServer } from 'ws';
 import { to as copyTo } from 'pg-copy-streams';
 import { createContext, resolvers, type BaseContext } from './resolvers';
+import { latestLedgerCache } from './latestLedgerCache';
 import { buildCsvExportStatement } from './export';
 import { getNetworks, networkEnumValue } from './networks';
 import { persistedQueryOption } from './persistedQueries';
@@ -123,6 +124,9 @@ const notifier = new LedgerNotifier({
   maxSubscribers: MAX_SUBSCRIPTIONS,
   queueLimit: SUBSCRIPTION_QUEUE_LIMIT,
   log: (message, detail) => subsystem('pubsub').info({ detail }, message),
+});
+notifier.onNotification(notification => {
+  if (notification.kind === 'ledger') latestLedgerCache.invalidate(notification.network);
 });
 let stopScheduledExports: () => Promise<void> = async () => {};
 

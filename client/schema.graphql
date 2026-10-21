@@ -314,6 +314,21 @@ type Query {
   ): Ledger
 
   """
+  Report which ledgers in an inclusive range are indexed and which are missing.
+
+  Use this before relying on a range query: `complete` is true only when every
+  requested sequence is indexed. Missing sequences may be beyond the chain tip.
+  """
+  ledgerCoverage(
+    """Network to read; defaults to the primary network configured for this deployment."""
+    network: Network
+    """First ledger in the inclusive range; must be positive."""
+    startLedger: Int!
+    """Last ledger in the inclusive range; must be greater than or equal to startLedger."""
+    endLedger: Int!
+  ): LedgerCoverage!
+
+  """
   Fetch indexed ledgers, newest first.
 
   The range a throughput chart needs: `ledger(sequence:)` and `latestLedger`
@@ -688,6 +703,23 @@ type LedgerPage {
   items: [Ledger!]!
   """Where to resume; see `PageInfo`."""
   pageInfo: PageInfo!
+}
+
+"""Indexed and missing contiguous segments within a requested ledger range."""
+type LedgerCoverage {
+  network: Network!
+  startLedger: Int!
+  endLedger: Int!
+  complete: Boolean!
+  indexedLedgerCount: Int!
+  indexedRanges: [LedgerSequenceRange!]!
+  gaps: [LedgerSequenceRange!]!
+}
+
+"""An inclusive contiguous ledger interval."""
+type LedgerSequenceRange {
+  startLedger: Int!
+  endLedger: Int!
 }
 
 """A page of accounts. Only accounts the indexer has seen — see `accounts`."""

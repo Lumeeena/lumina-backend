@@ -59,6 +59,20 @@ export const horizonAccountFallbacks = new Counter({
   registers: [registry],
 });
 
+export const latestLedgerCacheRequests = new Counter({
+  name: 'lumina_graphql_latest_ledger_cache_requests_total',
+  help: 'Latest-ledger cache lookups by hit or miss.',
+  labelNames: ['result'] as const,
+  registers: [registry],
+});
+
+export const latestLedgerCacheInvalidations = new Counter({
+  name: 'lumina_graphql_latest_ledger_cache_invalidations_total',
+  help: 'Latest-ledger cache entries invalidated by network and reason.',
+  labelNames: ['network', 'reason'] as const,
+  registers: [registry],
+});
+
 /**
  * Outbound Horizon traffic, by HTTP status. The fallback path is the only code
  * here that talks to a service this deployment does not control, and `error`

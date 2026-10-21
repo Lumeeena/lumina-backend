@@ -29,6 +29,7 @@ import {
   contractsWatched,
   retentionPrunedRows,
   accountCacheSize,
+  ledgerCountDiscrepancies,
 } from './metrics';
 
 /** The current value of a counter/gauge, optionally for one label set. */
@@ -69,6 +70,15 @@ test('recordLedgerGaps updates gap count gauge per network', async () => {
 
   assert.equal(await value('lumina_ledger_gaps_count', { network: 'mainnet' }), 5);
   assert.equal(await value('lumina_ledger_gaps_count', { network: 'testnet' }), 0);
+});
+
+test('ledger count discrepancy counter is labelled by network and entity', async () => {
+  const before = await value('lumina_ledger_count_discrepancies_total', { network: 'mainnet', entity: 'transactions' });
+  ledgerCountDiscrepancies.inc({ network: 'mainnet', entity: 'transactions' });
+  assert.equal(
+    await value('lumina_ledger_count_discrepancies_total', { network: 'mainnet', entity: 'transactions' }),
+    before + 1
+  );
 });
 
 

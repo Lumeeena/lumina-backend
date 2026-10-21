@@ -1,4 +1,5 @@
 import type { Pool } from 'pg';
+import { GraphQLError } from 'graphql';
 import {
   ACCOUNT_ORDER_NAMES,
   ACCOUNT_ORDERS,
@@ -11,6 +12,7 @@ import {
   getEventsByContract,
   getLatestLedgerFromDb,
   getLedgerBySequence,
+  getLedgerCoverage,
   getLedgers,
   getOperations,
   getOperationsByTransactionHash,
@@ -53,6 +55,8 @@ import { computeBalanceHistory } from './balanceHistory';
 import { parseAsOfLedger } from './accountHistory';
 import { memoizeRequestQuery } from './requestMemo';
 import { getEffects } from './effects';
+import { ERROR_CODES } from './errorCodes';
+import { latestLedgerCache } from './latestLedgerCache';
 
 export interface BaseContext {
   pool: Pool;
@@ -88,9 +92,6 @@ export interface BaseContext {
 }
 
 export type Context = BaseContext;
-
-const latestLedgerCacheTtlMs = parseInt(process.env['LATEST_LEDGER_CACHE_TTL_MS'] ?? '4000', 10);
-const latestLedgerCache = new Map<string, { value: Awaited<ReturnType<typeof getLatestLedgerFromDb>>; cachedAt: number }>();
 
 export function createContext(
   pool: Pool,
@@ -467,12 +468,13 @@ export const resolvers = {
     async latestLedger(_: unknown, args: { network?: string | null }, ctx: Context) {
       return memoizeRequestQuery(ctx.queryMemo, 'latestLedger', args, async () => {
         const network = networkArgument(args, ctx);
-        const cached = latestLedgerCache.get(network.name);
-        if (cached && Date.now() - cached.cachedAt < latestLedgerCacheTtlMs) return cached.value;
+        const cached = latestLedgerCache.get<Awaited<ReturnType<typeof getLatestLedgerFromDb>>>(network.name);
+        if (cached !== undefined) return cached;
 
+        const cacheGeneration = latestLedgerCache.generation(network.name);
         const fromDb = await getLatestLedgerFromDb(ctx.pool, network.name);
         if (fromDb) {
-          latestLedgerCache.set(network.name, { value: fromDb, cachedAt: Date.now() });
+          latestLedgerCache.setIfGeneration(network.name, cacheGeneration, fromDb);
           return fromDb;
         }
 
@@ -494,6 +496,22 @@ export const resolvers = {
       return memoizeRequestQuery(ctx.queryMemo, 'ledger', args, async () => {
         const network = networkArgument(args, ctx);
         return getLedgerBySequence(ctx.pool, network.name, args.sequence);
+      });
+    },
+
+    async ledgerCoverage(
+      _: unknown,
+      args: { network?: string | null; startLedger: number; endLedger: number },
+      ctx: Context
+    ) {
+      return memoizeRequestQuery(ctx.queryMemo, 'ledgerCoverage', args, async () => {
+        if (!Number.isSafeInteger(args.startLedger) || !Number.isSafeInteger(args.endLedger) || args.startLedger < 1 || args.endLedger < args.startLedger) {
+          throw new GraphQLError('Ledger coverage requires positive bounds with endLedger greater than or equal to startLedger.', {
+            extensions: { code: ERROR_CODES.BAD_USER_INPUT },
+          });
+        }
+        const network = networkArgument(args, ctx);
+        return getLedgerCoverage(ctx.pool, network.name, args.startLedger, args.endLedger);
       });
     },
 
