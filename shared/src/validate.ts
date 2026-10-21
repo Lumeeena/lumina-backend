@@ -163,3 +163,14 @@ export const TRADE_SPEC: RecordSpec = {
   counter_amount: 'string',
   counter_asset_type: 'string',
 };
+
+export const EFFECT_SPEC: RecordSpec = {
+  id: 'string',
+  paging_token: 'string',
+  operation_id: 'string',
+  type: 'string',
+  type_i: 'number',
+  created_at: 'string',
+  account: 'string',
+  details: 'object',
+};

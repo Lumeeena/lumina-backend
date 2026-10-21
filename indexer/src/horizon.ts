@@ -25,6 +25,7 @@
 import {
   createHorizonClient,
   type HorizonAccount,
+  type HorizonEffect,
   type HorizonLedger,
   type HorizonOperation,
   type HorizonTransaction,
@@ -150,6 +151,20 @@ export function getLedgerOperations(
 }
 
 /**
+ * Fetches all effects for a ledger, following pagination links.
+ *
+ * Effects are the normalised view of what an operation did to one account.
+ * One operation can produce several effects, making them easier to build an
+ * activity feed from than raw operation payloads.
+ */
+export function getLedgerEffects(
+  horizonUrl: HorizonEndpoint,
+  sequence: number,
+): Promise<HorizonEffect[]> {
+  return client.getLedgerEffects(sequence, horizonUrl);
+}
+
+/**
  * Fetches an account from Horizon.
  *
  * Returns `null` for accounts that don't exist or have been merged away (a 404),
@@ -171,4 +186,4 @@ export function getTrades(
   return client.getTrades(params, horizonUrl);
 }
 
-export type { HorizonTrade, HorizonTradePrice, HorizonTradesFilter };
+export type { HorizonTrade, HorizonTradePrice, HorizonTradesFilter, HorizonEffect };

@@ -66,6 +66,7 @@ export interface IndexedNotification {
   transactions?: number | undefined;
   operations?: number | undefined;
   events?: number | undefined;
+  effects?: number | undefined;
 }
 
 /** Minimal queryable surface — a `Pool` or a `PoolClient` inside a transaction. */
@@ -107,6 +108,10 @@ export function serializeNotification(notification: IndexedNotification): string
     kind: notification.kind,
     network: notification.network,
     ledger: notification.ledger,
+    transactions: notification.transactions,
+    operations: notification.operations,
+    events: notification.events,
+    effects: notification.effects,
   });
 }
 
@@ -131,6 +136,7 @@ export function parseNotification(payload: string | undefined): IndexedNotificat
       transactions: numberOrUndefined(parsed.transactions),
       operations: numberOrUndefined(parsed.operations),
       events: numberOrUndefined(parsed.events),
+      effects: numberOrUndefined(parsed.effects),
     };
   } catch {
     return null;
