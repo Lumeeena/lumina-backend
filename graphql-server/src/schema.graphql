@@ -1922,6 +1922,16 @@ type ContractDeployment {
 # ─── Network Statistics (#228) ───────────────────────────────────────────────
 
 """
+Time bucket width for rolled-up network statistics and activity rollups.
+"""
+enum Granularity {
+  """One-hour aggregation buckets."""
+  HOUR
+  """One-day aggregation buckets."""
+  DAY
+}
+
+"""
 Network-level activity statistics for a time period, computed from rollups.
 """
 type NetworkStats {
@@ -1929,8 +1939,8 @@ type NetworkStats {
   periodStart: String!
   """Period end (ISO 8601)."""
   periodEnd: String!
-  """Bucket granularity: `hour` or `day`."""
-  granularity: String!
+  """Bucket granularity: `HOUR` or `DAY`."""
+  granularity: Granularity!
   """Total transactions in the period."""
   transactionCount: Int!
   """Total operations in the period."""
@@ -1965,8 +1975,8 @@ A rolled-up activity aggregate for a time bucket.
 type ActivityRollup {
   """Bucket start time (ISO 8601)."""
   bucketStart: String!
-  """Bucket granularity: `hour` or `day`."""
-  granularity: String!
+  """Bucket granularity: `HOUR` or `DAY`."""
+  granularity: Granularity!
   """Network name."""
   network: String!
   """Transactions in this bucket."""
@@ -2039,8 +2049,8 @@ extend type Query {
     startTime: String!
     """End of the range (ISO 8601), exclusive."""
     endTime: String!
-    """Bucket width: `hour` or `day`."""
-    granularity: String = "hour"
+    """Bucket width: `HOUR` or `DAY`."""
+    granularity: Granularity = HOUR
     """
     Maximum buckets to return, capped at 1000. A range that would exceed the
     cap returns an error rather than a silently truncated series.
@@ -2054,8 +2064,8 @@ extend type Query {
   activityRollups(
     """Network whose rollups to read."""
     network: String!
-    """Bucket width: `hour` or `day`."""
-    granularity: String = "hour"
+    """Bucket width: `HOUR` or `DAY`."""
+    granularity: Granularity = HOUR
     """Start of the range (ISO 8601), inclusive."""
     startTime: String!
     """End of the range (ISO 8601), exclusive."""

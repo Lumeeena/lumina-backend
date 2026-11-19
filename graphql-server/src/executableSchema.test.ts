@@ -164,3 +164,69 @@ test('extended Query fields forward network: TESTNET through the executable sche
   assert.equal((results[3] as any).contracts[0].wasmHash, 'wasm_testnet');
   assert.equal((results[4] as any).networkStats[0].transactionCount, 222);
 });
+
+
+test('granularity uses the Granularity enum and rejects unsupported values at validation time', async () => {
+  const typeDefs = readFileSync(resolve(__dirname, 'schema.graphql'), 'utf8');
+  const schema = makeExecutableSchema({ typeDefs, resolvers });
+  const seenGranularities: string[] = [];
+  const pool = {
+    query: async (_sql: string, params: unknown[]) => {
+      seenGranularities.push(String(params[1]));
+      return {
+        rows: [{
+          bucket_start: '2026-01-01T00:00:00Z',
+          granularity: params[1],
+          network: 'mainnet',
+          transaction_count: 10,
+          operation_count: 20,
+          active_accounts: 5,
+          total_volume: '50',
+        }],
+      };
+    },
+  } as unknown as Pool;
+
+  const ctx = createContext(pool);
+
+  const invalidStats = await graphql({
+    schema,
+    source: '{ networkStats(startTime: "2026-01-01T00:00:00Z", endTime: "2026-01-02T00:00:00Z", granularity: "week") { bucketStart } }',
+    contextValue: ctx,
+  });
+  assert.ok(invalidStats.errors && invalidStats.errors.length > 0);
+  assert.equal(seenGranularities.length, 0);
+
+  const invalidRollups = await graphql({
+    schema,
+    source: '{ activityRollups(network: "mainnet", startTime: "2026-01-01T00:00:00Z", endTime: "2026-01-02T00:00:00Z", granularity: WEEK) { bucketStart } }',
+    contextValue: ctx,
+  });
+  assert.ok(invalidRollups.errors && invalidRollups.errors.length > 0);
+  assert.equal(seenGranularities.length, 0);
+
+  const validDay = await graphql({
+    schema,
+    source: '{ networkStats(startTime: "2026-01-01T00:00:00Z", endTime: "2026-01-02T00:00:00Z", granularity: DAY) { bucketStart } }',
+    contextValue: ctx,
+  });
+  assert.equal(validDay.errors, undefined);
+
+  const validRollup = await graphql({
+    schema,
+    source: '{ activityRollups(network: "mainnet", startTime: "2026-01-01T00:00:00Z", endTime: "2026-01-02T00:00:00Z", granularity: HOUR) { granularity } }',
+    contextValue: ctx,
+  });
+  assert.equal(validRollup.errors, undefined);
+  assert.equal((validRollup.data as any).activityRollups[0].granularity, 'HOUR');
+  assert.deepEqual(seenGranularities, ['day', 'hour']);
+
+  await assert.rejects(
+    () => resolvers.Query.networkStats(undefined, {
+      startTime: '2026-01-01T00:00:00Z',
+      endTime: '2026-01-02T00:00:00Z',
+      granularity: 'week',
+    }, ctx),
+    /Unsupported granularity/i
+  );
+});
