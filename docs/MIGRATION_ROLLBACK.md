@@ -34,7 +34,7 @@ The following migrations are strictly **irreversible** in place and will be reje
 - **Why Irreversible**: Converted `operations` into a partitioned table by ledger sequence. Partitioning rewrote physical table storage. In PostgreSQL, converting partitioned tables back into an unpartitioned table with historical data requires moving data across temporary tables and rebuilding all constraints. This migration was subsequently superseded by `007_networks`.
 
 ### 3. `007_networks.sql`
-- **Why Irreversible**: Overhauled primary keys, foreign keys, and unique indexes across every table to be composite over `(..., network)`. Backfilled existing data with `network = 'mainnet'`. Reverting this would drop multi-network chain isolation, destroy foreign keys pointing to parent ledgers/transactions, and drop any non-mainnet data that landed after multi-network support was introduced.
+- **Why Irreversible**: Overhauled primary keys, foreign keys, and unique indexes across every table to be composite over `(..., network)`. Backfilled existing data with `network = 'mainnet'`. Reverting this would drop multi-network chain isolation, destroy foreign keys pointing to parent ledgers/transactions, and drop any non-mainnet data that landed after multi-network support was introduced. While `007_networks.down.sql` provides the inverse statements for isolated single-network testing environments, it is strictly forbidden on multi-network production deployments.
 
 ---
 
@@ -60,6 +60,8 @@ The following migrations are strictly **irreversible** in place and will be reje
 | `010_trustlines` | `010_trustlines.down.sql` | Drops `trustlines` table. |
 | `011_assets` | `011_assets.down.sql` | Drops `assets` table. |
 | `012_asset_volume_buckets` | `012_asset_volume_buckets.down.sql` | Drops `asset_volume_buckets` table and `bucket_hour()` function. |
+| `013_backfill_progress` | `013_backfill_progress.down.sql` | Drops `backfill_progress` table and index. |
+| `013_export_jobs` | `013_export_jobs.down.sql` | Drops `api_usage` and `export_jobs` tables and indexes. |
 | `015_retry_queue_network_index` | `015_retry_queue_network_index.down.sql` | Restores `idx_retry_queue_next_attempt` and drops `idx_retry_queue_network_next_attempt`. The stale rows the up migration deleted are not restored; their ledgers were already indexed. |
 
 ---

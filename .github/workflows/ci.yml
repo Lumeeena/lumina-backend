@@ -108,7 +108,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        node-version: [18, 20, 22]
+        node-version: [20, 22]
     defaults:
       run:
         working-directory: indexer
@@ -128,7 +128,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        node-version: [18, 20, 22]
+        node-version: [20, 22]
     defaults:
       run:
         working-directory: graphql-server
@@ -217,7 +217,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        node-version: [18, 20, 22]
+        node-version: [20, 22]
     # A hung test must fail fast rather than sit until the six-hour default.
     # This job did exactly that: every test passed and the process then refused
     # to exit, because a leaked Postgres connection kept the event loop alive.

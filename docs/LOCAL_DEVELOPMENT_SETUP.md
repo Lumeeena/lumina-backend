@@ -6,7 +6,7 @@ This guide walks you through setting up a complete local development environment
 
 ## Prerequisites
 
-- **Node.js 18+** — required by the project
+- **Node.js 20+** — required by the project
 - **PostgreSQL 12+** — required for the indexer and GraphQL server
 - **Basic UNIX shell** — for running commands
 - **Git** — for cloning the repository

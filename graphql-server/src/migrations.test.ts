@@ -89,11 +89,27 @@ test('loadDownMigrations loads all down migration scripts', () => {
   const downMigrations = loadDownMigrations();
   assert.ok(downMigrations.size > 0);
   assert.ok(downMigrations.has('002_account_event_columns'));
+  assert.ok(downMigrations.has('007_networks'));
   assert.ok(downMigrations.has('012_asset_volume_buckets'));
+  assert.ok(downMigrations.has('013_backfill_progress'));
+  assert.ok(downMigrations.has('013_export_jobs'));
 
   const m002Down = downMigrations.get('002_account_event_columns')!;
   assert.match(m002Down.sql, /ALTER TABLE accounts DROP COLUMN IF EXISTS num_sponsored/);
   assert.match(m002Down.sql, /DELETE FROM schema_migrations/);
+
+  const m007Down = downMigrations.get('007_networks')!;
+  assert.match(m007Down.sql, /ALTER TABLE ledgers DROP CONSTRAINT IF EXISTS ledgers_pkey/);
+  assert.match(m007Down.sql, /DELETE FROM schema_migrations WHERE version = '007_networks'/);
+
+  const m013BackfillDown = downMigrations.get('013_backfill_progress')!;
+  assert.match(m013BackfillDown.sql, /DROP TABLE IF EXISTS backfill_progress/);
+  assert.match(m013BackfillDown.sql, /DELETE FROM schema_migrations WHERE version = '013_backfill_progress'/);
+
+  const m013ExportDown = downMigrations.get('013_export_jobs')!;
+  assert.match(m013ExportDown.sql, /DROP TABLE IF EXISTS export_jobs/);
+  assert.match(m013ExportDown.sql, /DROP TABLE IF EXISTS api_usage/);
+  assert.match(m013ExportDown.sql, /DELETE FROM schema_migrations WHERE version = '013_export_jobs'/);
 });
 
 test('isMigrationIrreversible identifies irreversible migrations', () => {
@@ -102,12 +118,18 @@ test('isMigrationIrreversible identifies irreversible migrations', () => {
   assert.equal(isMigrationIrreversible('007_networks'), true);
   assert.equal(isMigrationIrreversible('002_account_event_columns'), false);
   assert.equal(isMigrationIrreversible('012_asset_volume_buckets'), false);
+  assert.equal(isMigrationIrreversible('013_backfill_progress'), false);
+  assert.equal(isMigrationIrreversible('013_export_jobs'), false);
 });
 
 test('rollbackMigration rejects irreversible migrations', async () => {
   const fakePool = {} as unknown as Pool;
   await assert.rejects(
     () => rollbackMigration(fakePool, '001_init'),
+    /irreversible and cannot be rolled back/
+  );
+  await assert.rejects(
+    () => rollbackMigration(fakePool, '007_networks'),
     /irreversible and cannot be rolled back/
   );
 });
