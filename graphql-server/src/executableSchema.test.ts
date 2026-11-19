@@ -230,3 +230,70 @@ test('granularity uses the Granularity enum and rejects unsupported values at va
     /Unsupported granularity/i
   );
 });
+
+
+test('sponsoredAccountsPage paginates with opaque cursors and validates limit and cursor', async () => {
+  const typeDefs = readFileSync(resolve(__dirname, 'schema.graphql'), 'utf8');
+  const schema = makeExecutableSchema({ typeDefs, resolvers });
+  const allAccounts = ['GA_FIRST', 'GB_SECOND', 'GC_THIRD'].map((address) => ({
+    address,
+    network: 'mainnet',
+    sequence: '1',
+    subentry_count: 0,
+    last_modified_ledger: 100,
+    num_sponsored: 1,
+    num_sponsoring: 0,
+    balances: [],
+    flags: {},
+    thresholds: {},
+  }));
+
+  const pool = {
+    query: async (sql: string, params: unknown[]) => {
+      const hasCursor = sql.includes('(a.address) >');
+      const after = hasCursor ? String(params[2]) : null;
+      const limit = Number(params.at(-1));
+      const filtered = after ? allAccounts.filter((a) => a.address > after) : allAccounts;
+      return { rows: filtered.slice(0, limit) };
+    },
+  } as unknown as Pool;
+
+  const ctx = createContext(pool);
+
+  const page1 = await graphql({
+    schema,
+    source: '{ sponsoredAccountsPage(sponsorAddress: "GSPONSOR", limit: 2) { items { address } pageInfo { hasNextPage hasPreviousPage cursor startCursor endCursor } } }',
+    contextValue: ctx,
+  });
+  assert.equal(page1.errors, undefined);
+  const p1 = (page1.data as any).sponsoredAccountsPage;
+  assert.deepEqual(p1.items.map((a: { address: string }) => a.address), ['GA_FIRST', 'GB_SECOND']);
+  assert.equal(p1.pageInfo.hasNextPage, true);
+  assert.equal(p1.pageInfo.hasPreviousPage, false);
+  assert.ok(p1.pageInfo.cursor);
+
+  const page2 = await graphql({
+    schema,
+    source: `{ sponsoredAccountsPage(sponsorAddress: "GSPONSOR", limit: 2, cursor: "${p1.pageInfo.cursor}") { items { address } pageInfo { hasNextPage hasPreviousPage cursor } } }`,
+    contextValue: ctx,
+  });
+  assert.equal(page2.errors, undefined);
+  const p2 = (page2.data as any).sponsoredAccountsPage;
+  assert.deepEqual(p2.items.map((a: { address: string }) => a.address), ['GC_THIRD']);
+  assert.equal(p2.pageInfo.hasNextPage, false);
+  assert.equal(p2.pageInfo.hasPreviousPage, true);
+
+  const tooLarge = await graphql({
+    schema,
+    source: '{ sponsoredAccountsPage(sponsorAddress: "GSPONSOR", limit: 101) { items { address } } }',
+    contextValue: ctx,
+  });
+  assert.equal(tooLarge.errors?.[0]?.extensions.code, 'BAD_USER_INPUT');
+
+  const badCursor = await graphql({
+    schema,
+    source: '{ sponsoredAccountsPage(sponsorAddress: "GSPONSOR", cursor: "not-a-valid-cursor") { items { address } } }',
+    contextValue: ctx,
+  });
+  assert.equal(badCursor.errors?.[0]?.extensions.code, 'INVALID_CURSOR');
+});

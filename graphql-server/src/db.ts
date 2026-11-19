@@ -1217,6 +1217,47 @@ export async function getSponsoredAccounts(
   );
 }
 
+export async function getSponsoredAccountsPage(
+  pool: Pool,
+  network: string,
+  sponsorAddress: string,
+  limit: number,
+  cursor?: string | null
+): Promise<ReturnType<typeof mapAccount>[]> {
+  const conditions = ['s.sponsor = $1', 's.network = $2'];
+  const params: unknown[] = [sponsorAddress, network];
+
+  const afterCursor = cursorCondition(params, KEYSETS.sponsoredAccountsPage, cursor, 'FORWARD', 'ASC');
+  if (afterCursor) conditions.push(afterCursor);
+
+  params.push(limit);
+
+  const { rows } = await pool.query(
+    `SELECT a.address, a.network, a.sequence, a.subentry_count, a.last_modified_ledger,
+            a.num_sponsored, a.num_sponsoring, a.balances, a.flags, a.thresholds
+     FROM accounts a
+     JOIN sponsorships s ON s.sponsored_id = a.address AND s.network = a.network
+     WHERE ${conditions.join(' AND ')}
+     ORDER BY a.address ASC
+     LIMIT ${params.length}`,
+    params
+  );
+  return rows.map((row) =>
+    mapAccount({
+      network: row.network,
+      address: row.address,
+      sequence: row.sequence,
+      subentry_count: row.subentry_count,
+      last_modified_ledger: row.last_modified_ledger,
+      num_sponsored: row.num_sponsored,
+      num_sponsoring: row.num_sponsoring,
+      balances: row.balances,
+      flags: row.flags,
+      thresholds: row.thresholds,
+    })
+  );
+}
+
 // ─── Contracts & Deployments (#227) ──────────────────────────────────────────
 
 export interface ContractDeploymentRow {

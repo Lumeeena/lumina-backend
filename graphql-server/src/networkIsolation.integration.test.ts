@@ -1050,3 +1050,23 @@ test('networkStats returns rollups only for the requested network', { skip, time
   assert.equal(mainnet[0]?.transactionCount, MAINNET_SEED.rollupTxCount);
   assert.equal(testnet[0]?.transactionCount, TESTNET_SEED.rollupTxCount);
 });
+
+
+test('sponsoredAccountsPage resolves and paginates within the requested network', { skip, timeout: TEST_TIMEOUT_MS }, async () => {
+  const ctx = context();
+
+  const mainnet = await resolvers.Query.sponsoredAccountsPage(undefined, { network: MAINNET, sponsorAddress: SPONSOR, limit: 10 }, ctx);
+  const testnet = await resolvers.Query.sponsoredAccountsPage(undefined, { network: TESTNET, sponsorAddress: SPONSOR, limit: 10 }, ctx);
+
+  assert.equal(mainnet.items.find(a => a.address === ACCOUNT)?.sequence, MAINNET_SEED.accountSequence);
+  assert.equal(testnet.items.find(a => a.address === ACCOUNT)?.sequence, TESTNET_SEED.accountSequence);
+  assert.ok(testnet.pageInfo.cursor);
+
+  const nextTestnet = await resolvers.Query.sponsoredAccountsPage(undefined, {
+    network: TESTNET,
+    sponsorAddress: SPONSOR,
+    limit: 10,
+    cursor: testnet.pageInfo.cursor,
+  }, ctx);
+  assert.deepEqual(nextTestnet.items, []);
+});

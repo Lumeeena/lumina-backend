@@ -82,3 +82,25 @@ test('unused NetworkStats type is removed and NetworkStatsBucket is reachable fr
   assert.ok(networkStatsField);
   assert.equal(networkStatsField.type.toString(), '[NetworkStatsBucket!]!');
 });
+
+
+test('sponsoredAccounts is deprecated in favor of paginated sponsoredAccountsPage with sponsor wording', () => {
+  const query = schema.getQueryType();
+  assert.ok(query);
+
+  const legacy = query.getFields()['sponsoredAccounts'];
+  const paged = query.getFields()['sponsoredAccountsPage'];
+  assert.ok(legacy && paged);
+
+  assert.match(legacy.deprecationReason ?? '', /sponsoredAccountsPage/);
+  assert.equal(paged.type.toString(), 'AccountPage!');
+  assert.equal(paged.args.find((a) => a.name === 'limit')?.defaultValue, 20);
+  assert.ok(paged.args.some((a) => a.name === 'cursor'));
+
+  for (const field of [legacy, paged]) {
+    const sponsorArg = field.args.find((a) => a.name === 'sponsorAddress');
+    assert.ok(sponsorArg?.description);
+    assert.match(sponsorArg.description, /sponsor/i);
+    assert.doesNotMatch(sponsorArg.description, /issuing/i);
+  }
+});

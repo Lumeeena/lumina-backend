@@ -1983,19 +1983,35 @@ extend type Query {
   ): [Signer!]!
 
   """
-  Accounts sponsored by the given address (#226).
+  Accounts sponsored by the given sponsor address (#226).
   """
   sponsoredAccounts(
     """Network to read; defaults to the primary network configured for this deployment."""
     network: Network
-    """Issuing address whose sponsored accounts to list."""
+    """Sponsoring account address whose sponsored accounts to list."""
     sponsorAddress: String!
     """
     Maximum accounts to return. Capped at 1000 so a single sponsor cannot force
-    an unbounded response; use a narrower sponsor rather than raising this.
+    an unbounded response; use `sponsoredAccountsPage` for cursor pagination.
     """
     limit: Int = 1000
-  ): [Account!]!
+  ): [Account!]! @deprecated(reason: "Use `sponsoredAccountsPage` instead for cursor-paginated `AccountPage` results. Removal planned for 2026-10-01.")
+
+  """
+  Accounts sponsored by the given sponsor address, ordered by address ascending (#226, #387).
+
+  Paginates by account address ? see `PageInfo` for the cursor contract.
+  """
+  sponsoredAccountsPage(
+    """Network to read; defaults to the primary network configured for this deployment."""
+    network: Network
+    """Sponsoring account address whose sponsored accounts to list."""
+    sponsorAddress: String!
+    """Maximum page size is 100. Larger limits are rejected."""
+    limit: Int = 20
+    """Opaque cursor from a previous page's `pageInfo`; see `PageInfo`."""
+    cursor: String
+  ): AccountPage!
 
   """
   Resolve a contract ID to its deployment details (#227).

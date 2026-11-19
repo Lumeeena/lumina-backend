@@ -23,6 +23,7 @@ import {
   getContractStorageEntries,
   getAccountSigners,
   getSponsoredAccounts,
+  getSponsoredAccountsPage,
   getContractDeployment,
   getContracts,
   getNetworkStats,
@@ -801,6 +802,32 @@ export const resolvers = {
       const network = networkArgument(args, ctx);
       const limit = getAggregateLimit(args.limit, MAX_AGGREGATE_ROWS);
       return getSponsoredAccounts(ctx.pool, network.name, args.sponsorAddress, limit);
+    },
+    async sponsoredAccountsPage(
+      _: unknown,
+      args: { network?: string | null; sponsorAddress: string; limit?: number | null; cursor?: string | null },
+      ctx: Context
+    ) {
+      const network = networkArgument(args, ctx);
+      const limit = getPageSize(args.limit, DEFAULT_PAGE_LIMIT);
+      const items = await getSponsoredAccountsPage(
+        ctx.pool,
+        network.name,
+        args.sponsorAddress,
+        limit,
+        args.cursor
+      );
+      return {
+        items,
+        pageInfo: pageInfo(
+          KEYSETS.sponsoredAccountsPage,
+          items,
+          limit,
+          (account) => [account.address],
+          'FORWARD',
+          Boolean(args.cursor)
+        ),
+      };
     },
 
     // ─── #227: Contracts & Deployments ───────────────────────────────────
