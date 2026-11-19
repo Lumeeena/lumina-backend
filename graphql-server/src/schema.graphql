@@ -1985,7 +1985,7 @@ extend type Query {
   """
   Account signers and sponsorship details (#226).
   """
-  accountSigners(address: String!): [Signer!]!
+  accountSigners(address: String!): [Signer!]! @deprecated(reason: "Use `Account.signers` via `account(address:)` instead. Removal planned for 2027-05-19.")
 
   """
   Accounts sponsored by the given address (#226).

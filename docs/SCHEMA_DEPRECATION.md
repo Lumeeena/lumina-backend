@@ -65,3 +65,9 @@ Fields may be removed without deprecation only in these cases:
 - Security vulnerability
 - Data integrity issue
 - Feature was experimental and marked as such
+
+## Active Deprecation Schedule
+
+| Field | Replacement | Deprecated On | Planned Removal |
+| --- | --- | --- | --- |
+| `Query.accountSigners` | `Account.signers` (via `Query.account`) | 2026-11-19 | 2027-05-19 |
