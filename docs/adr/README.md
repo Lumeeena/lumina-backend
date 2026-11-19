@@ -25,6 +25,7 @@ survives.
 | [0004](0004-network-in-every-key.md) | Every indexed row is scoped to a network, in the key |
 | [0005](0005-partition-operations-by-ledger-range.md) | `operations` is partitioned by ledger range |
 | [0006](0006-one-process-n-polling-loops.md) | Multi-network: one process runs N independent polling loops, writes to one database |
+| [0007](0007-drop-unused-redis-cache.md) | Drop unused Redis cache module; keep Postgres-only caching and rollups |
 
 ## Decisions recorded elsewhere
 
