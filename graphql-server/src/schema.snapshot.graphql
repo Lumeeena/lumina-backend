@@ -2067,6 +2067,38 @@ extend type Query {
     """Opaque cursor returned by a previous `claimableBalances` page."""
     cursor: String
   ): ClaimableBalancePage!
+
+  """
+  Accounts ranked by indexed operation and trade activity over a configurable
+  time window, tie-broken by trade volume. Maximum limit is 100.
+  """
+  topAccounts(
+    """Network to read; defaults to the primary network configured for this deployment."""
+    network: Network
+    """Lookback window over which activity is ranked; defaults to DAY_7."""
+    window: TopAccountsWindow = DAY_7
+    """Maximum accounts to return, from 1 to 100. Larger limits are rejected."""
+    limit: Int = 20
+  ): [TopAccount!]!
+}
+
+# ─── Top Accounts (#230, #376) ───────────────────────────────────────────────
+
+"""Lookback window for the `topAccounts` activity leaderboard."""
+enum TopAccountsWindow {
+  DAY_1
+  DAY_7
+  DAY_30
+  ALL
+}
+
+"""An account ranked by indexed operation and trade activity."""
+type TopAccount {
+  account: String!
+  operationCount: Int!
+  tradeCount: Int!
+  totalVolume: String!
+  score: Float!
 }
 
 # ─── Claimable Balances (#224, #375) ─────────────────────────────────────────

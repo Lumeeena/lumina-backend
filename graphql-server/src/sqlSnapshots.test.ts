@@ -12,6 +12,7 @@ import {
   getContractStorageEntries,
 } from './db';
 import { getOperationsByAsset, searchTransactions } from './search';
+import { getTopAccountsByActivity } from './topAccounts';
 import { encodeCursor } from './pagination';
 
 const SNAPSHOTS_DIR = join(__dirname, '__snapshots__');
@@ -365,4 +366,32 @@ test('SQL snapshot: searchTransactions paginated backward', async () => {
   });
   const q = getLastQuery();
   verifySqlSnapshot('searchTransactions_backward', q.sql, q.params);
+});
+
+// ─── Top Accounts SQL Snapshots (#376) ───────────────────────────────────────
+
+test('SQL snapshot: getTopAccountsByActivity windowed', async () => {
+  const { pool, getLastQuery } = fakePool();
+  await getTopAccountsByActivity(pool, {
+    network: 'mainnet',
+    window: '7d',
+    limit: 20,
+  });
+  const q = getLastQuery();
+  assert.doesNotMatch(q.sql, /history_operations|history_trades/);
+  assert.deepEqual(q.params, ['mainnet', 604800, 20]);
+  verifySqlSnapshot('getTopAccountsByActivity_windowed', q.sql, q.params);
+});
+
+test('SQL snapshot: getTopAccountsByActivity all time', async () => {
+  const { pool, getLastQuery } = fakePool();
+  await getTopAccountsByActivity(pool, {
+    network: 'testnet',
+    window: 'all',
+    limit: 10,
+  });
+  const q = getLastQuery();
+  assert.doesNotMatch(q.sql, /history_operations|history_trades/);
+  assert.deepEqual(q.params, ['testnet', 10]);
+  verifySqlSnapshot('getTopAccountsByActivity_all', q.sql, q.params);
 });

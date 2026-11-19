@@ -56,6 +56,7 @@ import { parseAsOfLedger } from './accountHistory';
 import { memoizeRequestQuery } from './requestMemo';
 import { getEffects } from './effects';
 import { getClaimableBalances } from './claimableBalances';
+import { getTopAccountsByActivity, normalizeTopAccountsWindow } from './topAccounts';
 import { ERROR_CODES } from './errorCodes';
 import { latestLedgerCache } from './latestLedgerCache';
 
@@ -922,6 +923,22 @@ export const resolvers = {
           Boolean(args.cursor)
         ),
       };
+    },
+
+    // ─── #230 / #376: Top Accounts Leaderboard ───────────────────────────
+    async topAccounts(
+      _: unknown,
+      args: { network?: string | null; window?: string | null; limit?: number | null },
+      ctx: Context
+    ) {
+      const network = networkArgument(args, ctx);
+      const limit = getPageSize(args.limit, DEFAULT_PAGE_LIMIT);
+      const window = normalizeTopAccountsWindow(args.window);
+      return getTopAccountsByActivity(ctx.pool, {
+        network: network.name,
+        window,
+        limit,
+      });
     },
   },
 
