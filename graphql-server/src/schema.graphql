@@ -881,11 +881,11 @@ type Account {
   transactions(
     """How many to return. Defaults to 10."""
     limit: Int = 10
-  ): [Transaction!]
+  ): [Transaction!] @deprecated(reason: "Use Query.transactions(sourceAccount:, limit:, cursor:) for pagination. Removal review no earlier than 2027-02-17.")
   operations(
     """Maximum page size is 100. Larger limits are rejected."""
     limit: Int = 10
-  ): [Operation!]
+  ): [Operation!] @deprecated(reason: "Use Query.operations(account:, limit:, cursor:) for pagination. Removal review no earlier than 2027-02-17.")
   """Signers on this account, heaviest first; empty until the indexer has recorded any."""
   signers: [Signer!]!
 }

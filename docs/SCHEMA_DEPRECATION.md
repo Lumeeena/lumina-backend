@@ -59,6 +59,17 @@ sum(rate(lumina_deprecated_field_usage_total[7d]))
    - Usage is below threshold (e.g., < 1% of total requests)
    - Removal is announced in release notes
 
+## Account history fields
+
+`Account.transactions(limit:)` and `Account.operations(limit:)` remain available for
+existing clients, but are deprecated because their list responses cannot continue
+past the first page. Use `Query.transactions(sourceAccount:, limit:, cursor:)` or
+`Query.operations(account:, limit:, cursor:)`; both return `PageInfo` and support
+the same parent account's network explicitly. The deprecation reasons set the
+earliest removal review date to 2027-02-17 (90 days after the deprecation was
+introduced). Track `lumina_deprecated_field_usage_total` for both fields and do
+not remove either solely because the review date has passed.
+
 ## Breaking Changes Without Deprecation
 
 Fields may be removed without deprecation only in these cases:

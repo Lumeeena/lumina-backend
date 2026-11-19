@@ -7,24 +7,46 @@ import { isMigrationIrreversible, loadDownMigrations, loadMigrations, migrationS
 
 const MIGRATIONS_DIR = join(__dirname, '..', '..', 'db', 'migrations');
 
+// Existing versions are immutable because schema_migrations stores their full filename stem.
+// New migrations must use a UTC timestamp prefix (YYYYMMDDHHMMSS) to avoid collisions.
+const LEGACY_MIGRATIONS = [
+  '001_init', '002_account_event_columns', '003_custom_event_schemas',
+  '004_search_indexes', '005_api_keys', '006_autovacuum', '006_export_permissions',
+  '006_partition_operations', '007_drop_redundant_api_key_index', '007_networks',
+  '008_account_refresh_queue', '008_accounts_listing_index', '008_data_constraints',
+  '008_retry_queue', '009_contract_storage_entries', '010_contract_storage_history',
+  '010_retention_prune_indexes', '010_transaction_filters', '010_trustlines',
+  '011_assets', '012_asset_volume_buckets', '013_backfill_progress', '013_export_jobs',
+  '013_failed_ledgers', '013_trades', '013_trustline_changes', '014_pools_claims_paths_signers',
+  '015_admin_operations', '015_asset_issuer_metadata', '015_drop_unused_trustline_indexes',
+  '015_operation_decoding', '015_retry_queue_network_index', '015_transactions_listing_covering_index',
+  '016_assets_index_review', '016_event_transaction_context', '017_account_state_history',
+  '017_signers_sponsorship_contracts_rollups', '018_dead_letters_and_cursors',
+  '019_operations_index_review', '020_claimable_balances_listing', '020_effects',
+  '021_ledger_audit_window_index',
+];
+
+function assertMigrationPrefixPolicy(versions: string[]): void {
+  const legacy = new Set(LEGACY_MIGRATIONS);
+  const groups = new Map<string, string[]>();
+  for (const version of versions) {
+    const prefix = version.match(/^(\d+)_/)?.[1];
+    assert.ok(prefix, `migration has a numeric prefix: ${version}`);
+    groups.set(prefix, [...(groups.get(prefix) ?? []), version]);
+  }
+  for (const [prefix, group] of groups) {
+    if (group.length > 1) {
+      assert.ok(group.every(version => legacy.has(version)), `new migration reuses prefix ${prefix}: ${group.join(', ')}`);
+    }
+  }
+  for (const version of versions.filter(version => !legacy.has(version))) {
+    assert.match(version, /^\d{14}_[a-z0-9_-]+$/i, `${version} must use a UTC timestamp prefix`);
+  }
+}
+
 test('loads migrations in order and expands initial schema include', () => {
-  const migrations = loadMigrations();
-  assert.deepEqual(migrations.map(migration => migration.version), [
-    '001_init', '002_account_event_columns', '003_custom_event_schemas',
-    '004_search_indexes', '005_api_keys', '006_autovacuum', '006_export_permissions',
-    '006_partition_operations', '007_drop_redundant_api_key_index', '007_networks',
-    '008_account_refresh_queue', '008_accounts_listing_index', '008_data_constraints',
-    '008_retry_queue', '009_contract_storage_entries', '010_contract_storage_history',
-    '010_retention_prune_indexes', '010_transaction_filters', '010_trustlines',
-    '011_assets', '012_asset_volume_buckets', '013_backfill_progress', '013_export_jobs',
-    '013_failed_ledgers', '013_trades', '013_trustline_changes', '014_pools_claims_paths_signers',
-    '015_admin_operations', '015_asset_issuer_metadata', '015_drop_unused_trustline_indexes',
-    '015_operation_decoding', '015_retry_queue_network_index', '015_transactions_listing_covering_index',
-    '016_assets_index_review', '016_event_transaction_context', '017_account_state_history',
-    '017_signers_sponsorship_contracts_rollups', '018_dead_letters_and_cursors',
-    '019_operations_index_review', '020_claimable_balances_listing', '020_effects',
-    '021_ledger_audit_window_index',
-  ]);
+  const migrations = loadMigrations(MIGRATIONS_DIR);
+  assert.deepEqual(migrations.map(migration => migration.version), LEGACY_MIGRATIONS);
   assert.match(migrations[0].sql, /CREATE TABLE IF NOT EXISTS ledgers/);
   assert.match(migrations[0].sql, /PRIMARY KEY \(id, network\)/);
   assert.doesNotMatch(migrations[0].sql, /^\\ir/m);
@@ -36,10 +58,25 @@ test('loads migrations in order and expands initial schema include', () => {
   assert.match(networks?.sql, /FOREIGN KEY \(transaction_hash, network\) REFERENCES transactions \(hash, network\)/);
 });
 
+test('new migrations use unique UTC timestamp prefixes; legacy collisions stay grandfathered', () => {
+  const versions = loadMigrations(MIGRATIONS_DIR).map(migration => migration.version);
+  assert.doesNotThrow(() => assertMigrationPrefixPolicy(versions));
+  assert.throws(
+    () => assertMigrationPrefixPolicy([...versions, '008_new_retry_table']),
+    /new migration reuses prefix 008/
+  );
+  const timestamped = '20261119120000_new_retry_table';
+  assert.doesNotThrow(() => assertMigrationPrefixPolicy([...versions, timestamped]));
+  assert.throws(
+    () => assertMigrationPrefixPolicy([...versions, timestamped, '20261119120000_another_migration']),
+    /new migration reuses prefix 20261119120000/
+  );
+});
+
 test('concurrent migrations are sent one statement at a time', () => {
   // A multi-statement query string runs as one implicit transaction, which
   // CREATE INDEX CONCURRENTLY rejects just as it rejects BEGIN.
-  const migration = loadMigrations().find(m => m.version === '015_transactions_listing_covering_index');
+  const migration = loadMigrations(MIGRATIONS_DIR).find(m => m.version === '015_transactions_listing_covering_index');
   assert.ok(migration);
   const statements: string[] = splitStatements(migration.sql);
   assert.deepEqual(statements.map(s => s.split(/\s+/).slice(0, 3).join(' ')), [
@@ -52,7 +89,7 @@ test('concurrent migrations are sent one statement at a time', () => {
 
   // The assets index review builds its replacement before dropping anything,
   // so the listing is never left without an index.
-  const assets = loadMigrations().find(m => m.version === '016_assets_index_review');
+  const assets = loadMigrations(MIGRATIONS_DIR).find(m => m.version === '016_assets_index_review');
   assert.ok(assets);
   assert.deepEqual(splitStatements(assets.sql).map((s: string) => s.split(/\s+/).slice(0, 3).join(' ')), [
     'CREATE INDEX CONCURRENTLY',
@@ -62,7 +99,7 @@ test('concurrent migrations are sent one statement at a time', () => {
 
   // So does the operations index review: all three replacements exist before
   // the first drop.
-  const operations = loadMigrations().find(m => m.version === '019_operations_index_review');
+  const operations = loadMigrations(MIGRATIONS_DIR).find(m => m.version === '019_operations_index_review');
   assert.ok(operations);
   assert.deepEqual(splitStatements(operations.sql).map((s: string) => s.split(/\s+/).slice(0, 3).join(' ')), [
     ...Array(3).fill('CREATE INDEX CONCURRENTLY'),
@@ -70,7 +107,7 @@ test('concurrent migrations are sent one statement at a time', () => {
     'INSERT INTO schema_migrations',
   ]);
 
-  const ledgerAudit = loadMigrations().find(m => m.version === '021_ledger_audit_window_index');
+  const ledgerAudit = loadMigrations(MIGRATIONS_DIR).find(m => m.version === '021_ledger_audit_window_index');
   assert.ok(ledgerAudit);
   assert.deepEqual(splitStatements(ledgerAudit.sql).map((s: string) => s.split(/\s+/).slice(0, 3).join(' ')), [
     'CREATE INDEX CONCURRENTLY',
@@ -86,7 +123,7 @@ test('migration status refuses a later migration when an earlier one is pending'
 });
 
 test('loadDownMigrations loads all down migration scripts', () => {
-  const downMigrations = loadDownMigrations();
+  const downMigrations = loadDownMigrations(MIGRATIONS_DIR);
   assert.ok(downMigrations.size > 0);
   assert.ok(downMigrations.has('002_account_event_columns'));
   assert.ok(downMigrations.has('012_asset_volume_buckets'));
@@ -94,6 +131,11 @@ test('loadDownMigrations loads all down migration scripts', () => {
   const m002Down = downMigrations.get('002_account_event_columns')!;
   assert.match(m002Down.sql, /ALTER TABLE accounts DROP COLUMN IF EXISTS num_sponsored/);
   assert.match(m002Down.sql, /DELETE FROM schema_migrations/);
+
+  const partitioningDown = downMigrations.get('006_partition_operations');
+  assert.ok(partitioningDown, 'irreversibility is visible beside the migration');
+  assert.match(partitioningDown.sql, /IRREVERSIBLE/i);
+  assert.match(partitioningDown.sql, /RAISE EXCEPTION/);
 });
 
 test('isMigrationIrreversible identifies irreversible migrations', () => {
@@ -108,6 +150,10 @@ test('rollbackMigration rejects irreversible migrations', async () => {
   const fakePool = {} as unknown as Pool;
   await assert.rejects(
     () => rollbackMigration(fakePool, '001_init'),
+    /irreversible and cannot be rolled back/
+  );
+  await assert.rejects(
+    () => rollbackMigration(fakePool, '006_partition_operations'),
     /irreversible and cannot be rolled back/
   );
 });

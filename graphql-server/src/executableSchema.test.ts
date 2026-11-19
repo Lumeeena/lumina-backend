@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { makeExecutableSchema } from '@graphql-tools/schema';
-import { graphql } from 'graphql';
+import { graphql, GraphQLObjectType } from 'graphql';
 import type { Pool } from 'pg';
 import { createContext, resolvers } from './resolvers';
 
@@ -15,6 +15,23 @@ import { createContext, resolvers } from './resolvers';
 test('the resolvers and schema.graphql build the executable schema the server starts with', () => {
   const typeDefs = readFileSync(resolve(__dirname, 'schema.graphql'), 'utf8');
   assert.doesNotThrow(() => makeExecutableSchema({ typeDefs, resolvers }));
+});
+
+test('nested account history fields point clients to the paginated root queries', () => {
+  const typeDefs = readFileSync(resolve(__dirname, 'schema.graphql'), 'utf8');
+  const schema = makeExecutableSchema({ typeDefs, resolvers });
+  const account = schema.getType('Account');
+  const query = schema.getType('Query');
+  assert.ok(account instanceof GraphQLObjectType);
+  assert.ok(query instanceof GraphQLObjectType);
+  assert.match(account.getFields().transactions.deprecationReason ?? '', /Query\.transactions\(sourceAccount:/);
+  assert.match(account.getFields().operations.deprecationReason ?? '', /Query\.operations\(account:/);
+  assert.match(account.getFields().transactions.deprecationReason ?? '', /2027-02-17/);
+  assert.match(account.getFields().operations.deprecationReason ?? '', /2027-02-17/);
+  assert.ok(query.getFields().transactions.args.some(argument => argument.name === 'sourceAccount'));
+  assert.ok(query.getFields().transactions.args.some(argument => argument.name === 'cursor'));
+  assert.ok(query.getFields().operations.args.some(argument => argument.name === 'account'));
+  assert.ok(query.getFields().operations.args.some(argument => argument.name === 'cursor'));
 });
 
 test('ledgerCoverage query distinguishes indexed ranges from missing intervals', async () => {

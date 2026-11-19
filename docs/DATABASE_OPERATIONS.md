@@ -193,6 +193,14 @@ the runner rejects unknown, missing, or out-of-order history. Migration SQL
 must record its own filename stem in `schema_migrations` (as existing migration
 files do).
 
+Name every new migration `YYYYMMDDHHMMSS_description.sql` using a UTC timestamp
+and a lowercase description. This gives each migration a globally sortable
+version; do not allocate another three-digit prefix. Existing duplicate numeric
+prefixes are grandfathered because their filename stems are already recorded
+in deployed `schema_migrations` tables. The migration test enforces timestamp
+names for new files and rejects any new prefix collision, including a collision
+with a grandfathered version.
+
 ## Migration testing against a populated database
 
 Everywhere else migrations are applied to empty databases — CI's schema jobs and

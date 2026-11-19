@@ -6,7 +6,7 @@ This guide documents the rollback mechanism for database migrations in Lumina, h
 
 ## 1. Architecture & Down Migrations
 
-Each reversible migration file `db/migrations/<version>.sql` has a companion down migration `db/migrations/<version>.down.sql`.
+Each migration file `db/migrations/<version>.sql` has a companion down migration `db/migrations/<version>.down.sql`. For irreversible migrations, the down file is an explicit refusal that explains why rollback is unsafe; `rollbackMigration()` rejects these versions before it runs SQL.
 
 - **Up migrations**: Named `<version>.sql` (matching `/^\d+_[a-z0-9_-]+\.sql$/i`).
 - **Down migrations**: Named `<version>.down.sql` (matching `/^\d+_[a-z0-9_-]+\.down\.sql$/i`).
@@ -32,6 +32,8 @@ The following migrations are strictly **irreversible** in place and will be reje
 
 ### 2. `006_partition_operations.sql`
 - **Why Irreversible**: Converted `operations` into a partitioned table by ledger sequence. Partitioning rewrote physical table storage. In PostgreSQL, converting partitioned tables back into an unpartitioned table with historical data requires moving data across temporary tables and rebuilding all constraints. This migration was subsequently superseded by `007_networks`.
+- **Down file**: `006_partition_operations.down.sql` deliberately raises an exception. The live up migration is now a parity-compatible no-op, but a deployment that ran its original partitioning DDL may still have a populated partitioned table. The down runner refuses this version, and the tombstone prevents a manual rollback from silently deleting migration history.
+- **Safe recovery**: A deployment still carrying the legacy partitioning needs an operator-reviewed copy plan, capacity estimate, maintenance window and backup. Do not run a generic down migration against it.
 
 ### 3. `007_networks.sql`
 - **Why Irreversible**: Overhauled primary keys, foreign keys, and unique indexes across every table to be composite over `(..., network)`. Backfilled existing data with `network = 'mainnet'`. Reverting this would drop multi-network chain isolation, destroy foreign keys pointing to parent ledgers/transactions, and drop any non-mainnet data that landed after multi-network support was introduced.
@@ -78,3 +80,5 @@ When developing or modifying a migration:
    - Assert that `schema_migrations` has the rolled-back version removed.
 4. **Re-apply Up Migration**:
    Re-running `runMigrations()` must cleanly succeed from the rolled-back state.
+
+`006_partition_operations` is the documented exception: its historical data rewrite has no safe generic inverse. Its automated test verifies the down runner refuses it, and its `.down.sql` tombstone also raises if executed directly. Do not test it by pretending a rollback succeeded or deleting its history row.
