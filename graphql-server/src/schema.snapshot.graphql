@@ -1982,13 +1982,15 @@ type ActivityRollup {
 # ─── Query additions ─────────────────────────────────────────────────────────
 
 extend type Query {
+  # Issue #226
   """
-  Account signers and sponsorship details (#226).
+  List signers and sponsorship weights configured on a Stellar account.
   """
   accountSigners(address: String!): [Signer!]! @deprecated(reason: "Use `Account.signers` via `account(address:)` instead. Removal planned for 2027-05-19.")
 
+  # Issue #226
   """
-  Accounts sponsored by the given address (#226).
+  List accounts sponsored by the given Stellar address, up to `limit` (capped at 1000).
   """
   sponsoredAccounts(
     """Issuing address whose sponsored accounts to list."""
@@ -2000,18 +2002,24 @@ extend type Query {
     limit: Int = 1000
   ): [Account!]!
 
+  # Issue #227
   """
-  Resolve a contract ID to its deployment details (#227).
+  Look up a deployed Soroban contract by contract ID, returning its deployment
+  metadata or `null` if not indexed.
   """
   contract(contractId: String!): ContractDeployment
 
+  # Issue #227
   """
-  List deployed contracts, newest first (#227).
+  List indexed Soroban contract deployments, newest first, paginated by cursor
+  up to `limit` rows per page (maximum 100).
   """
   contracts(limit: Int = 20, cursor: String): [ContractDeployment!]!
 
+  # Issue #228
   """
-  Network statistics for a time period, computed from rollups (#228).
+  Aggregated network statistics computed from activity rollups over `[startTime, endTime)`,
+  bucketed by hour or day up to `limit` buckets (capped at 1000).
   """
   networkStats(
     """Start of the range (ISO 8601), inclusive."""
@@ -2027,8 +2035,10 @@ extend type Query {
     limit: Int = 1000
   ): [NetworkStatsBucket!]!
 
+  # Issue #229
   """
-  Rolled-up activity aggregates (#229).
+  Rolled-up transaction, operation, active-account, and volume aggregates for a
+  network over `[startTime, endTime)`, up to `limit` buckets (capped at 1000).
   """
   activityRollups(
     """Network whose rollups to read."""
