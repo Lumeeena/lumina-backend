@@ -798,6 +798,7 @@ export const resolvers = {
       const row = await getContractDeployment(ctx.pool, network.name, args.contractId);
       if (!row) return null;
       return {
+        network: network.name,
         contractId: row.contract_id,
         deployer: row.deployer,
         wasmHash: row.wasm_hash,
@@ -814,6 +815,7 @@ export const resolvers = {
       const limit = getPageSize(args.limit, 20);
       const rows = await getContracts(ctx.pool, network.name, limit, args.cursor ?? undefined);
       return rows.map((row) => ({
+        network: network.name,
         contractId: row.contract_id,
         deployer: row.deployer,
         wasmHash: row.wasm_hash,

@@ -1985,12 +1985,19 @@ extend type Query {
   """
   Account signers and sponsorship details (#226).
   """
-  accountSigners(address: String!): [Signer!]!
+  accountSigners(
+    """Network to read; defaults to the primary network configured for this deployment."""
+    network: Network
+    """Account address whose signers to list."""
+    address: String!
+  ): [Signer!]!
 
   """
   Accounts sponsored by the given address (#226).
   """
   sponsoredAccounts(
+    """Network to read; defaults to the primary network configured for this deployment."""
+    network: Network
     """Issuing address whose sponsored accounts to list."""
     sponsorAddress: String!
     """
@@ -2003,17 +2010,31 @@ extend type Query {
   """
   Resolve a contract ID to its deployment details (#227).
   """
-  contract(contractId: String!): ContractDeployment
+  contract(
+    """Network to read; defaults to the primary network configured for this deployment."""
+    network: Network
+    """Contract ID to resolve."""
+    contractId: String!
+  ): ContractDeployment
 
   """
   List deployed contracts, newest first (#227).
   """
-  contracts(limit: Int = 20, cursor: String): [ContractDeployment!]!
+  contracts(
+    """Network to read; defaults to the primary network configured for this deployment."""
+    network: Network
+    """Maximum contracts to return."""
+    limit: Int = 20
+    """Ledger sequence cursor from a previous listing."""
+    cursor: String
+  ): [ContractDeployment!]!
 
   """
   Network statistics for a time period, computed from rollups (#228).
   """
   networkStats(
+    """Network to read; defaults to the primary network configured for this deployment."""
+    network: Network
     """Start of the range (ISO 8601), inclusive."""
     startTime: String!
     """End of the range (ISO 8601), exclusive."""
