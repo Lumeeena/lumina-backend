@@ -55,6 +55,7 @@ import { computeBalanceHistory } from './balanceHistory';
 import { parseAsOfLedger } from './accountHistory';
 import { memoizeRequestQuery } from './requestMemo';
 import { getEffects } from './effects';
+import { getClaimableBalances } from './claimableBalances';
 import { ERROR_CODES } from './errorCodes';
 import { latestLedgerCache } from './latestLedgerCache';
 
@@ -882,6 +883,45 @@ export const resolvers = {
         activeAccounts: row.active_accounts,
         totalVolume: row.total_volume,
       }));
+    },
+
+    // ─── #224 / #375: Claimable Balances ─────────────────────────────────
+    async claimableBalances(
+      _: unknown,
+      args: {
+        network?: string | null;
+        claimant?: string | null;
+        sponsor?: string | null;
+        asset?: string | null;
+        includeClaimed?: boolean | null;
+        limit?: number | null;
+        cursor?: string | null;
+      },
+      ctx: Context
+    ) {
+      const network = networkArgument(args, ctx);
+      const limit = getPageSize(args.limit, DEFAULT_PAGE_LIMIT);
+      const { items, evaluatedAt } = await getClaimableBalances(ctx.pool, {
+        network: network.name,
+        claimant: args.claimant,
+        sponsor: args.sponsor,
+        asset: args.asset,
+        includeClaimed: args.includeClaimed,
+        limit,
+        cursor: args.cursor,
+      });
+      return {
+        items,
+        evaluatedAt,
+        pageInfo: pageInfo(
+          KEYSETS.claimableBalances,
+          items,
+          limit,
+          (b) => [b.createdLedger, b.id],
+          'FORWARD',
+          Boolean(args.cursor)
+        ),
+      };
     },
   },
 

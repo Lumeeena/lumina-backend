@@ -2045,4 +2045,70 @@ extend type Query {
     """
     limit: Int = 1000
   ): [ActivityRollup!]!
+
+  """
+  Indexed claimable balances with claim predicates evaluated against the request
+  time, ordered newest first by creation ledger and balance ID. At least one of
+  `claimant`, `sponsor`, or `asset` is required. Maximum page size is 100.
+  """
+  claimableBalances(
+    """Network to read; defaults to the primary network configured for this deployment."""
+    network: Network
+    """Filter to balances this Stellar account address can claim."""
+    claimant: String
+    """Filter to balances sponsored by this Stellar account address."""
+    sponsor: String
+    """Filter to balances holding this asset (`XLM` or `CODE:ISSUER`)."""
+    asset: String
+    """When true, include balances already claimed or clawed back."""
+    includeClaimed: Boolean = false
+    """Maximum page size is 100. Larger limits are rejected."""
+    limit: Int = 20
+    """Opaque cursor returned by a previous `claimableBalances` page."""
+    cursor: String
+  ): ClaimableBalancePage!
+}
+
+# ─── Claimable Balances (#224, #375) ─────────────────────────────────────────
+
+"""Lifecycle status of an indexed claimable balance."""
+enum ClaimableBalanceStatus {
+  UNCLAIMED
+  CLAIMED
+  CLAWED_BACK
+}
+
+"""A claimant listed on a claimable balance and whether its predicate holds now."""
+type ClaimableBalanceClaimant {
+  destination: String!
+  """Raw claim predicate as serialized JSON."""
+  predicate: String!
+  """Whether this claimant's predicate evaluates to true at `evaluatedAt`; null if unreadable."""
+  claimableNow: Boolean
+}
+
+"""An indexed Stellar claimable balance with evaluated claimability."""
+type ClaimableBalance {
+  network: String!
+  id: String!
+  asset: String!
+  amount: String!
+  sponsor: String
+  status: ClaimableBalanceStatus!
+  claimedBy: String
+  claimedAt: String
+  claimedLedger: Int
+  createdLedger: Int!
+  createdAt: String!
+  claimants: [ClaimableBalanceClaimant!]!
+  """Whether the queried claimant (or any claimant when unfiltered) can claim now."""
+  claimableNow: Boolean
+}
+
+"""One keyset-paginated page of claimable balances."""
+type ClaimableBalancePage {
+  items: [ClaimableBalance!]!
+  pageInfo: PageInfo!
+  """ISO 8601 timestamp against which all `claimableNow` values on this page were evaluated."""
+  evaluatedAt: String!
 }
