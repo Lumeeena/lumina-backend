@@ -10,6 +10,7 @@ const log = subsystem('db');
 import { parseContractSchema, type ContractSchema } from './customSchema';
 import type { DecodedCustomEvent } from './customDecode';
 import { claimableBalanceId } from './claimableBalanceId';
+import { refreshActivityRollupsForTimestamp } from './activityRollups';
 
 /**
  * Postgres SQLSTATE for a CHECK constraint violation.
@@ -682,6 +683,9 @@ export async function indexLedger(
     // Clear any failure records for this ledger now that it has landed
     await clearLedgerFailures(client, network, ledger.sequence);
     await setIndexerCursor(client, network, 'forward', ledger.sequence);
+
+    // Maintain hourly and daily activity_rollups atomically & idempotently (#380).
+    await refreshActivityRollupsForTimestamp(client, network, ledger.closed_at);
 
     // Queued inside the transaction on purpose: Postgres delivers notifications
     // at commit, so a rolled-back ledger announces nothing and no subscriber is

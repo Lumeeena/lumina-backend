@@ -1366,8 +1366,8 @@ export async function getRollupConsistency(
   );
   const { rows: baseRows } = await pool.query<{ count: string }>(
     `SELECT COUNT(*)::text AS count FROM transactions
-     WHERE network = $1 AND ledger_close_time >= $2
-       AND ledger_close_time < $2::timestamptz + CASE WHEN $3 = 'day' THEN INTERVAL '1 day' ELSE INTERVAL '1 hour' END`,
+     WHERE network = $1 AND created_at >= $2
+       AND created_at < $2::timestamptz + CASE WHEN $3 = 'day' THEN INTERVAL '1 day' ELSE INTERVAL '1 hour' END`,
     [network, bucketStart, granularity]
   );
   const rollupCount = parseInt(rollupRows[0]?.transaction_count ?? '0', 10);
