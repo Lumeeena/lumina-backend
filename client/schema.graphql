@@ -1932,26 +1932,6 @@ enum Granularity {
 }
 
 """
-Network-level activity statistics for a time period, computed from rollups.
-"""
-type NetworkStats {
-  """Period start (ISO 8601)."""
-  periodStart: String!
-  """Period end (ISO 8601)."""
-  periodEnd: String!
-  """Bucket granularity: `HOUR` or `DAY`."""
-  granularity: Granularity!
-  """Total transactions in the period."""
-  transactionCount: Int!
-  """Total operations in the period."""
-  operationCount: Int!
-  """Number of distinct active accounts."""
-  activeAccounts: Int!
-  """Total volume moved (stroops, as string)."""
-  totalVolume: String!
-}
-
-"""
 A single time bucket for charting network statistics.
 """
 type NetworkStatsBucket {

@@ -72,3 +72,13 @@ test('every paginated query says how to resume', () => {
     assert.match(field.description ?? '', /PageInfo/, `Query.${field.name} documents where to resume`);
   }
 });
+
+
+test('unused NetworkStats type is removed and NetworkStatsBucket is reachable from Query', () => {
+  assert.equal(schema.getType('NetworkStats'), undefined);
+  const query = schema.getQueryType();
+  assert.ok(query);
+  const networkStatsField = query.getFields()['networkStats'];
+  assert.ok(networkStatsField);
+  assert.equal(networkStatsField.type.toString(), '[NetworkStatsBucket!]!');
+});

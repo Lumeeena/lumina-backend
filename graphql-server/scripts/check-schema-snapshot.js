@@ -9,7 +9,7 @@ const intentionalNullableRelationshipChanges = [
   'Query.networkStats arg granularity',
   'Query.activityRollups arg granularity',
   'ActivityRollup.granularity',
-  'NetworkStats.granularity',
+  'NetworkStats was removed',
 ];
 
 const currentPath = 'src/schema.graphql';
