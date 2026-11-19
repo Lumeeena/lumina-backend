@@ -33,8 +33,15 @@ Any issuer can mint an asset with any code. An explorer that lists `USDC` from a
 
 The `assets` table includes:
 
-- `is_lookalike`: Boolean flag indicating if the asset's code matches a well-known asset but has a different issuer
+- `is_lookalike`: Boolean flag indicating if the asset's code matches or resembles a well-known asset but has a different issuer
+- `lookalike_reason`: The rule and canonical code that triggered the flag, such as `case_variant:USDC` or `confusable_variant:USDC`
 - Index for efficient querying of flagged assets
+
+Codes are compared case-insensitively. Confusable normalization maps `0` to
+`O`, `1` and `L` to `I`, and `5` to `S`. A single extra or missing confusable
+character is also recognized, so a code such as `USDC0` is checked against
+`USDC`. The reason records whether an exact code used a different issuer, case
+alone differed, or a confusable variant matched.
 
 ### Well-Known Assets List
 

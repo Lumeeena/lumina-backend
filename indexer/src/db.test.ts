@@ -19,6 +19,8 @@ import {
   upsertAccount,
   upsertContractStorageEntries,
   processLiquidityPoolOperation,
+  processAssetOperation,
+  processContractInterfaceOperation,
   getLiquidityPool,
   getAccountPoolShares,
   processClaimableBalanceOperation,
@@ -124,7 +126,7 @@ const op = makeOperation();
 
 test('indexLedger writes ledger, transactions, and operations inside one commit', async () => {
   const { client, calls } = makeFakeClient();
-  await indexLedger(fakePool(client), 'mainnet', ledger, [tx], [op]);
+  await indexLedger(fakePool(client), 'mainnet', ledger, [tx], [op], []);
   // The notification is queued *inside* the transaction: Postgres delivers it
   // at commit, so a rolled-back ledger announces nothing.
   assert.deepEqual(calls, [
@@ -133,6 +135,7 @@ test('indexLedger writes ledger, transactions, and operations inside one commit'
     'transactions',
     'operations',
     'SAVEPOINT operation_processing',
+    'processed_operation_handlers',
     'RELEASE SAVEPOINT operation_processing',
     'failed_ledgers',
     'indexer_cursors',
@@ -151,7 +154,7 @@ test('indexLedger clears the ledger from failed_ledgers and ledger_retry_queue i
     },
     release: () => {},
   };
-  await indexLedger(fakePool(client), 'testnet', ledger, [tx], [op]);
+  await indexLedger(fakePool(client), 'testnet', ledger, [tx], [op], []);
   // The forward loop, backfill and gap repair all retry a failed ledger
   // themselves, so the ledger usually lands here rather than through the retry
   // worker. A queue row left behind would be re-indexed for nothing, or, once
@@ -167,7 +170,7 @@ test('indexLedger inserts every transaction before any operation (FK order)', as
   const { client, calls } = makeFakeClient();
   const tx2 = { ...tx, hash: 'tx2' };
   const op2 = { ...op, id: 'op2', transaction_hash: 'tx2' };
-  await indexLedger(fakePool(client), 'mainnet', ledger, [tx, tx2], [op, op2]);
+  await indexLedger(fakePool(client), 'mainnet', ledger, [tx, tx2], [op, op2], []);
   // operations.transaction_hash is an immediate FK to transactions(hash), so
   // every parent row must land before any child row within the transaction.
   const lastTx = calls.lastIndexOf('transactions');
@@ -178,7 +181,7 @@ test('indexLedger inserts every transaction before any operation (FK order)', as
 
 test('indexLedger rolls back and releases the client on failure', async () => {
   const { client, calls } = makeFakeClient({ failOn: 'INSERT INTO operations' });
-  await assert.rejects(() => indexLedger(fakePool(client), 'mainnet', ledger, [tx], [op]));
+  await assert.rejects(() => indexLedger(fakePool(client), 'mainnet', ledger, [tx], [op], []));
   assert.deepEqual(calls, ['BEGIN', 'ledgers', 'transactions', 'operations', 'ROLLBACK', 'RELEASE']);
 });
 
@@ -217,7 +220,7 @@ test('indexLedger surfaces a check violation as a failed write', async () => {
   } as unknown as PoolClient;
 
   await assert.rejects(
-    () => indexLedger(fakePool(client), 'mainnet', ledger, [tx], [op]),
+    () => indexLedger(fakePool(client), 'mainnet', ledger, [tx], [op], []),
     (err: unknown) => err instanceof Error && isCheckViolation(err)
   );
 });
@@ -334,13 +337,14 @@ const account = makeAccount();
 
 test('indexLedger queues account refreshes in the ledger transaction', async () => {
   const { client, calls } = makeFakeClient();
-  await indexLedger(fakePool(client), 'mainnet', ledger, [tx], [op], [account.account_id]);
+  await indexLedger(fakePool(client), 'mainnet', ledger, [tx], [op], [], [account.account_id]);
   assert.deepEqual(calls, [
     'BEGIN',
     'ledgers',
     'transactions',
     'operations',
     'SAVEPOINT operation_processing',
+    'processed_operation_handlers',
     'RELEASE SAVEPOINT operation_processing',
     'account_refresh_queue',
     'failed_ledgers',
@@ -359,6 +363,7 @@ test('a failed refresh enqueue rolls the ledger transaction back for restart rec
     ledger,
     [tx],
     [op],
+    [],
     [account.account_id]
   ));
   assert.deepEqual(calls, [
@@ -367,6 +372,7 @@ test('a failed refresh enqueue rolls the ledger transaction back for restart rec
     'transactions',
     'operations',
     'SAVEPOINT operation_processing',
+    'processed_operation_handlers',
     'RELEASE SAVEPOINT operation_processing',
     'account_refresh_queue',
     'ROLLBACK',
@@ -504,16 +510,17 @@ test('every insert conflicts on the composite key, so two chains can share a led
     },
   } as unknown as Pool;
 
-  await indexLedger(fakePool(client), 'mainnet', ledger, [tx], [op], [account.account_id]);
+  await indexLedger(fakePool(client), 'mainnet', ledger, [tx], [op], [], [account.account_id]);
   await insertContractEvents(eventPool, 'mainnet', [event]);
 
   const conflicts = queries.filter(q => q.includes('ON CONFLICT')).map(q => q.match(/ON CONFLICT \(([^)]+)\)/)?.[1]);
   assert.deepEqual(conflicts, [
     'sequence, network',
     'hash, network',
-    // operations, on purpose: see the comment in db.ts. The third insert has
-    // no inference clause at all, so its entry is undefined rather than a key.
+    // operations, on purpose: see the comment in db.ts. Its insert has no
+    // inference clause at all, so its entry is undefined rather than a key.
     undefined,
+    'operation_id, handler, network',
     'network, address',
     'network, purpose',
     'id, network',
@@ -539,7 +546,7 @@ test('a ledger notification carries the network it was indexed on', async () => 
     release: () => {},
   } as unknown as PoolClient;
 
-  await indexLedger(fakePool(client), 'testnet', ledger, [tx], [op]);
+  await indexLedger(fakePool(client), 'testnet', ledger, [tx], [op], []);
 
   assert.equal(payloads.length, 1);
   assert.equal(JSON.parse(payloads[0]!).network, 'testnet');
@@ -690,6 +697,9 @@ test('processLiquidityPoolOperation handles deposits and updates pool reserves a
   const client = {
     query: async (sql: string, params: unknown[] = []) => {
       executed.push({ sql: sql.trim(), params });
+      if (sql.includes('INSERT INTO processed_operation_handlers')) {
+        return { rows: [{ operation_id: params[0] }] };
+      }
       return { rows: [] };
     },
   } as unknown as PoolClient;
@@ -709,10 +719,10 @@ test('processLiquidityPoolOperation handles deposits and updates pool reserves a
 
   await processLiquidityPoolOperation(client, 'mainnet', 500, depositOp);
 
-  assert.equal(executed.length, 2);
+  assert.equal(executed.length, 3);
   // Upsert pool
-  assert.match(executed[0]!.sql, /INSERT INTO liquidity_pools/);
-  assert.deepEqual(executed[0]!.params, [
+  assert.match(executed[1]!.sql, /INSERT INTO liquidity_pools/);
+  assert.deepEqual(executed[1]!.params, [
     'pool_abc123',
     'native',
     'USDC:GISSUER',
@@ -723,8 +733,8 @@ test('processLiquidityPoolOperation handles deposits and updates pool reserves a
     'mainnet',
   ]);
   // Upsert account shares
-  assert.match(executed[1]!.sql, /INSERT INTO liquidity_pool_shares/);
-  assert.deepEqual(executed[1]!.params, [
+  assert.match(executed[2]!.sql, /INSERT INTO liquidity_pool_shares/);
+  assert.deepEqual(executed[2]!.params, [
     'pool_abc123',
     'GA_DEPOSITOR',
     '70.7106781',
@@ -733,11 +743,35 @@ test('processLiquidityPoolOperation handles deposits and updates pool reserves a
   ]);
 });
 
+test('contract deployments do not persist a fabricated placeholder interface', async () => {
+  const queries: string[] = [];
+  const client = {
+    query: async (sql: string) => {
+      queries.push(sql);
+      return { rows: [] };
+    },
+  } as unknown as PoolClient;
+  const deployment = {
+    ...op,
+    type: 'invoke_host_function',
+    contract_id: 'CDEPLOYED',
+    wasm_hash: 'hash',
+    function: { type: 'create_contract' },
+  };
+
+  await processContractInterfaceOperation(client, 'mainnet', 500, deployment);
+
+  assert.deepEqual(queries, []);
+});
+
 test('processLiquidityPoolOperation handles withdraws and decrements reserves and shares', async () => {
   const executed: { sql: string; params: unknown[] }[] = [];
   const client = {
     query: async (sql: string, params: unknown[] = []) => {
       executed.push({ sql: sql.trim(), params });
+      if (sql.includes('INSERT INTO processed_operation_handlers')) {
+        return { rows: [{ operation_id: params[0] }] };
+      }
       return { rows: [] };
     },
   } as unknown as PoolClient;
@@ -757,10 +791,10 @@ test('processLiquidityPoolOperation handles withdraws and decrements reserves an
 
   await processLiquidityPoolOperation(client, 'mainnet', 501, withdrawOp);
 
-  assert.equal(executed.length, 2);
+  assert.equal(executed.length, 3);
   // Update pool reserves and shares
-  assert.match(executed[0]!.sql, /UPDATE liquidity_pools/);
-  assert.deepEqual(executed[0]!.params, [
+  assert.match(executed[1]!.sql, /UPDATE liquidity_pools/);
+  assert.deepEqual(executed[1]!.params, [
     '20.0000000',
     '10.0000000',
     '14.1421356',
@@ -769,14 +803,77 @@ test('processLiquidityPoolOperation handles withdraws and decrements reserves an
     'mainnet',
   ]);
   // Update account shares
-  assert.match(executed[1]!.sql, /UPDATE liquidity_pool_shares/);
-  assert.deepEqual(executed[1]!.params, [
+  assert.match(executed[2]!.sql, /UPDATE liquidity_pool_shares/);
+  assert.deepEqual(executed[2]!.params, [
     '14.1421356',
     501,
     'pool_abc123',
     'GA_DEPOSITOR',
     'mainnet',
   ]);
+});
+
+test('replaying a liquidity-pool operation does not repeat additive updates', async () => {
+  const executed: string[] = [];
+  const operation = {
+    ...op,
+    id: 'op_lp_replay',
+    type: 'liquidity_pool_deposit',
+    liquidity_pool_id: 'pool_abc123',
+    source_account: 'GA_DEPOSITOR',
+    reserves_deposited: [
+      { asset: 'native', amount: '10' },
+      { asset: 'native', amount: '20' },
+    ],
+    shares_received: '5',
+  };
+  const client = {
+    query: async (sql: string) => {
+      const text = sql.trim();
+      executed.push(text);
+      const markerInsert = text.includes('INSERT INTO processed_operation_handlers');
+      const firstClaim = executed.filter(query => query.includes('INSERT INTO processed_operation_handlers')).length === 1;
+      return markerInsert && firstClaim ? { rows: [{ operation_id: operation.id }] } : { rows: [] };
+    },
+  } as unknown as PoolClient;
+
+  await processLiquidityPoolOperation(client, 'mainnet', 500, operation);
+  await processLiquidityPoolOperation(client, 'mainnet', 500, operation);
+
+  assert.equal(executed.filter(sql => sql.includes('INSERT INTO processed_operation_handlers')).length, 2);
+  assert.equal(executed.filter(sql => sql.includes('INSERT INTO liquidity_pools')).length, 1);
+  assert.equal(executed.filter(sql => sql.includes('INSERT INTO liquidity_pool_shares')).length, 1);
+});
+
+test('replaying an asset payment does not repeat volume or balance deltas', async () => {
+  const executed: string[] = [];
+  const operation = {
+    ...op,
+    id: 'op_asset_replay',
+    type: 'payment',
+    source_account: 'GA_SENDER',
+    from: 'GA_SENDER',
+    to: 'GA_RECEIVER',
+    asset_code: 'USDC',
+    asset_issuer: 'GISSUER',
+    amount: '12.5000000',
+  };
+  const client = {
+    query: async (sql: string, params: unknown[] = []) => {
+      const text = sql.trim();
+      executed.push(text);
+      const markerInsert = text.includes('INSERT INTO processed_operation_handlers');
+      const firstClaim = executed.filter(query => query.includes('INSERT INTO processed_operation_handlers')).length === 1;
+      return markerInsert && firstClaim ? { rows: [{ operation_id: params[0] }] } : { rows: [] };
+    },
+  } as unknown as PoolClient;
+
+  await processAssetOperation(client, 'mainnet', 500, operation);
+  await processAssetOperation(client, 'mainnet', 500, operation);
+
+  assert.equal(executed.filter(sql => sql.includes('INSERT INTO processed_operation_handlers')).length, 2);
+  assert.equal(executed.filter(sql => sql.includes('INSERT INTO asset_volume_buckets')).length, 1);
+  assert.equal(executed.filter(sql => sql.includes('INSERT INTO trustlines')).length, 2);
 });
 
 test('getLiquidityPool and getAccountPoolShares query pool reserves and user shares', async () => {

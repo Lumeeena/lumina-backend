@@ -1486,6 +1486,26 @@ export async function trackAssetVolume(
   );
 }
 
+type OperationEffectHandler = 'asset' | 'liquidity_pool';
+
+/** Claim one handler's effects for an operation, making ledger replays no-ops. */
+async function claimOperationHandler(
+  client: PoolClient,
+  network: string,
+  operation: HorizonOperation,
+  handler: OperationEffectHandler
+): Promise<boolean> {
+  if (!operation.id) return true;
+  const { rows } = await client.query<{ operation_id: string }>(
+    `INSERT INTO processed_operation_handlers (operation_id, handler, network)
+     VALUES ($1, $2, $3)
+     ON CONFLICT (operation_id, handler, network) DO NOTHING
+     RETURNING operation_id`,
+    [operation.id, handler, network]
+  );
+  return rows.length > 0;
+}
+
 /**
  * Process an operation to update trustlines, balances, and volume tracking.
  * Called for each operation during ledger indexing.
@@ -1498,6 +1518,10 @@ export async function processAssetOperation(
 ): Promise<void> {
   const opType = operation.type;
   const createdAt = operation.created_at;
+
+  const handlesAssetEffects = opType === 'change_trust' || opType === 'payment' ||
+    opType === 'path_payment_strict_send' || opType === 'path_payment_strict_receive';
+  if (!handlesAssetEffects || !(await claimOperationHandler(client, network, operation, 'asset'))) return;
 
   // Handle change_trust operations
   if (opType === 'change_trust') {
@@ -1662,6 +1686,7 @@ export async function processLiquidityPoolOperation(
 
   const poolId = (operation.liquidity_pool_id as string) || '';
   if (!poolId) return;
+  if (!(await claimOperationHandler(client, network, operation, 'liquidity_pool'))) return;
 
   if (opType === 'liquidity_pool_deposit') {
     const reserves = (operation.reserves_deposited as Array<{ asset: any; amount: string }>) ||
@@ -2336,8 +2361,8 @@ export async function processSorobanTTLOperation(
 }
 
 /**
- * Process invoke_host_function operations to extract contract interfaces from WASM.
- * Issue #263: Parses the spec from uploaded wasm and stores functions, arguments and types.
+ * Keep an unparsed deployment out of contract_interfaces until its WASM spec
+ * can be extracted; a fabricated function is indistinguishable from real data.
  */
 export async function processContractInterfaceOperation(
   client: PoolClient,
@@ -2364,30 +2389,9 @@ export async function processContractInterfaceOperation(
                    (operation.wasmId as string) ||
                    '';
 
-  // Only process if we have both contract_id and wasm_hash
-  if (contractId && wasmHash) {
-    // For now, store a placeholder interface. A full implementation would:
-    // 1. Fetch the WASM from the RPC
-    // 2. Parse the contract spec embedded in the WASM
-    // 3. Extract function names, arguments, and types
-    // This requires additional Soroban RPC integration and WASM parsing
+  if (!contractId || !wasmHash) return;
 
-    const placeholderFunctions = JSON.stringify([
-      {
-        name: 'placeholder',
-        inputs: [],
-        outputs: []
-      }
-    ]);
-
-    await client.query(
-      `INSERT INTO contract_interfaces (contract_id, wasm_hash, functions, created_at, updated_at, network)
-       VALUES ($1, $2, $3, NOW(), NOW(), $4)
-       ON CONFLICT (contract_id, network) DO UPDATE SET
-         wasm_hash = EXCLUDED.wasm_hash,
-         functions = EXCLUDED.functions,
-         updated_at = NOW()`,
-      [contractId, wasmHash, placeholderFunctions, network]
-    );
-  }
+  // The WASM spec is not parsed yet. Persisting a fabricated function would
+  // make it indistinguishable from a real interface, so leave the row absent
+  // until extraction is implemented.
 }

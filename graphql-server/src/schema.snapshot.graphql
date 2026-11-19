@@ -300,6 +300,21 @@ type Query {
   ): ContractStorageEntryPage!
 
   """
+  Fetch the indexed value history for one Soroban storage key, newest change first.
+  The cursor is the ledger of the last returned entry. Requires Soroban RPC indexing.
+  """
+  contractStorageKeyHistory(
+    """Network to read; defaults to the primary network configured for this deployment."""
+    network: Network
+    contractId: String!
+    key: String!
+    """Maximum page size is 100. Larger limits are rejected."""
+    limit: Int = 20
+    """Ledger cursor from a previous page's pageInfo."""
+    cursor: String
+  ): ContractStorageKeyHistoryPage!
+
+  """
   Get a single ledger by sequence number.
 
   Indexed only — no Horizon fallback, since a ledger the indexer has not reached
@@ -771,6 +786,19 @@ type ContractEventPage {
 type ContractStorageEntryPage {
   items: [ContractStorageEntry!]!
   pageInfo: PageInfo!
+}
+
+"""A page of changes to one contract storage key, newest first."""
+type ContractStorageKeyHistoryPage {
+  items: [ContractStorageKeyHistoryEntry!]!
+  pageInfo: PageInfo!
+}
+
+"""One value recorded for a storage key."""
+type ContractStorageKeyHistoryEntry {
+  value: String
+  ledger: Int!
+  createdAt: String!
 }
 
 type AssetPage {

@@ -21,6 +21,7 @@ import {
   getTradesFromDb,
   getTableCountEstimateOrExact,
   getContractStorageEntries,
+  getContractStorageKeyHistory,
   getAccountSigners,
   getSponsoredAccounts,
   getContractDeployment,
@@ -460,6 +461,42 @@ export const resolvers = {
             startCursor: items.at(0)?.key ?? null,
             endCursor: items.at(-1)?.key ?? null,
             cursor: items.at(-1)?.key ?? null,
+          },
+        };
+      });
+    },
+
+    async contractStorageKeyHistory(
+      _: unknown,
+      args: {
+        network?: string | null;
+        contractId: string;
+        key: string;
+        limit?: number;
+        cursor?: string | null;
+      },
+      ctx: Context
+    ) {
+      return memoizeRequestQuery(ctx.queryMemo, 'contractStorageKeyHistory', args, async () => {
+        const limit = getPageSize(args.limit);
+        const network = networkArgument(args, ctx);
+        const items = await getContractStorageKeyHistory(ctx.pool, {
+          network: network.name,
+          contractId: args.contractId,
+          key: args.key,
+          limit,
+          cursor: args.cursor ?? null,
+        });
+        const cursorFor = (entry: (typeof items)[number] | undefined) =>
+          entry ? String(entry.ledger) : null;
+        return {
+          items,
+          pageInfo: {
+            hasNextPage: items.length === limit,
+            hasPreviousPage: Boolean(args.cursor),
+            startCursor: cursorFor(items[0]),
+            endCursor: cursorFor(items.at(-1)),
+            cursor: cursorFor(items.at(-1)),
           },
         };
       });

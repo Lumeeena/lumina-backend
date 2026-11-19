@@ -17,6 +17,46 @@ test('the resolvers and schema.graphql build the executable schema the server st
   assert.doesNotThrow(() => makeExecutableSchema({ typeDefs, resolvers }));
 });
 
+test('contractStorageKeyHistory is executable through GraphQL with ledger cursors', async () => {
+  const typeDefs = readFileSync(resolve(__dirname, 'schema.graphql'), 'utf8');
+  const schema = makeExecutableSchema({ typeDefs, resolvers });
+  let queryParams: unknown[] = [];
+  const pool = {
+    query: async (_sql: string, params: unknown[] = []) => {
+      queryParams = params;
+      return { rows: [{
+        value: { count: '2' },
+        last_modified_ledger: '200',
+        indexed_at: new Date('2026-05-06T10:22:14Z'),
+      }] };
+    },
+  } as unknown as Pool;
+
+  const result = await graphql({
+    schema,
+    source: `query {
+      contractStorageKeyHistory(contractId: "${'C'.repeat(56)}", key: "AAAA", limit: 10) {
+        items { value ledger createdAt }
+        pageInfo { hasNextPage hasPreviousPage startCursor endCursor cursor }
+      }
+    }`,
+    contextValue: createContext(pool),
+  });
+
+  assert.equal(result.errors, undefined);
+  assert.deepEqual(JSON.parse(JSON.stringify(result.data?.contractStorageKeyHistory)), {
+    items: [{ value: '{"count":"2"}', ledger: 200, createdAt: '2026-05-06T10:22:14.000Z' }],
+    pageInfo: {
+      hasNextPage: false,
+      hasPreviousPage: false,
+      startCursor: '200',
+      endCursor: '200',
+      cursor: '200',
+    },
+  });
+  assert.deepEqual(queryParams, ['mainnet', 'C'.repeat(56), 'AAAA', 10]);
+});
+
 test('ledgerCoverage query distinguishes indexed ranges from missing intervals', async () => {
   const typeDefs = readFileSync(resolve(__dirname, 'schema.graphql'), 'utf8');
   const schema = makeExecutableSchema({ typeDefs, resolvers });
