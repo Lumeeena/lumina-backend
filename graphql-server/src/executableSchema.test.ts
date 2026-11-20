@@ -216,7 +216,7 @@ test('granularity uses the Granularity enum and rejects unsupported values at va
 
   const invalidRollups = await graphql({
     schema,
-    source: '{ activityRollups(network: "mainnet", startTime: "2026-01-01T00:00:00Z", endTime: "2026-01-02T00:00:00Z", granularity: WEEK) { bucketStart } }',
+    source: '{ activityRollups(network: MAINNET, startTime: "2026-01-01T00:00:00Z", endTime: "2026-01-02T00:00:00Z", granularity: WEEK) { bucketStart } }',
     contextValue: ctx,
   });
   assert.ok(invalidRollups.errors && invalidRollups.errors.length > 0);
@@ -231,12 +231,36 @@ test('granularity uses the Granularity enum and rejects unsupported values at va
 
   const validRollup = await graphql({
     schema,
-    source: '{ activityRollups(network: "mainnet", startTime: "2026-01-01T00:00:00Z", endTime: "2026-01-02T00:00:00Z", granularity: HOUR) { granularity } }',
+    source: '{ activityRollups(network: MAINNET, startTime: "2026-01-01T00:00:00Z", endTime: "2026-01-02T00:00:00Z", granularity: HOUR) { granularity } }',
     contextValue: ctx,
   });
   assert.equal(validRollup.errors, undefined);
   assert.equal((validRollup.data as any).activityRollups[0].granularity, 'HOUR');
   assert.deepEqual(seenGranularities, ['day', 'hour']);
+
+  // Omitting `network` defaults to the primary network (#384).
+  const defaultNetworkRollup = await graphql({
+    schema,
+    source: '{ activityRollups(startTime: "2026-01-01T00:00:00Z", endTime: "2026-01-02T00:00:00Z") { granularity network } }',
+    contextValue: ctx,
+  });
+  assert.equal(defaultNetworkRollup.errors, undefined);
+  assert.equal((defaultNetworkRollup.data as any).activityRollups[0].network, 'mainnet');
+
+  // Unknown network enum values and free-form strings are rejected by schema validation (#384).
+  const unknownNetworkRollup = await graphql({
+    schema,
+    source: '{ activityRollups(network: INVALID_NETWORK, startTime: "2026-01-01T00:00:00Z", endTime: "2026-01-02T00:00:00Z") { bucketStart } }',
+    contextValue: ctx,
+  });
+  assert.ok(unknownNetworkRollup.errors && unknownNetworkRollup.errors.length > 0);
+
+  const stringNetworkRollup = await graphql({
+    schema,
+    source: '{ activityRollups(network: "mainnet", startTime: "2026-01-01T00:00:00Z", endTime: "2026-01-02T00:00:00Z") { bucketStart } }',
+    contextValue: ctx,
+  });
+  assert.ok(stringNetworkRollup.errors && stringNetworkRollup.errors.length > 0);
 
   await assert.rejects(
     () => resolvers.Query.networkStats(undefined, {

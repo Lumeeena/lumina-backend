@@ -2147,8 +2147,8 @@ extend type Query {
   network over `[startTime, endTime)`, up to `limit` buckets (capped at 1000).
   """
   activityRollups(
-    """Network whose rollups to read."""
-    network: String!
+    """Network to read; defaults to the primary network configured for this deployment."""
+    network: Network
     """Bucket width: `HOUR` or `DAY`."""
     granularity: Granularity = HOUR
     """Start of the range (ISO 8601), inclusive."""

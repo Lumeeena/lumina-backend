@@ -126,7 +126,7 @@ test('networkStats at the cap stays under the response ceiling', async () => {
 
 test('activityRollups at the cap stays under the response ceiling', async () => {
   const size = await serializedSize(
-    `query { activityRollups(network: "mainnet", granularity: HOUR, startTime: "2020-01-01T00:00:00Z", endTime: "2020-02-11T16:00:00Z") {
+    `query { activityRollups(network: MAINNET, granularity: HOUR, startTime: "2020-01-01T00:00:00Z", endTime: "2020-02-11T16:00:00Z") {
       bucketStart granularity network transactionCount operationCount activeAccounts totalVolume
     } }`,
     bucketRows(MAX_AGGREGATE_ROWS).map(row => ({ ...row, granularity: 'hour', network: 'mainnet' }))
@@ -158,7 +158,7 @@ test('the pool never sees a row count above the cap', async () => {
   await execute({
     schema,
     document: parse(
-      `query { activityRollups(network: "mainnet", startTime: "2020-01-01T00:00:00Z", endTime: "2020-02-01T00:00:00Z") { bucketStart } }`
+      `query { activityRollups(network: MAINNET, startTime: "2020-01-01T00:00:00Z", endTime: "2020-02-01T00:00:00Z") { bucketStart } }`
     ),
     contextValue: createContext(pool),
   });
