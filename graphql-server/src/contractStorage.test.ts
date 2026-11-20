@@ -1,7 +1,12 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import type { Pool } from 'pg';
-import { getContractStorageEntries, mapContractStorageEntry } from './db';
+import {
+  getContractStorageEntries,
+  getContractStorageKeyHistory,
+  mapContractStorageEntry,
+  mapContractStorageKeyHistoryEntry,
+} from './db';
 
 const CONTRACT = 'CAYUDQPV3RKPM3EXDFGI3457FV677JLUCJ4OLKWGCUBPRIHYKXK3WFAZ';
 const KEY_A = 'AAAAZAAAAGQAAAA==';
@@ -70,6 +75,18 @@ test('an unknown durability or state fails loudly rather than reaching the clien
   assert.throws(() => mapContractStorageEntry(row({ state: 'restored' })), /unknown contract storage state/);
 });
 
+test('history entries map JSON values, BIGINT ledgers and timestamps', () => {
+  assert.deepEqual(mapContractStorageKeyHistoryEntry({
+    value: { count: '42' },
+    last_modified_ledger: '52481234',
+    indexed_at: new Date('2026-05-06T10:22:14Z'),
+  }), {
+    value: '{"count":"42"}',
+    ledger: 52481234,
+    createdAt: '2026-05-06T10:22:14.000Z',
+  });
+});
+
 // ── Query shape ────────────────────────────────────────────────────────────
 
 test('the base query filters by contract and network and orders by the cursor keyset', async () => {
@@ -98,6 +115,32 @@ test('a durability filter is bound as a parameter and lowercased', async () => {
   assert.match(query.sql, /durability = \$3/);
   // The schema enum is upper case, the column is lower case.
   assert.equal(query.params[2], 'persistent');
+});
+
+test('storage key history is scoped by network, contract and key and pages newest first', async () => {
+  const { pool, queries } = fakePool([{
+    value: { version: 2 }, last_modified_ledger: '200', indexed_at: new Date('2026-05-06T10:22:14Z'),
+  }]);
+  const items = await getContractStorageKeyHistory(pool, {
+    network: 'testnet', contractId: CONTRACT, key: KEY_A, limit: 10, cursor: '300',
+  });
+
+  assert.equal(items[0]?.ledger, 200);
+  assert.match(queries[0]!.sql, /FROM contract_storage_history/);
+  assert.match(queries[0]!.sql, /network = \$1 AND contract_id = \$2 AND key = \$3/);
+  assert.match(queries[0]!.sql, /last_modified_ledger < \$4::bigint/);
+  assert.match(queries[0]!.sql, /ORDER BY last_modified_ledger DESC/);
+  assert.deepEqual(queries[0]!.params, ['testnet', CONTRACT, KEY_A, '300', 10]);
+});
+
+test('storage key history rejects malformed ledger cursors', async () => {
+  const { pool } = fakePool([]);
+  await assert.rejects(
+    () => getContractStorageKeyHistory(pool, {
+      network: 'mainnet', contractId: CONTRACT, key: KEY_A, limit: 10, cursor: 'not-a-ledger',
+    }),
+    /Invalid cursor: contract storage history cursor/
+  );
 });
 
 test('a key prefix filter is a literal prefix match, not a wildcard', async () => {

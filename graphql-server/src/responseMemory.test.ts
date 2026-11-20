@@ -116,7 +116,7 @@ const RESPONSE_CEILING_BYTES = 2 * 1024 * 1024;
 
 test('networkStats at the cap stays under the response ceiling', async () => {
   const size = await serializedSize(
-    `query { networkStats(startTime: "2020-01-01T00:00:00Z", endTime: "2020-02-11T16:00:00Z", granularity: "hour") {
+    `query { networkStats(startTime: "2020-01-01T00:00:00Z", endTime: "2020-02-11T16:00:00Z", granularity: HOUR) {
       bucketStart transactionCount operationCount activeAccounts totalVolume
     } }`,
     bucketRows(MAX_AGGREGATE_ROWS)
@@ -126,7 +126,7 @@ test('networkStats at the cap stays under the response ceiling', async () => {
 
 test('activityRollups at the cap stays under the response ceiling', async () => {
   const size = await serializedSize(
-    `query { activityRollups(network: "mainnet", granularity: "hour", startTime: "2020-01-01T00:00:00Z", endTime: "2020-02-11T16:00:00Z") {
+    `query { activityRollups(network: "mainnet", granularity: HOUR, startTime: "2020-01-01T00:00:00Z", endTime: "2020-02-11T16:00:00Z") {
       bucketStart granularity network transactionCount operationCount activeAccounts totalVolume
     } }`,
     bucketRows(MAX_AGGREGATE_ROWS).map(row => ({ ...row, granularity: 'hour', network: 'mainnet' }))

@@ -36,6 +36,9 @@ The following migrations are strictly **irreversible** in place and will be reje
 ### 3. `007_networks.sql`
 - **Why Irreversible**: Overhauled primary keys, foreign keys, and unique indexes across every table to be composite over `(..., network)`. Backfilled existing data with `network = 'mainnet'`. Reverting this would drop multi-network chain isolation, destroy foreign keys pointing to parent ledgers/transactions, and drop any non-mainnet data that landed after multi-network support was introduced.
 
+### 4. `023_remove_placeholder_contract_interfaces.sql`
+- **Why Irreversible**: Removes rows that contain only a fabricated `placeholder` function. Restoring those rows would recreate false contract metadata, and the migration does not retain those misleading values.
+
 ---
 
 ## 3. Reversible Migrations Catalog
@@ -61,6 +64,9 @@ The following migrations are strictly **irreversible** in place and will be reje
 | `011_assets` | `011_assets.down.sql` | Drops `assets` table. |
 | `012_asset_volume_buckets` | `012_asset_volume_buckets.down.sql` | Drops `asset_volume_buckets` table and `bucket_hour()` function. |
 | `015_retry_queue_network_index` | `015_retry_queue_network_index.down.sql` | Restores `idx_retry_queue_next_attempt` and drops `idx_retry_queue_network_next_attempt`. The stale rows the up migration deleted are not restored; their ledgers were already indexed. |
+| `022_asset_lookalike_reason` | `022_asset_lookalike_reason.down.sql` | Drops the persisted lookalike detection rule. |
+| `023_remove_placeholder_contract_interfaces` | — | Irreversible; removes fabricated placeholder interfaces. |
+| `024_operation_effect_idempotency` | `024_operation_effect_idempotency.down.sql` | Drops replay markers; a later ledger replay can reapply additive effects. |
 
 ---
 

@@ -192,6 +192,7 @@ export const KEYSETS = {
   ledgers: { query: 'ledgers', columns: ['sequence'], types: ['bigint'] },
   accountsActivity: { query: 'accounts', columns: ['last_modified_ledger', 'address'], types: ['bigint', 'text'] },
   accountsAddress: { query: 'accounts', columns: ['address'], types: ['text'] },
+  sponsoredAccountsPage: { query: 'sponsoredAccountsPage', columns: ['a.address'], types: ['text'] },
   operations: { query: 'operations', columns: ['ledger', 'id'], types: ['bigint', 'text'] },
   assetOperations: { query: 'operations', columns: ['ledger', 'id'], types: ['bigint', 'text'] },
   events: { query: 'events', columns: ['ledger', 'id'], types: ['bigint', 'text'] },
