@@ -65,6 +65,10 @@ The following migrations are strictly **irreversible** in place and will be reje
 | `010_trustlines` | `010_trustlines.down.sql` | Drops `trustlines` table. |
 | `011_assets` | `011_assets.down.sql` | Drops `assets` table. |
 | `012_asset_volume_buckets` | `012_asset_volume_buckets.down.sql` | Drops `asset_volume_buckets` table and `bucket_hour()` function. |
+| `013_failed_ledgers` | `013_failed_ledgers.down.sql` | Drops `idx_failed_ledgers_sequence` and `failed_ledgers`. |
+| `013_trades` | `013_trades.down.sql` | Drops the trade query indexes and `trades` table. |
+| `013_trustline_changes` | `013_trustline_changes.down.sql` | Drops the trustline-change indexes and table. Leaves `api_keys.export_enabled` and `api_keys.rate_limit` in place: the up migration only adds them if missing, and they are owned by `006_export_permissions` and `005_api_keys`. |
+| `015_admin_operations` | `015_admin_operations.down.sql` | Drops `idx_admin_operations_network` and `admin_operations`. |
 | `015_retry_queue_network_index` | `015_retry_queue_network_index.down.sql` | Restores `idx_retry_queue_next_attempt` and drops `idx_retry_queue_network_next_attempt`. The stale rows the up migration deleted are not restored; their ledgers were already indexed. |
 | `022_asset_lookalike_reason` | `022_asset_lookalike_reason.down.sql` | Drops the persisted lookalike detection rule. |
 | `023_remove_placeholder_contract_interfaces` | — | Irreversible; removes fabricated placeholder interfaces. |

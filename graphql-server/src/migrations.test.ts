@@ -136,6 +136,10 @@ test('loadDownMigrations loads all down migration scripts', () => {
   assert.ok(downMigrations.size > 0);
   assert.ok(downMigrations.has('002_account_event_columns'));
   assert.ok(downMigrations.has('012_asset_volume_buckets'));
+  assert.ok(downMigrations.has('013_failed_ledgers'));
+  assert.ok(downMigrations.has('013_trades'));
+  assert.ok(downMigrations.has('013_trustline_changes'));
+  assert.ok(downMigrations.has('015_admin_operations'));
 
   const m002Down = downMigrations.get('002_account_event_columns')!;
   assert.match(m002Down.sql, /ALTER TABLE accounts DROP COLUMN IF EXISTS num_sponsored/);
