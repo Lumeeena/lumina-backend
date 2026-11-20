@@ -1031,6 +1031,85 @@ export async function getAccountOperationsInLedger(
   return rows.map(mapOperation);
 }
 
+export interface LedgerTradeSubscriptionFilter {
+  baseAssetCode?: string | null;
+  counterAssetCode?: string | null;
+  account?: string | null;
+}
+
+/**
+ * Trades belonging to one indexed ledger (matched via the ledger's close time),
+ * ordered ascending by paging_token for real-time subscription replay (#378).
+ */
+export async function getTradesByLedger(
+  pool: Pool,
+  network: string,
+  ledger: number,
+  filter: LedgerTradeSubscriptionFilter = {}
+) {
+  const conditions: string[] = [
+    't.network = $1',
+    't.ledger_close_time = (SELECT closed_at FROM ledgers WHERE sequence = $2 AND network = $1)',
+  ];
+  const params: unknown[] = [network, ledger];
+
+  if (filter.baseAssetCode) {
+    params.push(filter.baseAssetCode);
+    conditions.push(`t.base_asset_code = $${params.length}`);
+  }
+  if (filter.counterAssetCode) {
+    params.push(filter.counterAssetCode);
+    conditions.push(`t.counter_asset_code = $${params.length}`);
+  }
+  if (filter.account) {
+    params.push(filter.account);
+    conditions.push(`(t.base_account = $${params.length} OR t.counter_account = $${params.length})`);
+  }
+
+  const prefixedCols = TRADE_COLUMNS.split(',')
+    .map((c) => `t.${c.trim()}`)
+    .join(', ');
+  const { rows } = await pool.query<TradeRow>(
+    `SELECT ${prefixedCols} FROM trades t WHERE ${conditions.join(' AND ')} ORDER BY t.paging_token ASC`,
+    params
+  );
+  return rows.map(mapTrade);
+}
+
+export interface LedgerContractEventSubscriptionFilter {
+  contractId?: string | null;
+  type?: string | null;
+}
+
+/**
+ * Soroban contract events emitted in one ledger, ordered ascending by id for
+ * real-time subscription replay (#378).
+ */
+export async function getContractEventsByLedger(
+  pool: Pool,
+  network: string,
+  ledger: number,
+  filter: LedgerContractEventSubscriptionFilter = {}
+) {
+  const conditions: string[] = ['network = $1', 'ledger = $2'];
+  const params: unknown[] = [network, ledger];
+
+  if (filter.contractId) {
+    params.push(filter.contractId);
+    conditions.push(`contract_id = $${params.length}`);
+  }
+  if (filter.type) {
+    params.push(filter.type);
+    conditions.push(`type = $${params.length}`);
+  }
+
+  const { rows } = await pool.query<EventRow>(
+    `SELECT ${EVENT_COLUMNS} FROM contract_events WHERE ${conditions.join(' AND ')} ORDER BY id ASC`,
+    params
+  );
+  return rows.map(mapEvent);
+}
+
 export interface TradeRow {
   id: string;
   paging_token: string;
@@ -1449,8 +1528,8 @@ export async function getRollupConsistency(
   );
   const { rows: baseRows } = await pool.query<{ count: string }>(
     `SELECT COUNT(*)::text AS count FROM transactions
-     WHERE network = $1 AND ledger_close_time >= $2
-       AND ledger_close_time < $2::timestamptz + CASE WHEN $3 = 'day' THEN INTERVAL '1 day' ELSE INTERVAL '1 hour' END`,
+     WHERE network = $1 AND created_at >= $2
+       AND created_at < $2::timestamptz + CASE WHEN $3 = 'day' THEN INTERVAL '1 day' ELSE INTERVAL '1 hour' END`,
     [network, bucketStart, granularity]
   );
   const rollupCount = parseInt(rollupRows[0]?.transaction_count ?? '0', 10);
