@@ -27,6 +27,7 @@ import {
   getSponsoredAccountsPage,
   getContractDeployment,
   getContracts,
+  getContractsPage,
   getNetworkStats,
   getActivityRollups,
   getSharedWasmContracts,
@@ -903,6 +904,34 @@ export const resolvers = {
         deployedLedger: row.deployed_ledger,
         deployedAt: row.deployed_at,
       }));
+    },
+    async contractsPage(
+      _: unknown,
+      args: { network?: string | null; limit?: number | null; cursor?: string | null },
+      ctx: Context
+    ) {
+      const network = networkArgument(args, ctx);
+      const limit = getPageSize(args.limit, DEFAULT_PAGE_LIMIT);
+      const rows = await getContractsPage(ctx.pool, network.name, limit, args.cursor);
+      const items = rows.map((row) => ({
+        network: network.name,
+        contractId: row.contract_id,
+        deployer: row.deployer,
+        wasmHash: row.wasm_hash,
+        deployedLedger: row.deployed_ledger,
+        deployedAt: row.deployed_at,
+      }));
+      return {
+        items,
+        pageInfo: pageInfo(
+          KEYSETS.contractsPage,
+          items,
+          limit,
+          (item) => [item.deployedLedger, item.contractId],
+          'FORWARD',
+          Boolean(args.cursor)
+        ),
+      };
     },
 
     // ─── #228: Network Statistics ────────────────────────────────────────
