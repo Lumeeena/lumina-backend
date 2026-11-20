@@ -14,6 +14,7 @@ import {
   cursorCondition,
   KEYSETS,
   CountPrecision,
+  InvalidCursorError,
   type PaginationDirection,
   type TotalCount,
 } from './pagination';
@@ -124,6 +125,12 @@ interface ContractStorageEntryRow {
   value_xdr: string | null;
   live_until_ledger: string | null;
   last_modified_ledger: string;
+}
+
+interface ContractStorageKeyHistoryRow {
+  value: unknown;
+  last_modified_ledger: string;
+  indexed_at: Date;
 }
 
 const TRANSACTION_COLUMNS =
@@ -328,6 +335,14 @@ export function mapContractStorageEntry(row: ContractStorageEntryRow) {
     valueXdr: row.state === 'archived' ? null : row.value_xdr,
     lastModifiedLedger: Number(row.last_modified_ledger),
     liveUntilLedger: row.live_until_ledger === null ? null : Number(row.live_until_ledger),
+  };
+}
+
+export function mapContractStorageKeyHistoryEntry(row: ContractStorageKeyHistoryRow) {
+  return {
+    value: row.value === null ? null : JSON.stringify(row.value),
+    ledger: Number(row.last_modified_ledger),
+    createdAt: row.indexed_at.toISOString(),
   };
 }
 
@@ -945,6 +960,33 @@ export async function getContractStorageEntries(
   return isForward ? items : items.reverse();
 }
 
+/** Key-specific Soroban storage changes, newest first, paged by ledger. */
+export async function getContractStorageKeyHistory(
+  pool: Pool,
+  opts: { network: string; contractId: string; key: string; limit: number; cursor?: string | null }
+) {
+  const conditions = ['network = $1', 'contract_id = $2', 'key = $3'];
+  const params: unknown[] = [opts.network, opts.contractId, opts.key];
+  if (opts.cursor) {
+    if (!/^[1-9]\d*$/.test(opts.cursor) || BigInt(opts.cursor) > 9_223_372_036_854_775_807n) {
+      throw new InvalidCursorError('contract storage history cursor must be a positive BIGINT ledger');
+    }
+    params.push(opts.cursor);
+    conditions.push(`last_modified_ledger < $${params.length}::bigint`);
+  }
+  params.push(opts.limit);
+
+  const { rows } = await pool.query<ContractStorageKeyHistoryRow>(
+    `SELECT value, last_modified_ledger, indexed_at
+     FROM contract_storage_history
+     WHERE ${conditions.join(' AND ')}
+     ORDER BY last_modified_ledger DESC
+     LIMIT $${params.length}`,
+    params
+  );
+  return rows.map(mapContractStorageKeyHistoryEntry);
+}
+
 /**
  * Transactions belonging to one ledger, oldest first.
  *
@@ -1279,6 +1321,47 @@ export async function getSponsoredAccounts(
      ORDER BY a.address ASC
      LIMIT $3`,
     [sponsorAddress, network, limit]
+  );
+  return rows.map((row) =>
+    mapAccount({
+      network: row.network,
+      address: row.address,
+      sequence: row.sequence,
+      subentry_count: row.subentry_count,
+      last_modified_ledger: row.last_modified_ledger,
+      num_sponsored: row.num_sponsored,
+      num_sponsoring: row.num_sponsoring,
+      balances: row.balances,
+      flags: row.flags,
+      thresholds: row.thresholds,
+    })
+  );
+}
+
+export async function getSponsoredAccountsPage(
+  pool: Pool,
+  network: string,
+  sponsorAddress: string,
+  limit: number,
+  cursor?: string | null
+): Promise<ReturnType<typeof mapAccount>[]> {
+  const conditions = ['s.sponsor = $1', 's.network = $2'];
+  const params: unknown[] = [sponsorAddress, network];
+
+  const afterCursor = cursorCondition(params, KEYSETS.sponsoredAccountsPage, cursor, 'FORWARD', 'ASC');
+  if (afterCursor) conditions.push(afterCursor);
+
+  params.push(limit);
+
+  const { rows } = await pool.query(
+    `SELECT a.address, a.network, a.sequence, a.subentry_count, a.last_modified_ledger,
+            a.num_sponsored, a.num_sponsoring, a.balances, a.flags, a.thresholds
+     FROM accounts a
+     JOIN sponsorships s ON s.sponsored_id = a.address AND s.network = a.network
+     WHERE ${conditions.join(' AND ')}
+     ORDER BY a.address ASC
+     LIMIT ${params.length}`,
+    params
   );
   return rows.map((row) =>
     mapAccount({

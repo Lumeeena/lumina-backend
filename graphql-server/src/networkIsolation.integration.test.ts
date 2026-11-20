@@ -61,6 +61,9 @@ const ISSUER = 'GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN';
 const ASSET = `USDC:${ISSUER}`;
 const CONTRACT = 'CISOISOLATION';
 const STORAGE_KEY = 'kIsolationKey';
+const SPONSOR = 'GSPONSOR_ISOLATION';
+const SIGNER_KEY = 'GSIGNER_ISOLATION';
+const ROLLUP_BUCKET = '2026-01-01T12:00:00Z';
 
 const TX_HASH = 'tx_isolation_shared';
 const TX_TAIL = 'tx_isolation_tail';
@@ -124,6 +127,22 @@ async function clear(): Promise<void> {
       `DELETE FROM contract_events WHERE contract_id = $1 AND id = $2 AND network = $3`,
       [CONTRACT, EVENT_ID, network]
     );
+    await pool.query(
+      `DELETE FROM account_signers WHERE account_address = $1 AND key = $2 AND network = $3`,
+      [ACCOUNT, SIGNER_KEY, network]
+    );
+    await pool.query(
+      `DELETE FROM sponsorships WHERE sponsor = $1 AND sponsored_id = $2 AND network = $3`,
+      [SPONSOR, ACCOUNT, network]
+    );
+    await pool.query(
+      `DELETE FROM contract_deployments WHERE contract_id = $1 AND network = $2`,
+      [CONTRACT, network]
+    );
+    await pool.query(
+      `DELETE FROM activity_rollups WHERE bucket_start = $1 AND granularity = 'hour' AND network = $2`,
+      [ROLLUP_BUCKET, network]
+    );
   }
 }
 
@@ -161,6 +180,12 @@ interface Seed {
   storageValue: string;
   /** Which custom event the contract's schema declares on this network. */
   eventName: string;
+  /** Signer weight on this network. */
+  signerWeight: number;
+  /** Contract wasm hash on this network. */
+  wasmHash: string;
+  /** Rollup transaction count on this network. */
+  rollupTxCount: number;
 }
 
 const MAINNET_SEED: Seed = {
@@ -175,6 +200,9 @@ const MAINNET_SEED: Seed = {
   marker: 'mainnet',
   storageValue: 'mainnet-value',
   eventName: 'transfer',
+  signerWeight: 1,
+  wasmHash: 'wasm_isolation_mainnet',
+  rollupTxCount: 111,
 };
 
 const TESTNET_SEED: Seed = {
@@ -189,6 +217,9 @@ const TESTNET_SEED: Seed = {
   marker: 'testnet',
   storageValue: 'testnet-value',
   eventName: 'swap',
+  signerWeight: 2,
+  wasmHash: 'wasm_isolation_testnet',
+  rollupTxCount: 222,
 };
 
 async function seedNetwork(seed: Seed): Promise<void> {
@@ -344,6 +375,35 @@ async function seedNetwork(seed: Seed): Promise<void> {
      VALUES ($1, $2, 'persistent', 'active', $3, $4, $5)
      ON CONFLICT (contract_id, key, network) DO UPDATE SET value = EXCLUDED.value`,
     [CONTRACT, STORAGE_KEY, JSON.stringify({ marker: seed.marker }), seed.sharedLedger, n]
+  );
+
+  // Extended query tables: signers, sponsorships, contract deployments, and rollups.
+  await pool.query(
+    `INSERT INTO account_signers (network, account_address, key, type, weight, last_modified_ledger)
+     VALUES ($1, $2, $3, 'ed25519_public_key', $4, $5)
+     ON CONFLICT (network, account_address, key) DO UPDATE SET weight = EXCLUDED.weight`,
+    [n, ACCOUNT, SIGNER_KEY, seed.signerWeight, seed.sharedLedger]
+  );
+
+  await pool.query(
+    `INSERT INTO sponsorships (sponsor, sponsored_id, sponsored_type, ledger, created_at, network)
+     VALUES ($1, $2, 'account', $3, '2026-01-01T12:00:00Z', $4)
+     ON CONFLICT (sponsored_id, network) DO UPDATE SET sponsor = EXCLUDED.sponsor`,
+    [SPONSOR, ACCOUNT, seed.sharedLedger, n]
+  );
+
+  await pool.query(
+    `INSERT INTO contract_deployments (network, contract_id, deployer, wasm_hash, deployed_ledger, deployed_at)
+     VALUES ($1, $2, $3, $4, $5, '2026-01-01T12:00:00Z')
+     ON CONFLICT (network, contract_id) DO UPDATE SET wasm_hash = EXCLUDED.wasm_hash, deployed_ledger = EXCLUDED.deployed_ledger`,
+    [n, CONTRACT, ACCOUNT, seed.wasmHash, seed.tipLedger]
+  );
+
+  await pool.query(
+    `INSERT INTO activity_rollups (network, granularity, bucket_start, transaction_count, operation_count, active_accounts, total_volume)
+     VALUES ($1, 'hour', $2, $3, 10, 5, 1000)
+     ON CONFLICT (network, granularity, bucket_start) DO UPDATE SET transaction_count = EXCLUDED.transaction_count`,
+    [n, ROLLUP_BUCKET, seed.rollupTxCount]
   );
 }
 
@@ -935,4 +995,78 @@ test('accountActivity yields only the subscribed network operations', { skip, ti
   assert.equal(received.length, 1);
   assert.equal(received[0]?.id, OP_TAIL);
   assert.equal(received[0]?.amount, TESTNET_SEED.nativeAmount);
+});
+
+
+// ?? Extended Query fields (#381) ??????????????????????????????????????????????
+
+test('accountSigners resolves within the requested network', { skip, timeout: TEST_TIMEOUT_MS }, async () => {
+  const ctx = context();
+
+  const mainnet = await resolvers.Query.accountSigners(undefined, { network: MAINNET, address: ACCOUNT }, ctx);
+  const testnet = await resolvers.Query.accountSigners(undefined, { network: TESTNET, address: ACCOUNT }, ctx);
+
+  assert.equal(mainnet.find(s => s.key === SIGNER_KEY)?.weight, MAINNET_SEED.signerWeight);
+  assert.equal(testnet.find(s => s.key === SIGNER_KEY)?.weight, TESTNET_SEED.signerWeight);
+});
+
+test('sponsoredAccounts resolves within the requested network', { skip, timeout: TEST_TIMEOUT_MS }, async () => {
+  const ctx = context();
+
+  const mainnet = await resolvers.Query.sponsoredAccounts(undefined, { network: MAINNET, sponsorAddress: SPONSOR, limit: 10 }, ctx);
+  const testnet = await resolvers.Query.sponsoredAccounts(undefined, { network: TESTNET, sponsorAddress: SPONSOR, limit: 10 }, ctx);
+
+  assert.equal(mainnet.find(a => a.address === ACCOUNT)?.sequence, MAINNET_SEED.accountSequence);
+  assert.equal(testnet.find(a => a.address === ACCOUNT)?.sequence, TESTNET_SEED.accountSequence);
+});
+
+test('contract resolves deployment details within the requested network', { skip, timeout: TEST_TIMEOUT_MS }, async () => {
+  const ctx = context();
+
+  const mainnet = await resolvers.Query.contract(undefined, { network: MAINNET, contractId: CONTRACT }, ctx);
+  const testnet = await resolvers.Query.contract(undefined, { network: TESTNET, contractId: CONTRACT }, ctx);
+
+  assert.equal(mainnet?.wasmHash, MAINNET_SEED.wasmHash);
+  assert.equal(testnet?.wasmHash, TESTNET_SEED.wasmHash);
+});
+
+test('contracts lists deployments only from the requested network', { skip, timeout: TEST_TIMEOUT_MS }, async () => {
+  const ctx = context();
+
+  const mainnet = await resolvers.Query.contracts(undefined, { network: MAINNET, limit: 20 }, ctx);
+  const testnet = await resolvers.Query.contracts(undefined, { network: TESTNET, limit: 20 }, ctx);
+
+  assert.equal(mainnet.find(c => c.contractId === CONTRACT)?.wasmHash, MAINNET_SEED.wasmHash);
+  assert.equal(testnet.find(c => c.contractId === CONTRACT)?.wasmHash, TESTNET_SEED.wasmHash);
+});
+
+test('networkStats returns rollups only for the requested network', { skip, timeout: TEST_TIMEOUT_MS }, async () => {
+  const ctx = context();
+  const range = { startTime: '2026-01-01T11:00:00Z', endTime: '2026-01-01T14:00:00Z', limit: 10 };
+
+  const mainnet = await resolvers.Query.networkStats(undefined, { network: MAINNET, ...range }, ctx);
+  const testnet = await resolvers.Query.networkStats(undefined, { network: TESTNET, ...range }, ctx);
+
+  assert.equal(mainnet[0]?.transactionCount, MAINNET_SEED.rollupTxCount);
+  assert.equal(testnet[0]?.transactionCount, TESTNET_SEED.rollupTxCount);
+});
+
+
+test('sponsoredAccountsPage resolves and paginates within the requested network', { skip, timeout: TEST_TIMEOUT_MS }, async () => {
+  const ctx = context();
+
+  const mainnet = await resolvers.Query.sponsoredAccountsPage(undefined, { network: MAINNET, sponsorAddress: SPONSOR, limit: 10 }, ctx);
+  const testnet = await resolvers.Query.sponsoredAccountsPage(undefined, { network: TESTNET, sponsorAddress: SPONSOR, limit: 10 }, ctx);
+
+  assert.equal(mainnet.items.find(a => a.address === ACCOUNT)?.sequence, MAINNET_SEED.accountSequence);
+  assert.equal(testnet.items.find(a => a.address === ACCOUNT)?.sequence, TESTNET_SEED.accountSequence);
+  assert.ok(testnet.pageInfo.cursor);
+
+  const nextTestnet = await resolvers.Query.sponsoredAccountsPage(undefined, {
+    network: TESTNET,
+    sponsorAddress: SPONSOR,
+    limit: 10,
+    cursor: testnet.pageInfo.cursor,
+  }, ctx);
+  assert.deepEqual(nextTestnet.items, []);
 });

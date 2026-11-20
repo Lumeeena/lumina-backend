@@ -7,14 +7,16 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { Pool } from 'pg';
-import { getContractStorageEntries } from './db';
+import { getContractStorageEntries, getContractStorageKeyHistory } from './db';
 
 const DATABASE_URL = process.env['TEST_DATABASE_URL'];
 const CONTRACT_A = 'CAYUDQPV3RKPM3EXDFGI3457FV677JLUCJ4OLKWGCUBPRIHYKXK3WFAZ';
 const CONTRACT_B = 'CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC';
+const HISTORY_KEY = 'integration-history-key';
 
 async function seed(pool: Pool): Promise<void> {
   await pool.query('DELETE FROM contract_storage_entries');
+  await pool.query('DELETE FROM contract_storage_history WHERE contract_id = $1 AND key = $2', [CONTRACT_A, HISTORY_KEY]);
   const rows = [
     // Contract A: five persistent entries, deliberately with two sharing a
     // ledger so the (last_modified_ledger, key) tiebreaker is exercised.
@@ -40,6 +42,14 @@ async function seed(pool: Pool): Promise<void> {
      VALUES ($1, 'k9', 'persistent', 'archived', NULL, NULL, NULL, 400, 'mainnet')`,
     [CONTRACT_B]
   );
+  for (const [ledger, value] of [[500, 'new'], [400, 'middle'], [300, 'old']] as const) {
+    await pool.query(
+      `INSERT INTO contract_storage_history
+         (contract_id, key, durability, value, last_modified_ledger, indexed_at, network)
+       VALUES ($1, $2, 'persistent', $3, $4, '2026-05-06T10:22:14Z', 'mainnet')`,
+      [CONTRACT_A, HISTORY_KEY, { value }, ledger]
+    );
+  }
 }
 
 test(
@@ -108,6 +118,22 @@ test(
         network: 'mainnet', contractId: CONTRACT_A, keyPrefix: 'never', limit: 10,
       });
       assert.deepEqual(absent, []);
+
+      // Key history is newest first and resumes strictly before its ledger cursor.
+      const historyFirst = await getContractStorageKeyHistory(pool, {
+        network: 'mainnet', contractId: CONTRACT_A, key: HISTORY_KEY, limit: 2,
+      });
+      assert.deepEqual(historyFirst.map(entry => entry.ledger), [500, 400]);
+      assert.equal(historyFirst[0]?.value, '{"value":"new"}');
+      assert.equal(historyFirst[0]?.createdAt, '2026-05-06T10:22:14.000Z');
+      const historySecond = await getContractStorageKeyHistory(pool, {
+        network: 'mainnet', contractId: CONTRACT_A, key: HISTORY_KEY, limit: 2, cursor: '400',
+      });
+      assert.deepEqual(historySecond.map(entry => entry.ledger), [300]);
+      const otherNetworkHistory = await getContractStorageKeyHistory(pool, {
+        network: 'testnet', contractId: CONTRACT_A, key: HISTORY_KEY, limit: 10,
+      });
+      assert.deepEqual(otherNetworkHistory, []);
     } finally {
       await pool.end();
     }

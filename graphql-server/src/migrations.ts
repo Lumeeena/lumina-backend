@@ -97,6 +97,7 @@ export const IRREVERSIBLE_MIGRATIONS = [
   '001_init',
   '006_partition_operations',
   '007_networks',
+  '023_remove_placeholder_contract_interfaces',
 ] as const;
 
 export function isMigrationIrreversible(version: string): boolean {

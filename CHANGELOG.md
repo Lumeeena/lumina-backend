@@ -18,6 +18,9 @@ Breaking changes are rare and advance the major version. Deprecation notices app
 
 ## [Unreleased]
 
+### Deprecated
+- `Query.sponsoredAccounts`: deprecated in favor of cursor-paginated `Query.sponsoredAccountsPage` returning `AccountPage` (default limit 20, max 100). Removal planned for 2026-10-01 (#387)
+
 ### Added
 - Each release publishes the GraphQL schema it serves: pushing a `vX.Y.Z` tag runs `.github/workflows/release.yml`, which creates the GitHub release with `schema.graphql`, `schema.introspection.json` and `SHA256SUMS` attached, and fails unless the tag matches every package version and the schema matches its committed snapshot. `GET /health` now reports the service `version`, so a client can fetch the schema of the server it talks to. Fetching a version's schema is documented in `docs/API_GUIDE.md` ("API Versioning"); cutting a release in `docs/RELEASING.md` (#267)
 - Stable, machine-readable error codes on every GraphQL error, with the taxonomy documented in [`docs/ERROR_CODES.md`](docs/ERROR_CODES.md): invalid input (`BAD_USER_INPUT`, `INVALID_CURSOR`, `QUERY_TOO_DEEP`, `QUERY_TOO_COMPLEX`), not found (`NOT_FOUND`), rate limited (`RATE_LIMITED`), authentication (`UNAUTHENTICATED`) and internal (`QUERY_TIMEOUT`, `REQUEST_TIMEOUT`, `INTERNAL_SERVER_ERROR`). Deliberate errors now carry their code instead of Apollo's generic `INTERNAL_SERVER_ERROR`, so a client can branch on `extensions.code` rather than string-matching a message: `CustomQueryError` is `BAD_USER_INPUT` (or `NOT_FOUND` for an unregistered contract or event), `SearchError` and `AssetError` are `BAD_USER_INPUT`, `ApiKeyError` is `UNAUTHENTICATED`, and `SubscriberLimitError` is `RATE_LIMITED`

@@ -1954,23 +1954,13 @@ type ContractDeployment {
 # ─── Network Statistics (#228) ───────────────────────────────────────────────
 
 """
-Network-level activity statistics for a time period, computed from rollups.
+Time bucket width for rolled-up network statistics and activity rollups.
 """
-type NetworkStats {
-  """Period start (ISO 8601)."""
-  periodStart: String!
-  """Period end (ISO 8601)."""
-  periodEnd: String!
-  """Bucket granularity: `hour` or `day`."""
-  granularity: String!
-  """Total transactions in the period."""
-  transactionCount: Int!
-  """Total operations in the period."""
-  operationCount: Int!
-  """Number of distinct active accounts."""
-  activeAccounts: Int!
-  """Total volume moved (stroops, as string)."""
-  totalVolume: String!
+enum Granularity {
+  """One-hour aggregation buckets."""
+  HOUR
+  """One-day aggregation buckets."""
+  DAY
 }
 
 """
@@ -1997,8 +1987,8 @@ A rolled-up activity aggregate for a time bucket.
 type ActivityRollup {
   """Bucket start time (ISO 8601)."""
   bucketStart: String!
-  """Bucket granularity: `hour` or `day`."""
-  granularity: String!
+  """Bucket granularity: `HOUR` or `DAY`."""
+  granularity: Granularity!
   """Network name."""
   network: String!
   """Transactions in this bucket."""
@@ -2017,41 +2007,78 @@ extend type Query {
   """
   Account signers and sponsorship details (#226).
   """
-  accountSigners(address: String!): [Signer!]!
+  accountSigners(
+    """Network to read; defaults to the primary network configured for this deployment."""
+    network: Network
+    """Account address whose signers to list."""
+    address: String!
+  ): [Signer!]!
 
   """
-  Accounts sponsored by the given address (#226).
+  Accounts sponsored by the given sponsor address (#226).
   """
   sponsoredAccounts(
-    """Issuing address whose sponsored accounts to list."""
+    """Network to read; defaults to the primary network configured for this deployment."""
+    network: Network
+    """Sponsoring account address whose sponsored accounts to list."""
     sponsorAddress: String!
     """
     Maximum accounts to return. Capped at 1000 so a single sponsor cannot force
-    an unbounded response; use a narrower sponsor rather than raising this.
+    an unbounded response; use `sponsoredAccountsPage` for cursor pagination.
     """
     limit: Int = 1000
-  ): [Account!]!
+  ): [Account!]! @deprecated(reason: "Use `sponsoredAccountsPage` instead for cursor-paginated `AccountPage` results. Removal planned for 2026-10-01.")
+
+  """
+  Accounts sponsored by the given sponsor address, ordered by address ascending (#226, #387).
+
+  Paginates by account address ? see `PageInfo` for the cursor contract.
+  """
+  sponsoredAccountsPage(
+    """Network to read; defaults to the primary network configured for this deployment."""
+    network: Network
+    """Sponsoring account address whose sponsored accounts to list."""
+    sponsorAddress: String!
+    """Maximum page size is 100. Larger limits are rejected."""
+    limit: Int = 20
+    """Opaque cursor from a previous page's `pageInfo`; see `PageInfo`."""
+    cursor: String
+  ): AccountPage!
 
   """
   Resolve a contract ID to its deployment details (#227).
   """
-  contract(contractId: String!): ContractDeployment
+  contract(
+    """Network to read; defaults to the primary network configured for this deployment."""
+    network: Network
+    """Contract ID to resolve."""
+    contractId: String!
+  ): ContractDeployment
 
   """
   List deployed contracts, newest first (#227).
   """
-  contracts(limit: Int = 20, cursor: String): [ContractDeployment!]!
+  contracts(
+    """Network to read; defaults to the primary network configured for this deployment."""
+    network: Network
+    """Maximum contracts to return."""
+    limit: Int = 20
+    """Ledger sequence cursor from a previous listing."""
+    cursor: String
+  ): [ContractDeployment!]!
 
   """
   Network statistics for a time period, computed from rollups (#228).
   """
   networkStats(
+    """Network to read; defaults to the primary network configured for this deployment."""
+    network: Network
     """Start of the range (ISO 8601), inclusive."""
     startTime: String!
     """End of the range (ISO 8601), exclusive."""
     endTime: String!
-    """Bucket width: `hour` or `day`."""
-    granularity: String = "hour"
+    """Bucket width: `HOUR` or `DAY`."""
+    granularity: Granularity = HOUR
     """
     Maximum buckets to return, capped at 1000. A range that would exceed the
     cap returns an error rather than a silently truncated series.
@@ -2065,8 +2092,8 @@ extend type Query {
   activityRollups(
     """Network whose rollups to read."""
     network: String!
-    """Bucket width: `hour` or `day`."""
-    granularity: String = "hour"
+    """Bucket width: `HOUR` or `DAY`."""
+    granularity: Granularity = HOUR
     """Start of the range (ISO 8601), inclusive."""
     startTime: String!
     """End of the range (ISO 8601), exclusive."""

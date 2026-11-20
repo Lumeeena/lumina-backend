@@ -34,6 +34,15 @@ test('loads migrations in order and expands initial schema include', () => {
   assert.match(networks?.sql, /ALTER TABLE operations ADD PRIMARY KEY \(id, network\)/);
   assert.doesNotMatch(networks?.sql, /ADD PRIMARY KEY \(id, ledger, network\)/);
   assert.match(networks?.sql, /FOREIGN KEY \(transaction_hash, network\) REFERENCES transactions \(hash, network\)/);
+
+  const placeholderCleanup = migrations.find(migration => migration.version === '023_remove_placeholder_contract_interfaces');
+  assert.ok(placeholderCleanup);
+  assert.match(placeholderCleanup?.sql ?? '', /DELETE FROM contract_interfaces/);
+  assert.match(placeholderCleanup?.sql ?? '', /"placeholder"/);
+  const idempotency = migrations.find(migration => migration.version === '024_operation_effect_idempotency');
+  assert.ok(idempotency);
+  assert.match(idempotency?.sql ?? '', /processed_operation_handlers/);
+  assert.match(idempotency?.sql ?? '', /dead_letter_operations/);
 });
 
 test('concurrent migrations are sent one statement at a time', () => {
@@ -100,8 +109,10 @@ test('isMigrationIrreversible identifies irreversible migrations', () => {
   assert.equal(isMigrationIrreversible('001_init'), true);
   assert.equal(isMigrationIrreversible('006_partition_operations'), true);
   assert.equal(isMigrationIrreversible('007_networks'), true);
+  assert.equal(isMigrationIrreversible('023_remove_placeholder_contract_interfaces'), true);
   assert.equal(isMigrationIrreversible('002_account_event_columns'), false);
   assert.equal(isMigrationIrreversible('012_asset_volume_buckets'), false);
+  assert.equal(isMigrationIrreversible('022_asset_lookalike_reason'), false);
 });
 
 test('rollbackMigration rejects irreversible migrations', async () => {
