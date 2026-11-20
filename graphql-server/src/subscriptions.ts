@@ -22,6 +22,7 @@ import { resolveNetworkArgument, type NetworkRegistry } from './networks';
 import type { IndexedNotification } from './notifications';
 import type { LedgerNotifier } from './pubsub';
 import { subsystem } from './logger';
+import { createExtendedSubscriptionResolvers } from './subscriptionsExtended';
 
 export interface SubscriptionContext {
   pool: Pool;
@@ -123,6 +124,8 @@ export function createSubscriptionResolvers(logSink?: (message: string, detail?:
       },
       resolve: (payload: unknown) => payload,
     },
+
+    ...createExtendedSubscriptionResolvers(logSink),
   };
 }
 

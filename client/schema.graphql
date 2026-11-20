@@ -564,6 +564,38 @@ type Subscription {
     """Account address to watch."""
     address: String!
   ): Operation!
+
+  """
+  Subscribe to newly indexed DEX trades as ledgers close (#378).
+
+  Delivered over the same LISTEN/NOTIFY stream as `newTransaction`, optionally
+  filtered by base/counter asset code or participating account.
+  """
+  newTrade(
+    """Network to read; defaults to the primary network configured for this deployment."""
+    network: Network
+    """Optional base asset code filter (e.g. USDC)."""
+    baseAssetCode: String
+    """Optional counter asset code filter."""
+    counterAssetCode: String
+    """Optional account filter matching either baseAccount or counterAccount."""
+    account: String
+  ): Trade!
+
+  """
+  Subscribe to newly indexed Soroban contract events (#378).
+
+  Delivered over the same LISTEN/NOTIFY stream as `newTransaction`, optionally
+  filtered by emitting contract ID or event type.
+  """
+  newContractEvent(
+    """Network to read; defaults to the primary network configured for this deployment."""
+    network: Network
+    """Optional Soroban contract ID filter."""
+    contractId: String
+    """Optional contract event type filter."""
+    type: String
+  ): ContractEvent!
 }
 
 # ─── Indexer freshness ────────────────────────────────────────────────────────

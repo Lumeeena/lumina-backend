@@ -23,8 +23,7 @@ test('loads migrations in order and expands initial schema include', () => {
     '016_assets_index_review', '016_event_transaction_context', '017_account_state_history',
     '017_signers_sponsorship_contracts_rollups', '018_dead_letters_and_cursors',
     '019_operations_index_review', '020_claimable_balances_listing', '020_effects',
-    '021_ledger_audit_window_index', '022_asset_lookalike_reason',
-    '023_remove_placeholder_contract_interfaces', '024_operation_effect_idempotency',
+    '021_ledger_audit_window_index', '022_webhooks',
   ]);
   assert.match(migrations[0].sql, /CREATE TABLE IF NOT EXISTS ledgers/);
   assert.match(migrations[0].sql, /PRIMARY KEY \(id, network\)/);

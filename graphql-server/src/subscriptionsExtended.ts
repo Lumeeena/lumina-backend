@@ -1,150 +1,136 @@
 /**
- * Extended subscriptions for new data types (#231).
+ * Extended subscriptions wired into the GraphQL schema (#231, #378).
  *
- * Adds subscriptions for new trades, new offers, and contract events.
- * Reuses the existing LISTEN/NOTIFY notifier infrastructure.
+ * Streams `newTrade` (triggered by `kind: 'ledger'` notifications) and
+ * `newContractEvent` (triggered by `kind: 'events'` notifications) over the
+ * same PostgreSQL LISTEN/NOTIFY `LedgerNotifier` path that `newTransaction`
+ * and `accountActivity` use.
+ *
+ * ## Why `NEW_OFFER` is omitted
+ *
+ * Order-book offers are not yet indexed into PostgreSQL. Rather than exposing a
+ * dead subscription field or an unused topic that never emits, `newOffer` /
+ * `NEW_OFFER` is deliberately left out of the schema and resolver map until an
+ * offers table and indexer pipeline exist.
  */
+import { getContractEventsByLedger, getTradesByLedger } from './db';
+import { resolveNetworkArgument } from './networks';
+import type { IndexedKind, IndexedNotification } from './notifications';
+import type { SubscriptionContext } from './subscriptions';
+import { subsystem } from './logger';
 
-import { PubSub } from "graphql-subscriptions";
-import { logger } from "./logger.js";
-
-// Reuse the existing pubsub instance
-let pubsub: PubSub | null = null;
-
-export function initExtendedSubscriptions(pubsubInstance: PubSub): void {
-  pubsub = pubsubInstance;
-  logger.info("Extended subscriptions initialized");
-}
-
-// Subscription topic constants
-export const SUBSCRIPTION_TOPICS = {
-  NEW_TRADE: "NEW_TRADE",
-  NEW_OFFER: "NEW_OFFER",
-  CONTRACT_EVENT: "CONTRACT_EVENT",
+/**
+ * Active extended subscription topics.
+ * `NEW_OFFER` is intentionally omitted until offers are indexed (#378).
+ */
+export const EXTENDED_SUBSCRIPTION_TOPICS = {
+  NEW_TRADE: 'NEW_TRADE',
+  NEW_CONTRACT_EVENT: 'NEW_CONTRACT_EVENT',
 } as const;
 
-interface TradeEvent {
-  id: string;
-  ledger: number;
-  timestamp: Date;
-  baseAsset: string;
-  counterAsset: string;
-  baseAmount: string;
-  counterAmount: string;
-  price: string;
-  buyer: string;
-  seller: string;
-  network: string;
+interface ExtendedSubscriptionLogger {
+  warn(message: string, detail?: unknown): void;
 }
 
-interface OfferEvent {
-  id: string;
-  seller: string;
-  sellingAsset: string;
-  buyingAsset: string;
-  amount: string;
-  price: string;
-  ledger: number;
-  timestamp: Date;
-  network: string;
+function loggerFor(
+  ctx: SubscriptionContext,
+  logSink?: (message: string, detail?: unknown) => void
+): ExtendedSubscriptionLogger {
+  if (ctx.requestLogger) return ctx.requestLogger;
+  if (logSink) return { warn: (message: string, detail?: unknown) => logSink(message, detail) };
+  return subsystem('subscription');
 }
 
-interface ContractEvent {
-  id: string;
-  contractId: string;
-  type: string;
-  data: unknown;
-  ledger: number;
-  timestamp: Date;
-  network: string;
+async function* expandByKind<T>(
+  notifications: AsyncIterableIterator<IndexedNotification>,
+  expectedKind: IndexedKind,
+  network: string,
+  load: (ledger: number) => Promise<T[]>,
+  requestLogger: ExtendedSubscriptionLogger
+): AsyncGenerator<T> {
+  for await (const notification of notifications) {
+    if (notification.kind !== expectedKind) continue;
+    // Double-filtered by network (notification + SQL predicate) so streams on
+    // one chain never receive rows from another.
+    if ((notification.network ?? network) !== network) continue;
+
+    let rows: T[];
+    try {
+      rows = await load(notification.ledger);
+    } catch (err) {
+      requestLogger.warn('extended subscription failed to read ledger', {
+        kind: expectedKind,
+        network,
+        ledger: notification.ledger,
+        error: err instanceof Error ? err.message : err,
+      });
+      continue;
+    }
+
+    for (const row of rows) {
+      yield row;
+    }
+  }
 }
 
-/**
- * Publish a new trade event to subscribers.
- */
-export async function publishNewTrade(trade: TradeEvent): Promise<void> {
-  if (!pubsub) return;
-
-  await pubsub.publish(SUBSCRIPTION_TOPICS.NEW_TRADE, {
-    newTrade: trade,
-  });
+export interface NewTradeSubscriptionArgs {
+  network?: string | null;
+  baseAssetCode?: string | null;
+  counterAssetCode?: string | null;
+  account?: string | null;
 }
 
-/**
- * Publish a new offer event to subscribers.
- */
-export async function publishNewOffer(offer: OfferEvent): Promise<void> {
-  if (!pubsub) return;
-
-  await pubsub.publish(SUBSCRIPTION_TOPICS.NEW_OFFER, {
-    newOffer: offer,
-  });
-}
-
-/**
- * Publish a contract event to subscribers.
- */
-export async function publishContractEvent(event: ContractEvent): Promise<void> {
-  if (!pubsub) return;
-
-  await pubsub.publish(SUBSCRIPTION_TOPICS.CONTRACT_EVENT, {
-    contractEvent: event,
-  });
+export interface NewContractEventSubscriptionArgs {
+  network?: string | null;
+  contractId?: string | null;
+  type?: string | null;
 }
 
 /**
- * Create subscription resolvers that filter by optional criteria.
+ * Subscription resolvers for `newTrade` and `newContractEvent`, merged into
+ * `createSubscriptionResolvers()` in `subscriptions.ts`.
  */
-export function createSubscriptionResolvers() {
+export function createExtendedSubscriptionResolvers(
+  logSink?: (message: string, detail?: unknown) => void
+) {
   return {
     newTrade: {
-      subscribe: (
-        _parent: unknown,
-        args: {
-          network?: string;
-          baseAsset?: string;
-          counterAsset?: string;
-          buyer?: string;
-          seller?: string;
-        },
-      ) => {
-        if (!pubsub) throw new Error("PubSub not initialized");
-
-        // If no filters, subscribe to all trades
-        if (!args.network && !args.baseAsset && !args.counterAsset && !args.buyer && !args.seller) {
-          return pubsub.asyncIterator([SUBSCRIPTION_TOPICS.NEW_TRADE]);
-        }
-
-        // With filters, use a filtered iterator
-        return pubsub.asyncIterator([SUBSCRIPTION_TOPICS.NEW_TRADE]);
+      subscribe(_: unknown, args: NewTradeSubscriptionArgs, ctx: SubscriptionContext) {
+        const { pool, notifier } = ctx;
+        const network = resolveNetworkArgument(args.network, ctx.registry);
+        return expandByKind(
+          notifier.subscribe(),
+          'ledger',
+          network.name,
+          (ledger) =>
+            getTradesByLedger(pool, network.name, ledger, {
+              baseAssetCode: args.baseAssetCode,
+              counterAssetCode: args.counterAssetCode,
+              account: args.account,
+            }),
+          loggerFor(ctx, logSink)
+        );
       },
+      resolve: (payload: unknown) => payload,
     },
-    newOffer: {
-      subscribe: (
-        _parent: unknown,
-        _args: {
-          network?: string;
-          sellingAsset?: string;
-          buyingAsset?: string;
-          seller?: string;
-        },
-      ) => {
-        if (!pubsub) throw new Error("PubSub not initialized");
-        return pubsub.asyncIterator([SUBSCRIPTION_TOPICS.NEW_OFFER]);
+
+    newContractEvent: {
+      subscribe(_: unknown, args: NewContractEventSubscriptionArgs, ctx: SubscriptionContext) {
+        const { pool, notifier } = ctx;
+        const network = resolveNetworkArgument(args.network, ctx.registry);
+        return expandByKind(
+          notifier.subscribe(),
+          'events',
+          network.name,
+          (ledger) =>
+            getContractEventsByLedger(pool, network.name, ledger, {
+              contractId: args.contractId,
+              type: args.type,
+            }),
+          loggerFor(ctx, logSink)
+        );
       },
-    },
-    contractEvent: {
-      subscribe: (
-        _parent: unknown,
-        _args: {
-          network?: string;
-          contractId?: string;
-          type?: string;
-        },
-      ) => {
-        if (!pubsub) throw new Error("PubSub not initialized");
-        return pubsub.asyncIterator([SUBSCRIPTION_TOPICS.CONTRACT_EVENT]);
-      },
+      resolve: (payload: unknown) => payload,
     },
   };
 }

@@ -52,6 +52,7 @@ import { ERROR_CODES, errorWithStableCode, withStableErrorCode } from './errorCo
 import { loadSlowOperationThresholdMs, slowOperationPlugin } from './slowOperations';
 import { scheduledExportOptions, startScheduledExports } from './scheduledExport';
 import { loadMigrations, runMigrations } from './migrations';
+import { createWebhooksRouter, dispatchWebhookEvent } from './webhooks';
 import { resolveDatabaseUrl } from '@lumina/shared';
 
 interface Context extends BaseContext {
@@ -127,6 +128,14 @@ const notifier = new LedgerNotifier({
 });
 notifier.onNotification(notification => {
   if (notification.kind === 'ledger') latestLedgerCache.invalidate(notification.network);
+  void dispatchWebhookEvent(pool, {
+    type: notification.kind,
+    network: notification.network,
+    data: notification,
+    timestamp: new Date(),
+  }).catch(err => {
+    log.warn({ err: err instanceof Error ? err.message : err }, 'webhook dispatch failed');
+  });
 });
 let stopScheduledExports: () => Promise<void> = async () => {};
 
@@ -355,6 +364,14 @@ async function main() {
       },
     }),
   ];
+  app.use(
+    '/webhooks',
+    cors(corsOptions(security)),
+    requestTimeoutMiddleware(security.requestTimeoutMs),
+    apiKeyAuthMiddleware({ pool, allowAnonymous: ALLOW_ANONYMOUS_ACCESS, headerName: API_KEY_HEADER }),
+    express.json(),
+    createWebhooksRouter(pool)
+  );
   app.use('/graphql', ...middleware);
   app.use('/', ...middleware);
 

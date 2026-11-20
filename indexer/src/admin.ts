@@ -21,6 +21,7 @@
 import { Pool } from 'pg';
 import { resolveDatabaseUrl } from '@lumina/shared';
 import { createPool, getLatestIndexedLedger, getEarliestIndexedLedger, findLedgerGaps, countLedgerGaps, indexLedger } from './db';
+import { backfillActivityRollups } from './activityRollups';
 import { getLedger, getLedgerTransactions, getLedgerOperations } from './horizon';
 
 const DATABASE_URL = resolveDatabaseUrl() ?? 'postgresql://localhost:5432/lumina';
@@ -33,12 +34,14 @@ function usage(): never {
       '  admin [--network <name>] reset-cursor  <ledger> [--force]',
       '  admin [--network <name>] show-state',
       '  admin [--network <name>] show-gaps',
+      '  admin [--network <name>] backfill-rollups [start-iso] [end-iso]',
       '',
       'Commands:',
-      '  reindex      Re-index a range of ledgers (deletes existing data in range)',
-      '  reset-cursor Reset the indexing cursor to a specific ledger',
-      '  show-state   Display current indexing state (earliest, latest, gap count)',
-      '  show-gaps    List missing ledger sequences',
+      '  reindex          Re-index a range of ledgers (deletes existing data in range)',
+      '  reset-cursor     Reset the indexing cursor to a specific ledger',
+      '  show-state       Display current indexing state (earliest, latest, gap count)',
+      '  show-gaps        List missing ledger sequences',
+      '  backfill-rollups Recompute hourly and daily activity_rollups from indexed data',
       '',
       'Flags:',
       '  --network    Network to operate on (default: mainnet)',
@@ -220,6 +223,31 @@ async function main(): Promise<void> {
           console.log(gaps.join(', '));
         }
         details = `${gaps.length} gaps found`;
+        success = true;
+        break;
+      }
+
+      case 'backfill-rollups': {
+        const [startTime, endTime] = args;
+        if (startTime && Number.isNaN(Date.parse(startTime))) {
+          console.error(`Invalid start timestamp: ${startTime}`);
+          process.exit(1);
+        }
+        if (endTime && Number.isNaN(Date.parse(endTime))) {
+          console.error(`Invalid end timestamp: ${endTime}`);
+          process.exit(1);
+        }
+        console.log(
+          `Backfilling activity_rollups on ${network}${startTime || endTime ? ` (${startTime ?? '..'} .. ${endTime ?? '..'})` : ' (all indexed data)'}...`
+        );
+        const result = await backfillActivityRollups(pool, network, {
+          ...(startTime ? { startTime } : {}),
+          ...(endTime ? { endTime } : {}),
+        });
+        console.log(
+          `Backfill complete: ${result.hourBuckets} hour buckets, ${result.dayBuckets} day buckets updated`
+        );
+        details = `Backfilled ${result.hourBuckets} hour and ${result.dayBuckets} day buckets`;
         success = true;
         break;
       }
