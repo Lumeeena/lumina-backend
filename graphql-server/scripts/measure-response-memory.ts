@@ -111,7 +111,7 @@ export const LARGEST_ALLOWED_QUERIES: ReadonlyArray<{
   {
     label: 'networkStats (1000 hourly buckets, the cap)',
     query: `query($s: String!, $e: String!) {
-      networkStats(startTime: $s, endTime: $e, granularity: "hour") {
+      networkStats(startTime: $s, endTime: $e, granularity: HOUR) {
         bucketStart transactionCount operationCount activeAccounts totalVolume
       }
     }`,
@@ -120,7 +120,7 @@ export const LARGEST_ALLOWED_QUERIES: ReadonlyArray<{
   {
     label: 'activityRollups (1000 hourly buckets, the cap)',
     query: `query($s: String!, $e: String!) {
-      activityRollups(network: "mainnet", granularity: "hour", startTime: $s, endTime: $e) {
+      activityRollups(network: "mainnet", granularity: HOUR, startTime: $s, endTime: $e) {
         bucketStart granularity network transactionCount operationCount activeAccounts totalVolume
       }
     }`,

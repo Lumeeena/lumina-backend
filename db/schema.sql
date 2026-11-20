@@ -394,6 +394,7 @@ CREATE TABLE IF NOT EXISTS assets (
     issuer_home_domain  TEXT,
     issuer_metadata     JSONB,
     is_lookalike        BOOLEAN DEFAULT FALSE,
+    lookalike_reason    TEXT,
     PRIMARY KEY (asset_code, asset_issuer, network),
     CONSTRAINT assets_asset_code_check          CHECK (asset_code <> ''),
     CONSTRAINT assets_asset_issuer_check        CHECK (asset_issuer <> ''),
@@ -749,6 +750,14 @@ CREATE TABLE IF NOT EXISTS contract_interfaces (
     updated_at           TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     network              TEXT NOT NULL DEFAULT 'mainnet',
     PRIMARY KEY (contract_id, network)
+);
+
+CREATE TABLE IF NOT EXISTS processed_operation_handlers (
+    operation_id TEXT NOT NULL,
+    handler      TEXT NOT NULL CHECK (handler IN ('asset', 'liquidity_pool')),
+    network      TEXT NOT NULL DEFAULT 'mainnet',
+    processed_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (operation_id, handler, network)
 );
 
 CREATE INDEX IF NOT EXISTS idx_contract_interfaces_wasm ON contract_interfaces (wasm_hash, network);

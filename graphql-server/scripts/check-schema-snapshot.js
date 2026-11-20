@@ -6,6 +6,10 @@ const intentionalNullableRelationshipChanges = [
   'Transaction.operations',
   'Account.transactions',
   'Account.operations',
+  'Query.networkStats arg granularity',
+  'Query.activityRollups arg granularity',
+  'ActivityRollup.granularity',
+  'NetworkStats was removed',
 ];
 
 const currentPath = 'src/schema.graphql';
