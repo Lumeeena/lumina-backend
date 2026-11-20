@@ -1085,6 +1085,7 @@ export const resolvers = {
         limit
       );
       return rows.map((row) => ({
+        network: network.name,
         contractId: row.contract_id,
         deployer: row.deployer,
         wasmHash: row.wasm_hash,

@@ -7,6 +7,7 @@ import type { Pool } from 'pg';
 import { createContext, resolvers } from './resolvers';
 import { encodeCursor, InvalidCursorError } from './pagination';
 import { ERROR_CODES } from './errorCodes';
+import { loadNetworks } from './networks';
 
 interface ContractRow {
   network: string;
@@ -145,5 +146,95 @@ describe('Query.contractsPage (#382)', () => {
       (err: unknown) =>
         err instanceof InvalidCursorError && err.code === ERROR_CODES.INVALID_CURSOR
     );
+  });
+});
+
+describe('ContractDeployment network propagation (#383)', () => {
+  test('contract, contracts, contractsPage, and sharedWasmContracts preserve parent network', async () => {
+    const seenNetworks: string[] = [];
+    const pool = {
+      async query(sql: string, params: unknown[] = []) {
+        const network = String(params[0]);
+        seenNetworks.push(network);
+        if (sql.includes('contract_id = $2')) {
+          return {
+            rows: [
+              {
+                contract_id: String(params[1]),
+                deployer: 'GDEPLOY_TESTNET',
+                wasm_hash: 'shared-wasm-abc',
+                deployed_ledger: 900,
+                deployed_at: '2026-07-10T00:00:00Z',
+              },
+            ],
+          };
+        }
+        if (sql.includes('wasm_hash = $2')) {
+          return {
+            rows: [
+              {
+                contract_id: 'CSIBLING_TESTNET',
+                deployer: 'GDEPLOY_TESTNET',
+                wasm_hash: String(params[1]),
+                deployed_ledger: 901,
+                deployed_at: '2026-07-10T00:01:00Z',
+              },
+            ],
+          };
+        }
+        return {
+          rows: [
+            {
+              contract_id: 'CLIST_TESTNET',
+              deployer: 'GDEPLOY_TESTNET',
+              wasm_hash: 'shared-wasm-abc',
+              deployed_ledger: 902,
+              deployed_at: '2026-07-10T00:02:00Z',
+            },
+          ],
+        };
+      },
+    } as unknown as Pool;
+
+    const multiNetworkRegistry = loadNetworks({
+      NETWORKS: 'mainnet,testnet',
+      MAINNET_HORIZON_URL: 'https://horizon.stellar.org',
+      TESTNET_HORIZON_URL: 'https://horizon-testnet.stellar.org',
+    });
+
+    const ctx = createContext(pool, { networks: multiNetworkRegistry });
+
+    const single = await resolvers.Query.contract(
+      {},
+      { network: 'TESTNET', contractId: 'CROOT_TESTNET' },
+      ctx
+    );
+    assert.ok(single);
+    assert.equal(single.network, 'testnet');
+
+    const siblings = await resolvers.ContractDeployment.sharedWasmContracts(
+      single,
+      { limit: 5 },
+      ctx
+    );
+    assert.equal(siblings.length, 1);
+    assert.equal(siblings[0].contractId, 'CSIBLING_TESTNET');
+    assert.equal(siblings[0].network, 'testnet');
+
+    // Nested resolution on the sibling must still stay on testnet.
+    const nested = await resolvers.ContractDeployment.sharedWasmContracts(
+      siblings[0],
+      { limit: 5 },
+      ctx
+    );
+    assert.equal(nested[0].network, 'testnet');
+
+    const list = await resolvers.Query.contracts({}, { network: 'TESTNET', limit: 5 }, ctx);
+    assert.equal(list[0].network, 'testnet');
+
+    const page = await resolvers.Query.contractsPage({}, { network: 'TESTNET', limit: 5 }, ctx);
+    assert.equal(page.items[0].network, 'testnet');
+
+    assert.deepEqual(seenNetworks, ['testnet', 'testnet', 'testnet', 'testnet', 'testnet']);
   });
 });
