@@ -6,9 +6,12 @@ key, how to send it, how to read the rate limit headers, what happens when
 you are throttled, what anonymous access still gets, and when each change
 takes effect.
 
-**Nothing is enforced yet.** Everything described here rolls out in the
-phases listed under [Migration timeline](#migration-timeline). If you follow
-this page now, your client will keep working through every phase.
+**Per-key rate limits are now enforced** for any request that presents an API
+key (using the `rate_limit` stored on `api_keys`). Anonymous access remains
+unthrottled by default unless the operator sets `ANONYMOUS_RATE_LIMIT`, or
+disables anonymous access via `ALLOW_ANONYMOUS_ACCESS=false`. See
+[Rate limits](#rate-limits) and [Anonymous access](#anonymous-access) for the
+exact enforced behaviour.
 
 ## Quick start
 
@@ -140,8 +143,11 @@ tokens and refills at an even rate (a 60/min key gets one token back per
 second). Each request spends one token. You can burst up to the full limit
 after a quiet period, but your sustained rate can't go above the limit.
 
-Limits apply per key, not per server. If several of your processes share one
-key, they share one bucket.
+Limits apply per key. Token buckets are currently stored **in process memory**,
+so in a multi-replica deployment each replica enforces its own budget
+independently (running `N` replicas grants up to `N × rate_limit` aggregate
+throughput until backed by a shared store such as Redis). Keys with a `null`
+`rate_limit` are unthrottled.
 
 Opening a subscription costs one request. Events delivered over a
 subscription that is already open are free.
@@ -256,8 +262,11 @@ backends, because:
 - The anonymous limit may be lowered if abuse requires it. Keyed limits are
   not changed without talking to the key's owner.
 
-Self-hosted operators can change the anonymous limit or turn anonymous
-access off entirely. Check with whoever runs your instance.
+Self-hosted operators can configure per-IP anonymous throttling via
+`ANONYMOUS_RATE_LIMIT` (requests per minute; unset or `0` leaves anonymous
+callers unthrottled for backwards compatibility) or turn anonymous access off
+entirely with `ALLOW_ANONYMOUS_ACCESS=false`. Check with whoever runs your
+instance.
 
 ## Authentication errors
 
