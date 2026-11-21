@@ -11,6 +11,8 @@ import { parseContractSchema, type ContractSchema } from './customSchema';
 import type { DecodedCustomEvent } from './customDecode';
 import { claimableBalanceId } from './claimableBalanceId';
 import { refreshActivityRollupsForTimestamp } from './activityRollups';
+import { StrKey, xdr } from '@stellar/stellar-sdk';
+import { getLookalikeReason } from './assetIssuer';
 
 /**
  * Postgres SQLSTATE for a CHECK constraint violation.
@@ -499,7 +501,8 @@ export async function indexLedger(
   transactions: HorizonTransaction[],
   operations: HorizonOperation[],
   effects: HorizonEffect[],
-  accountAddresses: string[] = []
+  accountAddresses: string[] = [],
+  liquidityPoolStates: Record<string, { fee_bp: number; reserves: Array<{ asset: string; amount: string }>; total_shares: string }> = {}
 ): Promise<void> {
   // A created claimable balance's id is derived from its transaction.
   const transactionsByHash = new Map(transactions.map(tx => [tx.hash, tx]));
@@ -608,7 +611,7 @@ export async function indexLedger(
           await processAssetOperation(client, network, ledger.sequence, op);
 
         // Process liquidity pools, claimable balances, path payments, and set_options operations
-        await processLiquidityPoolOperation(client, network, ledger.sequence, op);
+        await processLiquidityPoolOperation(client, network, ledger.sequence, op, liquidityPoolStates[(op.liquidity_pool_id as string) ?? '']);
         await processClaimableBalanceOperation(client, network, ledger.sequence, op, transactionsByHash.get(op.transaction_hash));
         await processPathPaymentOperation(client, network, ledger.sequence, op);
         await processSetOptionsOperation(client, network, ledger.sequence, op);
@@ -1385,6 +1388,14 @@ export async function upsertTrustline(
              updated_at = NOW()`,
       [assetCode, assetIssuer, isInsert ? 1 : 0, ledger, network]
     );
+    const lookalikeReason = getLookalikeReason(assetCode, assetIssuer, network);
+    if (lookalikeReason) {
+      await client.query(
+        `UPDATE assets SET is_lookalike = TRUE, lookalike_reason = $1, updated_at = NOW()
+         WHERE asset_code = $2 AND asset_issuer = $3 AND network = $4`,
+        [lookalikeReason, assetCode, assetIssuer, network]
+      );
+    }
   }
 }
 
@@ -1429,6 +1440,15 @@ export async function updateTrustlineBalance(
            updated_at = NOW()`,
     [assetCode, assetIssuer, ledger, network]
   );
+
+  const lookalikeReason = getLookalikeReason(assetCode, assetIssuer, network);
+  if (lookalikeReason) {
+    await client.query(
+      `UPDATE assets SET is_lookalike = TRUE, lookalike_reason = $1, updated_at = NOW()
+       WHERE asset_code = $2 AND asset_issuer = $3 AND network = $4`,
+      [lookalikeReason, assetCode, assetIssuer, network]
+    );
+  }
 
   // Update holder count if balance crosses zero threshold
   const oldBalanceNum = parseFloat(oldBalance);
@@ -1681,7 +1701,8 @@ export async function processLiquidityPoolOperation(
   client: PoolClient,
   network: string,
   ledger: number,
-  operation: HorizonOperation
+  operation: HorizonOperation,
+  poolState?: { fee_bp: number; reserves: Array<{ asset: string; amount: string }>; total_shares: string }
 ): Promise<void> {
   const opType = operation.type;
   if (opType !== 'liquidity_pool_deposit' && opType !== 'liquidity_pool_withdraw') {
@@ -1692,27 +1713,22 @@ export async function processLiquidityPoolOperation(
   if (!poolId) return;
   if (!(await claimOperationHandler(client, network, operation, 'liquidity_pool'))) return;
 
-  if (opType === 'liquidity_pool_deposit') {
-    const reserves = (operation.reserves_deposited as Array<{ asset: any; amount: string }>) ||
-      (operation.reserves_max as Array<{ asset: any; amount: string }>) || [];
-    const assetA = reserves[0] ? formatAsset(reserves[0].asset) : ((operation.asset_a as string) || 'native');
-    const amountA = reserves[0] ? reserves[0].amount : ((operation.amount_a as string) || (operation.max_amount_a as string) || '0');
-    const assetB = reserves[1] ? formatAsset(reserves[1].asset) : ((operation.asset_b as string) || 'unknown');
-    const amountB = reserves[1] ? reserves[1].amount : ((operation.amount_b as string) || (operation.max_amount_b as string) || '0');
-    const sharesReceived = (operation.shares_received as string) || (operation.shares as string) || '0';
-    const account = operation.source_account;
-
+  if (poolState && poolState.reserves.length === 2) {
     await client.query(
       `INSERT INTO liquidity_pools (pool_id, asset_a, asset_b, fee_bp, reserve_a, reserve_b, total_shares, last_ledger, network, updated_at)
-       VALUES ($1, $2, $3, 30, $4::numeric, $5::numeric, $6::numeric, $7, $8, NOW())
+       VALUES ($1, $2, $3, $4, $5::numeric, $6::numeric, $7::numeric, $8, $9, NOW())
        ON CONFLICT (pool_id, network) DO UPDATE SET
-         reserve_a = liquidity_pools.reserve_a + EXCLUDED.reserve_a,
-         reserve_b = liquidity_pools.reserve_b + EXCLUDED.reserve_b,
-         total_shares = liquidity_pools.total_shares + EXCLUDED.total_shares,
-         last_ledger = EXCLUDED.last_ledger,
-         updated_at = NOW()`,
-      [poolId, assetA, assetB, amountA, amountB, sharesReceived, ledger, network]
+         asset_a = EXCLUDED.asset_a, asset_b = EXCLUDED.asset_b, fee_bp = EXCLUDED.fee_bp,
+         reserve_a = EXCLUDED.reserve_a, reserve_b = EXCLUDED.reserve_b,
+         total_shares = EXCLUDED.total_shares, last_ledger = EXCLUDED.last_ledger, updated_at = NOW()`,
+      [poolId, poolState.reserves[0]!.asset, poolState.reserves[1]!.asset, poolState.fee_bp,
+        poolState.reserves[0]!.amount, poolState.reserves[1]!.amount, poolState.total_shares, ledger, network]
     );
+  }
+
+  if (opType === 'liquidity_pool_deposit') {
+    const sharesReceived = (operation.shares_received as string) || (operation.shares as string) || '0';
+    const account = operation.source_account;
 
     await client.query(
       `INSERT INTO liquidity_pool_shares (pool_id, account, shares, last_ledger, network, updated_at)
@@ -1724,23 +1740,8 @@ export async function processLiquidityPoolOperation(
       [poolId, account, sharesReceived, ledger, network]
     );
   } else if (opType === 'liquidity_pool_withdraw') {
-    const reserves = (operation.reserves_received as Array<{ asset: any; amount: string }>) ||
-      (operation.reserves_min as Array<{ asset: any; amount: string }>) || [];
-    const amountA = reserves[0] ? reserves[0].amount : ((operation.amount_a as string) || (operation.min_amount_a as string) || '0');
-    const amountB = reserves[1] ? reserves[1].amount : ((operation.amount_b as string) || (operation.min_amount_b as string) || '0');
     const sharesBurned = (operation.shares as string) || '0';
     const account = operation.source_account;
-
-    await client.query(
-      `UPDATE liquidity_pools
-       SET reserve_a = GREATEST(0, reserve_a - $1::numeric),
-           reserve_b = GREATEST(0, reserve_b - $2::numeric),
-           total_shares = GREATEST(0, total_shares - $3::numeric),
-           last_ledger = $4,
-           updated_at = NOW()
-       WHERE pool_id = $5 AND network = $6`,
-      [amountA, amountB, sharesBurned, ledger, poolId, network]
-    );
 
     await client.query(
       `UPDATE liquidity_pool_shares
@@ -2334,32 +2335,40 @@ export async function processSorobanTTLOperation(
   }
 
   // Extract ledger keys from the operation
-  const ledgerKeys = (operation.ledger_keys as string[]) ||
-                    ((operation.ext as any)?.ledgerKeys as string[]) ||
-                    [];
-
-  const extendTo = (operation.extend_to as string) || (operation.extendTo as string) || String(ledger);
+  const footprint = (operation.footprint ?? (operation.restore_preamble as any)?.footprint ??
+    (operation.extend_footprint_ttl as any)?.footprint) as { read_only?: string[]; read_write?: string[] } | undefined;
+  const ledgerKeys = [
+    ...((operation.ledger_keys as string[]) ?? []),
+    ...((operation.ext as any)?.ledgerKeys as string[] ?? []),
+    ...(footprint?.read_only ?? []), ...(footprint?.read_write ?? []),
+  ];
+  const extendToRaw = operation.extend_to ?? operation.extendTo ??
+    (operation.extend_footprint_ttl as any)?.extend_to;
+  const extendTo = extendToRaw === undefined || extendToRaw === null ? null : Number(extendToRaw);
 
   for (const key of ledgerKeys) {
     // Try to extract contract_id from the key if it's a contract-related key
-    let contractId = '';
+    let contractId: string | null = null;
     try {
-      // Keys are base64-encoded XDR; for now we store the raw key
-      // A full implementation would decode the XDR to extract contract_id
-      contractId = key.substring(0, 56); // Fallback: use prefix as contract_id
+      const ledgerKey = xdr.LedgerKey.fromXDR(key, 'base64');
+      if (ledgerKey.switch().name === 'contractData') {
+        const contractHash = ledgerKey.contractData().contract().value() as unknown as Buffer;
+        contractId = StrKey.encodeContract(contractHash);
+      }
     } catch {
-      contractId = '';
+      // Keep malformed/unsupported keys without inventing an address.
     }
 
     await client.query(
       `INSERT INTO soroban_ttl (key, contract_id, live_until_ledger, last_ledger, operation_type, created_at, network)
        VALUES ($1, $2, $3, $4, $5, $6, $7)
        ON CONFLICT (key, network) DO UPDATE SET
+         contract_id = COALESCE(EXCLUDED.contract_id, soroban_ttl.contract_id),
          live_until_ledger = EXCLUDED.live_until_ledger,
          last_ledger = EXCLUDED.last_ledger,
          operation_type = EXCLUDED.operation_type,
          created_at = EXCLUDED.created_at`,
-      [key, contractId, Number(extendTo), ledger, opType, operation.created_at, network]
+      [key, contractId, extendTo, ledger, opType, operation.created_at, network]
     );
   }
 }

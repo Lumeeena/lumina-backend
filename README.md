@@ -161,6 +161,17 @@ npm run register-schema -w @lumina/indexer -- apply transfer-schema.json
 See [docs/CUSTOM_SCHEMAS.md](docs/CUSTOM_SCHEMAS.md) for the format, a worked
 example, and what happens when a schema stops matching its contract.
 
+Existing liquidity-pool reserve rows can be repaired from Horizon's current
+pool state:
+
+```bash
+DATABASE_URL="$DATABASE_URL" npm run repair:liquidity-pools -w @lumina/indexer -- \
+  --network mainnet --horizon-url https://horizon.stellar.org
+```
+
+Run once for each configured network after upgrading. The indexer also refreshes
+known pools periodically and after pool deposit or withdrawal operations.
+
 ### Search and asset filtering
 
 Memo search, ranked by relevance:

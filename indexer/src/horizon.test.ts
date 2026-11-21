@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { getLatestLedgerSequence, getLedger, getLedgerTransactions, getLedgerOperations, getLedgerEffects, getAccount, getTrades, PAGE_LIMIT, initializeHorizonClient } from './horizon';
+import { getLatestLedgerSequence, getLedger, getLedgerTransactions, getLedgerOperations, getLedgerEffects, getAccount, getTrades, getLiquidityPool, PAGE_LIMIT, initializeHorizonClient } from './horizon';
 // @ts-expect-error - JSON file imports are enabled at runtime for this test fixture.
 import fixtures from './__fixtures__/horizon.json' assert { type: 'json' };
 
@@ -32,6 +32,15 @@ test('getLatestLedgerSequence parses recorded Horizon response shape', async () 
   mockFetchSequence([{ ok: true, body: fixtures.ledgerPage }]);
   const seq = await getLatestLedgerSequence('https://horizon.example.com');
   assert.equal(seq, 52481234);
+});
+
+test('getLiquidityPool fetches absolute Horizon reserves and total shares', async () => {
+  const pool = { id: 'pool-1', fee_bp: 30, reserves: [
+    { asset: 'native', amount: '100.0000000' },
+    { asset: 'USDC:GISSUER', amount: '50.0000000' },
+  ], total_shares: '70.7106781' };
+  mockFetchSequence([{ ok: true, body: pool }]);
+  assert.deepEqual(await getLiquidityPool('https://horizon.example.com', 'pool-1'), pool);
 });
 
 test('getLatestLedgerSequence returns 0 when there are no records', async () => {

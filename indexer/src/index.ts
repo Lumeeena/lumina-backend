@@ -107,11 +107,12 @@ import {
 import { initErrorTracking, captureException, shutdownErrorTracking } from './errorTracking';
 import { LeaderLock } from './leaderLock';
 import { getRetentionInfo, getContractStorageEntries } from './soroban';
-import { getLatestLedgerSequence, getLedger, getLedgerOperations, getLedgerTransactions, getLedgerEffects, getTrades, initializeHorizonClient } from './horizon';
+import { getLatestLedgerSequence, getLedger, getLedgerOperations, getLedgerTransactions, getLedgerEffects, getTrades, getLiquidityPool, initializeHorizonClient } from './horizon';
 import { getActiveContracts, resolveRegistryConfigs, type RegistryConfig } from './registry';
 import { getEvents, getLatestLedgerSequence as getLatestRpcLedgerSequence, type ContractEvent } from './soroban';
 import { resolveNetworks, type NetworkConfig } from './networks';
 import { HorizonUnavailableError } from '@lumina/shared';
+import { flagLookalikeAssets } from './assetIssuer';
 
 // Read version from package.json for logging
 import { readFileSync } from 'fs';
@@ -166,6 +167,8 @@ const INDEXED_CONTRACT_IDS = config.indexedContractIds;
 // any other network's.
 const REGISTRY_POLL_EVERY_N_TICKS = Math.max(1, Math.round(config.registryPollIntervalMs / POLL_INTERVAL_MS));
 const GAP_REPAIR_EVERY_N_TICKS = Math.max(1, Math.round(30000 / POLL_INTERVAL_MS));
+const LOOKALIKE_SWEEP_EVERY_N_TICKS = Math.max(1, Math.round(300000 / POLL_INTERVAL_MS));
+const POOL_STATE_REFRESH_EVERY_N_TICKS = LOOKALIKE_SWEEP_EVERY_N_TICKS;
 
 // How long an account's Horizon data is considered fresh enough to skip
 // re-fetching. Busy accounts (exchanges, bots) show up in most ledgers —
@@ -330,6 +333,18 @@ async function fetchAndIndexLedger(loop: NetworkLoop, sequence: number, isBackfi
     getLedgerEffects(loop.network.horizonUrl, sequence),
   ]);
 
+  const poolIds = [...new Set(operations
+    .filter(op => op.type === 'liquidity_pool_deposit' || op.type === 'liquidity_pool_withdraw')
+    .map(op => op.liquidity_pool_id as string).filter(Boolean))];
+  const poolStates: Record<string, { fee_bp: number; reserves: Array<{ asset: string; amount: string }>; total_shares: string }> = {};
+  await Promise.all(poolIds.map(async poolId => {
+    try {
+      poolStates[poolId] = await getLiquidityPool(loop.network.horizonUrl, poolId);
+    } catch (err) {
+      log.warn({ network: name, poolId, err: message(err) }, 'could not refresh absolute liquidity pool state');
+    }
+  }));
+
   const addresses = new Set<string>();
   for (const tx of transactions) addresses.add(tx.source_account);
   for (const op of operations) addresses.add(op.source_account);
@@ -342,7 +357,7 @@ async function fetchAndIndexLedger(loop: NetworkLoop, sequence: number, isBackfi
   });
   const addressesToFetch = await getAccountsNeedingRefresh(readPool, name, expiredAddresses, sequence);
   const stopTimer = ledgerIndexDuration.startTimer();
-  await indexLedger(writePool, name, ledger, transactions, operations, effects, addressesToFetch);
+  await indexLedger(writePool, name, ledger, transactions, operations, effects, addressesToFetch, poolStates);
   stopTimer();
 
   for (const address of expiredAddresses) {
@@ -829,6 +844,26 @@ export async function pollTrades(loop: NetworkLoop): Promise<void> {
   }
 }
 
+async function refreshLiquidityPoolStates(loop: NetworkLoop): Promise<void> {
+  const { rows } = await readPool.query<{ pool_id: string }>(
+    'SELECT pool_id FROM liquidity_pools WHERE network = $1', [loop.network.name]
+  );
+  for (const { pool_id: poolId } of rows) {
+    try {
+      const state = await getLiquidityPool(loop.network.horizonUrl, poolId);
+      if (state.reserves.length !== 2) continue;
+      await writePool.query(
+        `UPDATE liquidity_pools SET reserve_a = $1::numeric, reserve_b = $2::numeric,
+          total_shares = $3::numeric, fee_bp = $4, updated_at = NOW()
+         WHERE pool_id = $5 AND network = $6`,
+        [state.reserves[0]!.amount, state.reserves[1]!.amount, state.total_shares, state.fee_bp, poolId, loop.network.name]
+      );
+    } catch (err) {
+      log.warn({ network: loop.network.name, poolId, err: message(err) }, 'liquidity pool state refresh failed');
+    }
+  }
+}
+
 /** Run one network's polling loop until the process shuts down. */
 async function runNetworkLoop(loop: NetworkLoop): Promise<void> {
   const name = loop.network.name;
@@ -956,6 +991,14 @@ async function runNetworkLoop(loop: NetworkLoop): Promise<void> {
         await repairLedgerGaps(pools, name, indexOne).catch(err => {
           log.error({ network: name, err: message(err) }, 'gap repair pass failed');
         });
+      }
+      if (loop.loopTick % LOOKALIKE_SWEEP_EVERY_N_TICKS === 0) {
+        await flagLookalikeAssets(writePool, name).catch(err => {
+          log.error({ network: name, err: message(err) }, 'lookalike asset sweep failed');
+        });
+      }
+      if (loop.loopTick % POOL_STATE_REFRESH_EVERY_N_TICKS === 0) {
+        await refreshLiquidityPoolStates(loop);
       }
       loop.loopTick++;
 

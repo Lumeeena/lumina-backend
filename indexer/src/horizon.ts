@@ -186,4 +186,8 @@ export function getTrades(
   return client.getTrades(params, horizonUrl);
 }
 
+export function getLiquidityPool(horizonUrl: HorizonEndpoint, poolId: string) {
+  return client.getLiquidityPool(poolId, horizonUrl);
+}
+
 export type { HorizonTrade, HorizonTradePrice, HorizonTradesFilter, HorizonEffect };

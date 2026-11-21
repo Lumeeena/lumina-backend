@@ -12,12 +12,12 @@ import { subsystem } from './logger';
 const log = subsystem('asset-issuer');
 
 /** Well-known asset issuers and their codes (for lookalike detection) */
+// Only canonical issuers verified in the issuer's published SEP-1 file are
+// included. Centre's stellar.toml lists mainnet USDC at this issuer:
+// https://centre.io/.well-known/stellar.toml. Other codes (including BTC,
+// ETH, USDT and EURT) have no single canonical Stellar issuer and are omitted.
 export const WELL_KNOWN_ASSETS = [
-  { code: 'USDC', issuer: 'GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN' },
-  { code: 'USDT', issuer: 'GAP5LETOVG6HDAZ2TJQOUCP6KBXJLZJQ2LMGYRJQ5HWEK4RRO7XTNQ' },
-  { code: 'EURT', issuer: 'GAP5LETOVG6HDAZ2TJQOUCP6KBXJLZJQ2LMGYRJQ5HWEK4RRO7XTNQ' },
-  { code: 'ETH', issuer: 'GBXUQ4JCNZQ7HXBVJO4SDIIM4MOT4JZGKQWZV7DRO6IJIHLGEEBG7YX' },
-  { code: 'BTC', issuer: 'GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN' },
+  { network: 'mainnet', code: 'USDC', issuer: 'GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN' },
 ];
 
 /**
@@ -62,8 +62,8 @@ export async function updateIssuerMetadata(
  * A lookalike uses a case or confusable-character variant of a well-known
  * code, or the exact well-known code with a different issuer.
  */
-export function isLookalikeAsset(assetCode: string, assetIssuer: string): boolean {
-  return getLookalikeReason(assetCode, assetIssuer) !== null;
+export function isLookalikeAsset(assetCode: string, assetIssuer: string, network = 'mainnet'): boolean {
+  return getLookalikeReason(assetCode, assetIssuer, network) !== null;
 }
 
 const CONFUSABLES: Record<string, string> = { '0': 'O', '1': 'I', L: 'I', '5': 'S' };
@@ -87,8 +87,8 @@ function differsByOneConfusableInsertion(left: string, right: string, rawLeft: s
 }
 
 /** Return the persisted rule for a flagged asset, or null when it is not a lookalike. */
-export function getLookalikeReason(assetCode: string, assetIssuer: string): string | null {
-  for (const known of WELL_KNOWN_ASSETS) {
+export function getLookalikeReason(assetCode: string, assetIssuer: string, network = 'mainnet'): string | null {
+  for (const known of WELL_KNOWN_ASSETS.filter(asset => asset.network === network)) {
     const uppercase = assetCode.toUpperCase();
     let rule: string | null = null;
 
@@ -121,7 +121,7 @@ export async function flagLookalikeAssets(pool: Pool, network: string): Promise<
   );
 
   for (const asset of rows) {
-    const reason = getLookalikeReason(asset.asset_code, asset.asset_issuer);
+    const reason = getLookalikeReason(asset.asset_code, asset.asset_issuer, network);
     if (!reason) continue;
     try {
       const result = await pool.query(

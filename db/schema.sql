@@ -810,8 +810,8 @@ CREATE INDEX IF NOT EXISTS idx_export_jobs_requested_by
 
 CREATE TABLE IF NOT EXISTS soroban_ttl (
     key                  TEXT NOT NULL,
-    contract_id          TEXT NOT NULL,
-    live_until_ledger    BIGINT NOT NULL,
+    contract_id          TEXT,
+    live_until_ledger    BIGINT,
     last_ledger          BIGINT NOT NULL,
     operation_type       TEXT NOT NULL,
     created_at           TIMESTAMPTZ NOT NULL,

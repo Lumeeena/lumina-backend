@@ -228,6 +228,9 @@ export class HorizonUnavailableError extends Error {
  * which is the single-network deployment's default.
  */
 export interface HorizonClient {
+  getLiquidityPool(poolId: string, baseUrl?: HorizonEndpoint): Promise<{
+    id: string; fee_bp: number; reserves: Array<{ asset: string; amount: string }>; total_shares: string;
+  }>;
   getLatestLedgerSequence(baseUrl?: HorizonEndpoint): Promise<number>;
   getLedger(sequence: number, baseUrl?: HorizonEndpoint): Promise<HorizonLedger>;
   getLedgerTransactions(sequence: number, baseUrl?: HorizonEndpoint): Promise<HorizonTransaction[]>;
@@ -456,6 +459,23 @@ export function createHorizonClient(options: HorizonClientOptions = {}): Horizon
   }
 
   return {
+    /** Fetch the current absolute state of a Stellar liquidity pool. */
+    getLiquidityPool(poolId: string, baseUrl?: HorizonEndpoint): Promise<{
+      id: string; fee_bp: number; reserves: Array<{ asset: string; amount: string }>; total_shares: string;
+    }> {
+      return request(url(`/liquidity_pools/${encodeURIComponent(poolId)}`, endpoints(baseUrl)[0]!), 'throw', body => {
+        if (!body || typeof body !== 'object') {
+          throw new Error('invalid Horizon liquidity pool response');
+        }
+        const pool = body as { reserves?: unknown; total_shares?: unknown; fee_bp?: unknown };
+        if (!Array.isArray(pool.reserves) || typeof pool.total_shares !== 'string' || typeof pool.fee_bp !== 'number' ||
+            !pool.reserves.every(reserve => reserve && typeof reserve === 'object' &&
+              typeof (reserve as { asset?: unknown }).asset === 'string' &&
+              typeof (reserve as { amount?: unknown }).amount === 'string')) {
+          throw new Error('invalid Horizon liquidity pool response');
+        }
+      }, baseUrl);
+    },
     async getLatestLedgerSequence(baseUrl?: HorizonEndpoint): Promise<number> {
       const page = await request<HorizonPage<HorizonLedger>>(
         url('/ledgers?order=desc&limit=1', endpoints(baseUrl)[0]!),

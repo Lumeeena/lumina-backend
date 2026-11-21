@@ -33,7 +33,11 @@ import {
   getSignerChangesForAccount,
   getThresholdChangesForAccount,
   samplePoolSaturation,
+  processSorobanTTLOperation,
+  upsertTrustline,
 } from './db';
+import { randomBytes } from 'node:crypto';
+import { StrKey, xdr } from '@stellar/stellar-sdk';
 import type { ContractStorageEntry } from './soroban';
 import { indexerPoolErrors, registry } from './metrics';
 import { makeAccount, makeContractEvent, makeLedger, makeOperation, makeTransaction } from '../../shared/test-factories';
@@ -692,7 +696,7 @@ test('getTrackedContractStorageKeys reads every key for one network, active or a
   assert.deepEqual(queries[0]?.params, ['testnet']);
 });
 
-test('processLiquidityPoolOperation handles deposits and updates pool reserves and account shares', async () => {
+test('processLiquidityPoolOperation stores Horizon absolute pool state and account share deltas', async () => {
   const executed: { sql: string; params: unknown[] }[] = [];
   const client = {
     query: async (sql: string, params: unknown[] = []) => {
@@ -717,7 +721,11 @@ test('processLiquidityPoolOperation handles deposits and updates pool reserves a
     shares_received: '70.7106781',
   };
 
-  await processLiquidityPoolOperation(client, 'mainnet', 500, depositOp);
+  await processLiquidityPoolOperation(client, 'mainnet', 500, depositOp, {
+    fee_bp: 30,
+    reserves: [{ asset: 'native', amount: '990.0000000' }, { asset: 'USDC:GISSUER', amount: '495.0000000' }],
+    total_shares: '700.0000000',
+  });
 
   assert.equal(executed.length, 3);
   // Upsert pool
@@ -726,9 +734,10 @@ test('processLiquidityPoolOperation handles deposits and updates pool reserves a
     'pool_abc123',
     'native',
     'USDC:GISSUER',
-    '100.0000000',
-    '50.0000000',
-    '70.7106781',
+    30,
+    '990.0000000',
+    '495.0000000',
+    '700.0000000',
     500,
     'mainnet',
   ]);
@@ -764,7 +773,7 @@ test('contract deployments do not persist a fabricated placeholder interface', a
   assert.deepEqual(queries, []);
 });
 
-test('processLiquidityPoolOperation handles withdraws and decrements reserves and shares', async () => {
+test('processLiquidityPoolOperation refreshes absolute pool state on withdraw', async () => {
   const executed: { sql: string; params: unknown[] }[] = [];
   const client = {
     query: async (sql: string, params: unknown[] = []) => {
@@ -789,17 +798,18 @@ test('processLiquidityPoolOperation handles withdraws and decrements reserves an
     shares: '14.1421356',
   };
 
-  await processLiquidityPoolOperation(client, 'mainnet', 501, withdrawOp);
+  await processLiquidityPoolOperation(client, 'mainnet', 501, withdrawOp, {
+    fee_bp: 30,
+    reserves: [{ asset: 'native', amount: '980.0000000' }, { asset: 'USDC:GISSUER', amount: '490.0000000' }],
+    total_shares: '690.0000000',
+  });
 
   assert.equal(executed.length, 3);
   // Update pool reserves and shares
-  assert.match(executed[1]!.sql, /UPDATE liquidity_pools/);
+  assert.match(executed[1]!.sql, /INSERT INTO liquidity_pools/);
   assert.deepEqual(executed[1]!.params, [
-    '20.0000000',
-    '10.0000000',
-    '14.1421356',
+    'pool_abc123', 'native', 'USDC:GISSUER', 30, '980.0000000', '490.0000000', '690.0000000',
     501,
-    'pool_abc123',
     'mainnet',
   ]);
   // Update account shares
@@ -841,8 +851,47 @@ test('replaying a liquidity-pool operation does not repeat additive updates', as
   await processLiquidityPoolOperation(client, 'mainnet', 500, operation);
 
   assert.equal(executed.filter(sql => sql.includes('INSERT INTO processed_operation_handlers')).length, 2);
-  assert.equal(executed.filter(sql => sql.includes('INSERT INTO liquidity_pools')).length, 1);
+  assert.equal(executed.filter(sql => sql.includes('INSERT INTO liquidity_pools')).length, 0);
   assert.equal(executed.filter(sql => sql.includes('INSERT INTO liquidity_pool_shares')).length, 1);
+});
+
+test('Soroban TTL tracking decodes contract-data XDR and leaves unknown expiry null', async () => {
+  const contractId = StrKey.encodeContract(randomBytes(32));
+  const contract = xdr.ScAddress.scAddressTypeContract(
+    StrKey.decodeContract(contractId) as unknown as Parameters<typeof xdr.ScAddress.scAddressTypeContract>[0]
+  );
+  const ledgerKey = xdr.LedgerKey.contractData(new xdr.LedgerKeyContractData({
+    contract, key: xdr.ScVal.scvSymbol('storage'), durability: xdr.ContractDataDurability.persistent(),
+  })).toXDR('base64');
+  const calls: { sql: string; params: unknown[] }[] = [];
+  const client = { query: async (sql: string, params: unknown[] = []) => { calls.push({ sql, params }); return { rows: [] }; } } as unknown as PoolClient;
+  const restore = { ...op, type: 'restore_footprint', restore_preamble: { footprint: { read_only: [ledgerKey], read_write: [] } } };
+  await processSorobanTTLOperation(client, 'mainnet', 100, restore);
+  assert.equal(calls[0]!.params[1], contractId);
+  assert.equal(calls[0]!.params[2], null);
+  assert.doesNotMatch(calls[0]!.sql, /substring/);
+
+  calls.length = 0;
+  const extend = { ...op, type: 'extend_footprint_ttl', footprint: { read_only: [], read_write: [ledgerKey] }, extend_to: 500 };
+  await processSorobanTTLOperation(client, 'mainnet', 101, extend);
+  assert.equal(calls[0]!.params[2], 500);
+});
+
+test('a newly indexed trustline flags its asset immediately when it is a lookalike', async () => {
+  const calls: { sql: string; params: unknown[] }[] = [];
+  const client = {
+    query: async (sql: string, params: unknown[] = []) => {
+      calls.push({ sql, params });
+      return sql.includes('INSERT INTO trustlines') ? { rows: [{ is_insert: true }] } : { rows: [] };
+    },
+  } as unknown as PoolClient;
+  await upsertTrustline(client, 'mainnet', 500, {
+    ...op, type: 'change_trust', source_account: 'GTRUSTLINE', asset_code: 'USDC',
+    asset_issuer: 'GCOUNTERFEIT', limit: '100',
+  }, op.created_at);
+  const flagUpdate = calls.find(call => call.sql.includes('SET is_lookalike = TRUE'));
+  assert.ok(flagUpdate);
+  assert.deepEqual(flagUpdate.params, ['issuer_mismatch:USDC', 'USDC', 'GCOUNTERFEIT', 'mainnet']);
 });
 
 test('replaying an asset payment does not repeat volume or balance deltas', async () => {
