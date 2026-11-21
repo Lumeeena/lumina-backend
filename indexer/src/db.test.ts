@@ -30,6 +30,7 @@ import {
   getPathPayment,
   findPathPaymentsByAsset,
   processSetOptionsOperation,
+  processSponsorshipOperation,
   getSignerChangesForAccount,
   getThresholdChangesForAccount,
   samplePoolSaturation,
@@ -115,6 +116,21 @@ function makeFakeClient(opts: { failOn?: string } = {}) {
   };
   return { client, calls };
 }
+
+test('sponsorship updates are keyed by entry type and id, and revocations use the same typed key', async () => {
+  const queries: string[] = [];
+  const client = { query: async (sql: SqlInput) => { queries.push(sqlText(sql)); return { rows: [] }; } } as unknown as PoolClient;
+  await processSponsorshipOperation(client, 'testnet', 12, {
+    id: '1', type: 'manage_data', transaction_hash: 'h', created_at: '2026-01-01T00:00:00Z',
+    source_account: 'GOWNER', name: 'memo', sponsor: 'GSPONSOR',
+  } as any);
+  await processSponsorshipOperation(client, 'testnet', 13, {
+    id: '2', type: 'revoke_sponsorship', transaction_hash: 'h', created_at: '2026-01-02T00:00:00Z',
+    source_account: 'GOWNER', data_account_id: 'GOWNER', data_name: 'memo', revoke_sponsorship_type: 'data',
+  } as any);
+  assert.match(queries[0], /ON CONFLICT \(sponsored_type, sponsored_id, network\)/);
+  assert.match(queries[1], /sponsored_type = \$1 AND sponsored_id = \$2/);
+});
 
 function fakePool(client: unknown): Pool {
   return { connect: async () => client } as unknown as Pool;

@@ -8,6 +8,9 @@
 
 import type { Pool } from 'pg';
 import { subsystem } from './logger';
+import { getAccount } from './horizon';
+import { parse } from 'smol-toml';
+import { Agent, get as httpsGet } from 'node:https';
 
 const log = subsystem('asset-issuer');
 
@@ -29,31 +32,93 @@ export async function updateIssuerMetadata(
   pool: Pool,
   network: string,
   assetCode: string,
-  assetIssuer: string
+  assetIssuer: string,
+  horizonUrl: Parameters<typeof getAccount>[0]
 ): Promise<void> {
+  const attemptedAt = new Date();
   try {
-    // In a full implementation, we would:
-    // 1. Query Horizon for the issuer account to get home_domain
-    // 2. Fetch stellar.toml from that domain
-    // 3. Parse it for asset metadata
-    // 4. Update the assets table
-
-    // For this minimal implementation, we'll mark the metadata as pending
-    // and set a placeholder to indicate the feature is active
+    const account = await getAccount(horizonUrl, assetIssuer);
+    const domain = account?.home_domain?.trim();
+    if (!domain || domain.length > 253 || /[^a-zA-Z0-9.-]/.test(domain) || domain.includes('..')) {
+      throw new Error('Issuer has no valid home domain');
+    }
+    const host = new URL(`https://${domain}`).hostname;
+    const addresses = await (await import('node:dns/promises')).lookup(host, { all: true, verbatim: true });
+    if (!addresses.length || addresses.some(({ address }) => isPrivateAddress(address))) {
+      throw new Error('Issuer domain resolves to a non-public address');
+    }
+    const address = addresses[0];
+    const agent = new Agent({ lookup: ((_hostname: string, _options: unknown, callback: (error: Error | null, address: string, family: number) => void) => callback(null, address.address, address.family)) as never });
+    const text = await fetchToml(host, agent);
+    const toml = parse(text) as { CURRENCIES?: Array<Record<string, unknown>> };
+    const currency = toml.CURRENCIES?.find(entry => entry.code === assetCode && entry.issuer === assetIssuer);
+    if (!currency) throw new Error('stellar.toml does not declare this asset');
     await pool.query(
       `UPDATE assets
-       SET issuer_home_domain = $1,
-           issuer_metadata = $2,
+       SET issuer_home_domain = $1, issuer_metadata = $2, issuer_metadata_fetched_at = NOW(),
+           issuer_metadata_attempted_at = $3, issuer_metadata_error = NULL,
            updated_at = NOW()
-       WHERE asset_code = $3 AND asset_issuer = $4 AND network = $5`,
-      ['pending', { status: 'metadata_fetch_enabled' }, assetCode, assetIssuer, network]
+       WHERE asset_code = $4 AND asset_issuer = $5 AND network = $6`,
+      [domain, currency, attemptedAt, assetCode, assetIssuer, network]
     );
   } catch (err) {
+    await pool.query(
+      `UPDATE assets SET issuer_metadata_attempted_at = $1, issuer_metadata_error = $2
+       WHERE asset_code = $3 AND asset_issuer = $4 AND network = $5`,
+      [attemptedAt, (err instanceof Error ? err.message : String(err)).slice(0, 500), assetCode, assetIssuer, network]
+    ).catch(() => undefined);
     log.error(
       { network, assetCode, assetIssuer, err: err instanceof Error ? err.message : String(err) },
       'Failed to update issuer metadata'
     );
   }
+}
+
+function fetchToml(host: string, agent: Agent): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const request = httpsGet({ hostname: host, path: '/.well-known/stellar.toml', agent, timeout: 8000, headers: { accept: 'text/plain' } }, response => {
+      if ((response.statusCode ?? 500) < 200 || (response.statusCode ?? 500) >= 300) {
+        response.resume();
+        reject(new Error(`stellar.toml returned HTTP ${response.statusCode ?? 500}`));
+        return;
+      }
+      const length = Number(response.headers['content-length'] || 0);
+      if (length > 1_000_000) { response.destroy(); reject(new Error('stellar.toml exceeds 1 MB')); return; }
+      const chunks: Buffer[] = [];
+      let size = 0;
+      response.on('data', (chunk: Buffer) => {
+        size += chunk.length;
+        if (size > 1_000_000) { response.destroy(new Error('stellar.toml exceeds 1 MB')); return; }
+        chunks.push(chunk);
+      });
+      response.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')));
+      response.on('error', reject);
+    });
+    request.on('timeout', () => request.destroy(new Error('stellar.toml request timed out')));
+    request.on('error', reject);
+  });
+}
+
+/** Refresh a small stale-asset batch so metadata work cannot delay ledger indexing. */
+export async function refreshIssuerMetadataBatch(pool: Pool, network: string, horizonUrl: Parameters<typeof getAccount>[0], limit = 5): Promise<void> {
+  const { rows } = await pool.query<{ asset_code: string; asset_issuer: string }>(
+    `SELECT asset_code, asset_issuer FROM assets
+     WHERE network = $1
+       AND (issuer_metadata_fetched_at IS NULL OR issuer_metadata_fetched_at < NOW() - INTERVAL '7 days')
+       AND (issuer_metadata_attempted_at IS NULL OR issuer_metadata_attempted_at < NOW() - INTERVAL '1 hour')
+     ORDER BY issuer_metadata_fetched_at NULLS FIRST, asset_code, asset_issuer LIMIT $2`,
+    [network, limit]
+  );
+  for (const asset of rows) await updateIssuerMetadata(pool, network, asset.asset_code, asset.asset_issuer, horizonUrl);
+}
+
+function isPrivateAddress(address: string): boolean {
+  if (address.includes(':')) {
+    const value = address.toLowerCase();
+    return value === '::1' || value === '::' || value.startsWith('fc') || value.startsWith('fd') || value.startsWith('fe8') || value.startsWith('fe9') || value.startsWith('fea') || value.startsWith('feb') || value.startsWith('::ffff:127.') || value.startsWith('::ffff:10.') || value.startsWith('::ffff:192.168.');
+  }
+  const octets = address.split('.').map(Number);
+  return octets.length !== 4 || octets[0] === 10 || octets[0] === 127 || octets[0] === 0 || (octets[0] === 169 && octets[1] === 254) || (octets[0] === 172 && octets[1] >= 16 && octets[1] <= 31) || (octets[0] === 192 && octets[1] === 168) || octets[0] >= 224;
 }
 
 /**

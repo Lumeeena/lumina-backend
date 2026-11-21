@@ -72,6 +72,7 @@ import { loadConfig } from './config';
 import { routineLogger, subsystem } from './logger';
 import { RetryWorker } from './retryWorker';
 import { refreshAccountQueueBatch } from './accountRefresh';
+import { refreshIssuerMetadataBatch } from './assetIssuer';
 import {
   contractEventsIndexed,
   customEventsDecoded,
@@ -265,6 +266,7 @@ interface NetworkLoop {
    * concurrent batches racing each other for the same rows.
    */
   accountRefreshTask: Promise<void> | null;
+  issuerMetadataTask: Promise<void> | null;
 }
 
 function createLoop(network: NetworkConfig, registries: Map<string, RegistryConfig>): NetworkLoop {
@@ -297,6 +299,7 @@ function createLoop(network: NetworkConfig, registries: Map<string, RegistryConf
     accountCache: new Map<string, number>(),
     accountCacheOrder: [],
     accountRefreshTask: null,
+    issuerMetadataTask: null,
   };
 }
 
@@ -1000,6 +1003,7 @@ async function runNetworkLoop(loop: NetworkLoop): Promise<void> {
 
     if (isShuttingDown) break;
     scheduleAccountRefreshes(loop);
+    scheduleIssuerMetadataRefresh(loop);
     await new Promise(r => setTimeout(r, config!.pollIntervalMs));
   }
   
@@ -1240,6 +1244,14 @@ function scheduleAccountRefreshes(loop: NetworkLoop): void {
     }
   })();
   loop.accountRefreshTask = task;
+}
+
+function scheduleIssuerMetadataRefresh(loop: NetworkLoop): void {
+  if (loop.issuerMetadataTask || isShuttingDown) return;
+  const task = refreshIssuerMetadataBatch(pools.write, loop.network.name, loop.network.horizonUrl)
+    .catch(err => log.warn({ network: loop.network.name, err: message(err) }, 'issuer metadata refresh batch failed'))
+    .finally(() => { loop.issuerMetadataTask = null; });
+  loop.issuerMetadataTask = task;
 }
 
 /** Redacts the password from a database URL for logging. */

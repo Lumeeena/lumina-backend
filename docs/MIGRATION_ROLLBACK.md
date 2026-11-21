@@ -75,6 +75,7 @@ The following migrations are strictly **irreversible** in place and will be reje
 | `022_asset_lookalike_reason` | `022_asset_lookalike_reason.down.sql` | Drops the persisted lookalike detection rule. |
 | `023_remove_placeholder_contract_interfaces` | — | Irreversible; removes fabricated placeholder interfaces. |
 | `024_operation_effect_idempotency` | `024_operation_effect_idempotency.down.sql` | Drops replay markers; a later ledger replay can reapply additive effects. |
+| `025_sponsorship_metadata_and_trustline_cleanup` | `025_sponsorship_metadata_and_trustline_cleanup.down.sql` | Recreates the removed trustline history table empty, restores the old sponsorship key, and removes issuer metadata refresh timestamps and error state. |
 
 ---
 

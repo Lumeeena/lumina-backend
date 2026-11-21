@@ -247,6 +247,13 @@ Registry and aggregate metrics for distinct issued assets.
 | `created_at` | `TIMESTAMPTZ` | No | `NOW()` | ISO 8601 UTC | Internal | Timestamp asset was recorded. |
 | `updated_at` | `TIMESTAMPTZ` | No | `NOW()` | ISO 8601 UTC | Internal | Timestamp metrics were updated. |
 | `network` | `TEXT` | No (PK) | `'mainnet'` | Text name | Internal | Network identifier. |
+| `issuer_home_domain` | `TEXT` | Yes | None | DNS name | Horizon | Issuer's declared home domain. |
+| `issuer_metadata` | `JSONB` | Yes | None | TOML currency object | Issuer TOML | Issuer-declared metadata for this exact asset. |
+| `issuer_metadata_fetched_at` | `TIMESTAMPTZ` | Yes | None | ISO 8601 UTC | Internal | Last successful metadata fetch. |
+| `issuer_metadata_attempted_at` | `TIMESTAMPTZ` | Yes | None | ISO 8601 UTC | Internal | Most recent metadata fetch attempt. |
+| `issuer_metadata_error` | `TEXT` | Yes | None | Error text | Internal | Most recent fetch failure, truncated. |
+| `is_lookalike` | `BOOLEAN` | Yes | `FALSE` | Boolean | Internal | Whether the asset resembles a known asset issued by another account. |
+| `lookalike_reason` | `TEXT` | Yes | None | Rule identifier | Internal | Rule and canonical asset code that triggered the lookalike flag. |
 
 ---
 
