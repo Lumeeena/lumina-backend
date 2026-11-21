@@ -616,8 +616,7 @@ export async function indexLedger(
         // Process decoded operations (Issue #260)
         await processDecodedOperations(client, network, ledger.sequence, op);
 
-        // Process sponsorship revocations (Issue #261)
-        await processRevokeSponsorshipOperation(client, network, ledger.sequence, op);
+        await processSponsorshipOperation(client, network, ledger.sequence, op, transactionsByHash.get(op.transaction_hash));
 
         // Process Soroban TTL operations (Issue #262)
         await processSorobanTTLOperation(client, network, ledger.sequence, op);
@@ -2300,22 +2299,50 @@ export async function processRevokeSponsorshipOperation(
     return;
   }
 
-  // Extract the sponsored entry ID and type from the operation
-  const sponsoredId = (operation.account_id as string) ||
-                     (operation.trustline_account_id as string) ||
-                     (operation.data_account_id as string) ||
-                     (operation.claimable_balance_id as string) ||
-                     (operation.offer_id as string) ||
-                     '';
-
-  if (sponsoredId) {
-    // Remove the sponsorship relationship
+  const entry = sponsoredEntry(operation, undefined);
+  if (entry) {
     await client.query(
       `DELETE FROM sponsorships
-       WHERE sponsored_id = $1 AND network = $2`,
-      [sponsoredId, network]
+       WHERE sponsored_type = $1 AND sponsored_id = $2 AND network = $3`,
+      [entry.type, entry.id, network]
     );
   }
+}
+
+/** Record sponsorship creation and transfer from the sponsor carried by Horizon. */
+export async function processSponsorshipOperation(
+  client: PoolClient, network: string, ledger: number, operation: HorizonOperation,
+  transaction?: HorizonTransaction
+): Promise<void> {
+  if (operation.type === 'revoke_sponsorship') {
+    await processRevokeSponsorshipOperation(client, network, ledger, operation);
+    return;
+  }
+  const sponsor = operation.sponsor;
+  if (typeof sponsor !== 'string' || !sponsor) return;
+  const entry = sponsoredEntry(operation, transaction);
+  if (!entry) return;
+  await client.query(
+    `INSERT INTO sponsorships (sponsor, sponsored_id, sponsored_type, ledger, created_at, network)
+     VALUES ($1, $2, $3, $4, COALESCE($5::timestamptz, NOW()), $6)
+     ON CONFLICT (sponsored_type, sponsored_id, network) DO UPDATE
+       SET sponsor = EXCLUDED.sponsor, ledger = EXCLUDED.ledger, created_at = EXCLUDED.created_at`,
+    [sponsor, entry.id, entry.type, ledger, operation.created_at, network]
+  );
+}
+
+function sponsoredEntry(operation: HorizonOperation, transaction?: HorizonTransaction): { type: string; id: string } | null {
+  const op = operation as Record<string, unknown>;
+  const source = String(op.source_account || transaction?.source_account || '');
+  const type = String(op.revoke_sponsorship_type || '');
+  const account = String(op.account_id || op.account || op.trustline_account_id || op.data_account_id || op.signer_account_id || source);
+  if (op.claimable_balance_id || op.balance_id || type === 'claimable_balance') return { type: 'claimable_balance', id: String(op.claimable_balance_id || op.balance_id || balanceIdFor(operation, transaction)) };
+  if (op.trustline_account_id || type === 'trustline') return { type: 'trustline', id: `${String(op.trustline_account_id || account)}:${String(op.asset_type || '')}:${String(op.asset_code || '')}:${String(op.asset_issuer || '')}` };
+  if (op.data_account_id || op.data_name || op.name || type === 'data') return { type: 'data', id: `${String(op.data_account_id || account)}:${String(op.data_name || op.name || '')}` };
+  if (op.offer_id !== undefined || type === 'offer') return { type: 'offer', id: `${account}:${String(op.offer_id ?? '')}` };
+  if (op.signer_key || type === 'signer') return { type: 'signer', id: `${account}:${String(op.signer_key || '')}` };
+  if (op.account_id || op.account || type === 'account') return { type: 'account', id: String(op.account_id || op.account) };
+  return null;
 }
 
 /**

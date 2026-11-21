@@ -104,6 +104,7 @@ export interface HorizonAccount {
   /** Present on newer Horizon versions; `account_id` is the field both use. */
   id?: string;
   account_id: string;
+  home_domain?: string;
   sequence: string;
   subentry_count: number;
   last_modified_ledger: number;

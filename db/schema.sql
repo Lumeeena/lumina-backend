@@ -393,6 +393,9 @@ CREATE TABLE IF NOT EXISTS assets (
     network             TEXT NOT NULL DEFAULT 'mainnet',
     issuer_home_domain  TEXT,
     issuer_metadata     JSONB,
+    issuer_metadata_fetched_at TIMESTAMPTZ,
+    issuer_metadata_attempted_at TIMESTAMPTZ,
+    issuer_metadata_error TEXT,
     is_lookalike        BOOLEAN DEFAULT FALSE,
     lookalike_reason    TEXT,
     PRIMARY KEY (asset_code, asset_issuer, network),
@@ -830,7 +833,7 @@ CREATE TABLE IF NOT EXISTS sponsorships (
     ledger               BIGINT NOT NULL,
     created_at           TIMESTAMPTZ NOT NULL,
     network              TEXT NOT NULL DEFAULT 'mainnet',
-    PRIMARY KEY (sponsored_id, network)
+    PRIMARY KEY (sponsored_type, sponsored_id, network)
 );
 
 CREATE INDEX IF NOT EXISTS idx_sponsorships_sponsor ON sponsorships (sponsor, network);
@@ -884,33 +887,6 @@ CREATE INDEX IF NOT EXISTS idx_trades_counter_account
 
 CREATE INDEX IF NOT EXISTS idx_trades_ledger_close_time
     ON trades (ledger_close_time DESC);
-
-CREATE TABLE IF NOT EXISTS trustline_changes (
-    id BIGSERIAL PRIMARY KEY,
-    account_address TEXT NOT NULL,
-    asset_code TEXT NOT NULL,
-    asset_issuer TEXT NOT NULL,
-    operation_id TEXT NOT NULL,
-    ledger_sequence BIGINT NOT NULL,
-    limit_before NUMERIC(20,7),
-    limit_after NUMERIC(20,7) NOT NULL,
-    changed_at TIMESTAMPTZ NOT NULL,
-    network TEXT NOT NULL DEFAULT 'mainnet',
-    CONSTRAINT trustline_changes_ledger_check CHECK (ledger_sequence > 0),
-    CONSTRAINT trustline_changes_limit_check CHECK (limit_after >= 0)
-);
-
-CREATE INDEX IF NOT EXISTS idx_trustline_changes_asset
-    ON trustline_changes (asset_code, asset_issuer, changed_at DESC);
-
-CREATE INDEX IF NOT EXISTS idx_trustline_changes_account
-    ON trustline_changes (account_address, changed_at DESC);
-
-CREATE INDEX IF NOT EXISTS idx_trustline_changes_ledger
-    ON trustline_changes (ledger_sequence);
-
-CREATE INDEX IF NOT EXISTS idx_trustline_changes_network
-    ON trustline_changes (network);
 
 CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_transactions_network_successful_page
     ON transactions (network, successful, ledger DESC, hash DESC);
