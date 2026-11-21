@@ -65,6 +65,10 @@ The following migrations are strictly **irreversible** in place and will be reje
 | `010_trustlines` | `010_trustlines.down.sql` | Drops `trustlines` table. |
 | `011_assets` | `011_assets.down.sql` | Drops `assets` table. |
 | `012_asset_volume_buckets` | `012_asset_volume_buckets.down.sql` | Drops `asset_volume_buckets` table and `bucket_hour()` function. |
+| `013_failed_ledgers` | `013_failed_ledgers.down.sql` | Drops `idx_failed_ledgers_sequence` and `failed_ledgers`. |
+| `013_trades` | `013_trades.down.sql` | Drops the trade query indexes and `trades` table. |
+| `013_trustline_changes` | `013_trustline_changes.down.sql` | Drops the trustline-change indexes and table. Leaves `api_keys.export_enabled` and `api_keys.rate_limit` in place: the up migration only adds them if missing, and they are owned by `006_export_permissions` and `005_api_keys`. |
+| `015_admin_operations` | `015_admin_operations.down.sql` | Drops `idx_admin_operations_network` and `admin_operations`. |
 | `015_retry_queue_network_index` | `015_retry_queue_network_index.down.sql` | Restores `idx_retry_queue_next_attempt` and drops `idx_retry_queue_network_next_attempt`. The stale rows the up migration deleted are not restored; their ledgers were already indexed. |
 | `016_event_transaction_context` | `016_event_transaction_context.down.sql` | Drops `idx_events_transaction` and `contract_events.transaction_hash`. The stored hashes are lost: re-applying the up migration recreates the column empty, and hashes are only refilled for events that are ingested again (not for events whose RPC data has aged out). |
 | `017_signers_sponsorship_contracts_rollups` | `017_signers_sponsorship_contracts_rollups.down.sql` | Drops `activity_rollups`, `contract_deployments` and `account_signers` with their rows and indexes, and drops `idx_sponsorships_by_sponsored` (the `sponsorships` table belongs to `015_operation_decoding` and is kept). The dropped tables are only repopulated when ledgers are indexed again. |

@@ -27,6 +27,7 @@ import {
   callerFromLocals,
   parseAllowAnonymous,
 } from './auth';
+import { parseAnonymousRateLimit, rateLimitMiddleware } from './rateLimit';
 import { buildServerHealth, metricsPlugin, samplePool, serverHealthStatusCode } from './observability';
 import { handlePoolErrors } from './db';
 import {
@@ -83,6 +84,7 @@ const MAX_SUBSCRIPTIONS = parseInt(process.env['MAX_SUBSCRIPTIONS'] ?? '500', 10
 const SUBSCRIPTION_QUEUE_LIMIT = parseInt(process.env['SUBSCRIPTION_QUEUE_LIMIT'] ?? '64', 10);
 const API_KEY_HEADER = (process.env['API_KEY_HEADER'] ?? DEFAULT_API_KEY_HEADER).toLowerCase();
 const ALLOW_ANONYMOUS_ACCESS = parseAllowAnonymous(process.env['ALLOW_ANONYMOUS_ACCESS']);
+const ANONYMOUS_RATE_LIMIT = parseAnonymousRateLimit(process.env['ANONYMOUS_RATE_LIMIT']);
 const DB_POOL_MAX = parseInt(process.env['DB_POOL_MAX'] ?? '10', 10);
 const DB_POOL_IDLE_TIMEOUT = parseInt(process.env['DB_POOL_IDLE_TIMEOUT'] ?? '10000', 10);
 const DB_POOL_CONNECTION_TIMEOUT = parseInt(process.env['DB_POOL_CONNECTION_TIMEOUT'] ?? '0', 10);
@@ -346,6 +348,7 @@ async function main() {
     // make the server buffer an arbitrary payload, and a request that cannot be
     // attributed to a caller never reaches a resolver.
     apiKeyAuthMiddleware({ pool, allowAnonymous: ALLOW_ANONYMOUS_ACCESS, headerName: API_KEY_HEADER }),
+    rateLimitMiddleware({ anonymousRateLimit: ANONYMOUS_RATE_LIMIT }),
     express.json(),
     expressMiddleware(server, {
       context: async ({ res }): Promise<Context> => {
@@ -369,6 +372,7 @@ async function main() {
     cors(corsOptions(security)),
     requestTimeoutMiddleware(security.requestTimeoutMs),
     apiKeyAuthMiddleware({ pool, allowAnonymous: ALLOW_ANONYMOUS_ACCESS, headerName: API_KEY_HEADER }),
+    rateLimitMiddleware({ anonymousRateLimit: ANONYMOUS_RATE_LIMIT }),
     express.json(),
     createWebhooksRouter(pool)
   );

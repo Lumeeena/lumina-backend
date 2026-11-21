@@ -1979,6 +1979,16 @@ type ContractDeployment {
   ): [ContractDeployment!]
 }
 
+"""
+A cursor-paginated page of deployed Soroban contracts.
+"""
+type ContractDeploymentPage {
+  """Contract deployments on this page, newest first."""
+  items: [ContractDeployment!]!
+  """Cursor metadata for navigating to subsequent pages."""
+  pageInfo: PageInfo!
+}
+
 # ─── Network Statistics (#228) ───────────────────────────────────────────────
 
 """
@@ -2094,7 +2104,21 @@ extend type Query {
     limit: Int = 20
     """Ledger sequence cursor from a previous listing."""
     cursor: String
-  ): [ContractDeployment!]!
+  ): [ContractDeployment!]! @deprecated(reason: "Use `contractsPage` instead for cursor-paginated `ContractDeploymentPage` results. Removal planned for 2027-05-20.")
+
+  """
+  Cursor-paginated Soroban contract deployments, newest first (#227, #382).
+
+  Paginates by `(deployedLedger, contractId)` descending — see `PageInfo` for the cursor contract.
+  """
+  contractsPage(
+    """Network to read; defaults to the primary network configured for this deployment."""
+    network: Network
+    """Maximum page size is 100. Larger limits are rejected."""
+    limit: Int = 20
+    """Opaque cursor from a previous page's `pageInfo`; see `PageInfo`."""
+    cursor: String
+  ): ContractDeploymentPage!
 
   # Issue #228
   """
@@ -2123,8 +2147,8 @@ extend type Query {
   network over `[startTime, endTime)`, up to `limit` buckets (capped at 1000).
   """
   activityRollups(
-    """Network whose rollups to read."""
-    network: String!
+    """Network to read; defaults to the primary network configured for this deployment."""
+    network: Network
     """Bucket width: `HOUR` or `DAY`."""
     granularity: Granularity = HOUR
     """Start of the range (ISO 8601), inclusive."""

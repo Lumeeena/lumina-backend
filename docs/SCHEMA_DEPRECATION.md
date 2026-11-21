@@ -82,3 +82,4 @@ Fields may be removed without deprecation only in these cases:
 | Field | Replacement | Deprecated On | Planned Removal |
 | --- | --- | --- | --- |
 | `Query.accountSigners` | `Account.signers` (via `Query.account`) | 2026-11-19 | 2027-05-19 |
+| `Query.contracts` | `Query.contractsPage` | 2026-11-20 | 2027-05-20 |

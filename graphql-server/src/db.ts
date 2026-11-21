@@ -1427,6 +1427,29 @@ export async function getContracts(
   return rows;
 }
 
+export async function getContractsPage(
+  pool: Pool,
+  network: string,
+  limit: number,
+  cursor?: string | null
+): Promise<ContractDeploymentRow[]> {
+  const conditions = ['network = $1'];
+  const params: unknown[] = [network];
+  const afterCursor = cursorCondition(params, KEYSETS.contractsPage, cursor, 'FORWARD', 'DESC');
+  if (afterCursor) conditions.push(afterCursor);
+  params.push(limit);
+
+  const { rows } = await pool.query<ContractDeploymentRow>(
+    `SELECT contract_id, deployer, wasm_hash, deployed_ledger, deployed_at
+     FROM contract_deployments
+     WHERE ${conditions.join(' AND ')}
+     ORDER BY deployed_ledger DESC, contract_id DESC
+     LIMIT $${params.length}`,
+    params
+  );
+  return rows;
+}
+
 export async function getSharedWasmContracts(
   pool: Pool,
   network: string,
