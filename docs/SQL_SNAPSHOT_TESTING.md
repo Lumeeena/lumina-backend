@@ -50,6 +50,11 @@ Representative test cases covered:
 - **`searchTransactions`**:
   - Trigram ranking and similarity query
   - Backward pagination with inverted rank/ledger ordering
+- **`getTransactionsByHashes`**:
+  - Generated SQL asserted for representative hash arguments
+  - Values bound as parameters (never interpolated)
+  - Network included in every predicate
+  - Any pagination uses keyset comparison rather than `OFFSET`
 
 ---
 
