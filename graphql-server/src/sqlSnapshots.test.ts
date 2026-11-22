@@ -8,6 +8,7 @@ import {
   getOperations,
   getLedgers,
   getAccounts,
+  getContracts,
   getEventsByContract,
   getContractStorageEntries,
 } from './db';
@@ -394,4 +395,30 @@ test('SQL snapshot: getTopAccountsByActivity all time', async () => {
   assert.doesNotMatch(q.sql, /history_operations|history_trades/);
   assert.deepEqual(q.params, ['testnet', 10]);
   verifySqlSnapshot('getTopAccountsByActivity_all', q.sql, q.params);
+});
+
+// ─── Contracts SQL Snapshots (#457) ──────────────────────────────────────────
+
+test('SQL snapshot: getContracts default query', async () => {
+  const { pool, getLastQuery } = fakePool();
+  await getContracts(pool, 'mainnet', 20);
+  const q = getLastQuery();
+  assert.deepEqual(q.params, ['mainnet', 20]);
+  assert.ok(!q.sql.includes('mainnet'));
+  assert.match(q.sql, /\bWHERE\b.*\bnetwork\s*=\s*\$1\b/);
+  assert.doesNotMatch(q.sql, /\bOFFSET\b/i);
+  verifySqlSnapshot('getContracts_default', q.sql, q.params);
+});
+
+test('SQL snapshot: getContracts paginated with keyset cursor', async () => {
+  const { pool, getLastQuery } = fakePool();
+  await getContracts(pool, 'testnet', 20, '500000');
+  const q = getLastQuery();
+  assert.deepEqual(q.params, ['testnet', '500000', 20]);
+  assert.ok(!q.sql.includes('testnet'));
+  assert.ok(!q.sql.includes('500000'));
+  assert.match(q.sql, /\bWHERE\b.*\bnetwork\s*=\s*\$1\b/);
+  assert.match(q.sql, /deployed_ledger < \$2/);
+  assert.doesNotMatch(q.sql, /\bOFFSET\b/i);
+  verifySqlSnapshot('getContracts_paginated', q.sql, q.params);
 });

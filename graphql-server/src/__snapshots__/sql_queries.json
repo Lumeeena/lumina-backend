@@ -23,6 +23,14 @@
     "sql": "SELECT contract_id, network, key, durability, state, value, value_xdr, live_until_ledger, last_modified_ledger FROM contract_storage_entries WHERE contract_id = $1 AND network = $2 AND durability = $3 AND key LIKE $4 ESCAPE '\\' AND (last_modified_ledger, key) < (SELECT last_modified_ledger, key FROM contract_storage_entries WHERE key = $5 AND contract_id = $1 AND network = $2) ORDER BY last_modified_ledger DESC, key DESC LIMIT $6",
     "paramCount": 6
   },
+  "getContracts_default": {
+    "sql": "SELECT contract_id, deployer, wasm_hash, deployed_ledger, deployed_at FROM contract_deployments WHERE network = $1 ORDER BY deployed_ledger DESC LIMIT $2",
+    "paramCount": 2
+  },
+  "getContracts_paginated": {
+    "sql": "SELECT contract_id, deployer, wasm_hash, deployed_ledger, deployed_at FROM contract_deployments WHERE network = $1 AND deployed_ledger < $2 ORDER BY deployed_ledger DESC LIMIT $3",
+    "paramCount": 3
+  },
   "getEventsByContract_default": {
     "sql": "SELECT id, network, type, contract_id, ledger, created_at, paging_token, topics, value, transaction_hash FROM contract_events WHERE contract_id = $1 AND network = $2 ORDER BY ledger DESC, id DESC LIMIT $3",
     "paramCount": 3
