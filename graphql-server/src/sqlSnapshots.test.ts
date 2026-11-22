@@ -9,6 +9,7 @@ import {
   getLedgers,
   getAccounts,
   getContracts,
+  getSharedWasmContracts,
   getEventsByContract,
   getContractStorageEntries,
 } from './db';
@@ -421,4 +422,20 @@ test('SQL snapshot: getContracts paginated with keyset cursor', async () => {
   assert.match(q.sql, /deployed_ledger < \$2/);
   assert.doesNotMatch(q.sql, /\bOFFSET\b/i);
   verifySqlSnapshot('getContracts_paginated', q.sql, q.params);
+});
+
+// ─── Shared Wasm Contracts SQL Snapshots (#458) ──────────────────────────────
+
+test('SQL snapshot: getSharedWasmContracts default query', async () => {
+  const { pool, getLastQuery } = fakePool();
+  const excludeContractId = 'CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC';
+  await getSharedWasmContracts(pool, 'mainnet', 'wasm_abc123', excludeContractId, 10);
+  const q = getLastQuery();
+  assert.deepEqual(q.params, ['mainnet', 'wasm_abc123', excludeContractId, 10]);
+  assert.ok(!q.sql.includes('mainnet'));
+  assert.ok(!q.sql.includes('wasm_abc123'));
+  assert.ok(!q.sql.includes(excludeContractId));
+  assert.match(q.sql, /\bWHERE\b.*\bnetwork\s*=\s*\$1\b/);
+  assert.doesNotMatch(q.sql, /\bOFFSET\b/i);
+  verifySqlSnapshot('getSharedWasmContracts_default', q.sql, q.params);
 });
