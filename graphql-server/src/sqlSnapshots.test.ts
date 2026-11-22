@@ -10,6 +10,7 @@ import {
   getAccounts,
   getContracts,
   getSharedWasmContracts,
+  getNetworkStats,
   getEventsByContract,
   getContractStorageEntries,
 } from './db';
@@ -438,4 +439,22 @@ test('SQL snapshot: getSharedWasmContracts default query', async () => {
   assert.match(q.sql, /\bWHERE\b.*\bnetwork\s*=\s*\$1\b/);
   assert.doesNotMatch(q.sql, /\bOFFSET\b/i);
   verifySqlSnapshot('getSharedWasmContracts_default', q.sql, q.params);
+});
+
+// ─── Network Stats SQL Snapshots (#459) ──────────────────────────────────────
+
+test('SQL snapshot: getNetworkStats default query', async () => {
+  const { pool, getLastQuery } = fakePool();
+  const startTime = '2026-01-01T00:00:00Z';
+  const endTime = '2026-01-08T00:00:00Z';
+  await getNetworkStats(pool, 'mainnet', startTime, endTime, 'DAY', 50);
+  const q = getLastQuery();
+  assert.deepEqual(q.params, ['mainnet', 'DAY', startTime, endTime, 50]);
+  assert.ok(!q.sql.includes('mainnet'));
+  assert.ok(!q.sql.includes('DAY'));
+  assert.ok(!q.sql.includes(startTime));
+  assert.ok(!q.sql.includes(endTime));
+  assert.match(q.sql, /\bWHERE\b.*\bnetwork\s*=\s*\$1\b/);
+  assert.doesNotMatch(q.sql, /\bOFFSET\b/i);
+  verifySqlSnapshot('getNetworkStats_default', q.sql, q.params);
 });

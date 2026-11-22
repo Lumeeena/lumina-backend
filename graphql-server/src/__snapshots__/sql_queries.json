@@ -51,6 +51,10 @@
     "sql": "SELECT sequence, network, closed_at, transaction_count, operation_count, base_fee, base_reserve FROM ledgers WHERE network = $1 AND (sequence) < ($2::bigint) ORDER BY sequence DESC LIMIT $3",
     "paramCount": 3
   },
+  "getNetworkStats_default": {
+    "sql": "SELECT bucket_start, transaction_count, operation_count, active_accounts, total_volume::text AS total_volume FROM activity_rollups WHERE network = $1 AND granularity = $2 AND bucket_start >= $3 AND bucket_start < $4 ORDER BY bucket_start ASC LIMIT $5",
+    "paramCount": 5
+  },
   "getOperationsByAsset_issued_forward": {
     "sql": "SELECT * FROM operations WHERE network = $1 AND ((details->>'asset_code' = $2 AND details->>'asset_issuer' = $3) OR (details->>'selling_asset_code' = $2 AND details->>'selling_asset_issuer' = $3) OR (details->>'buying_asset_code' = $2 AND details->>'buying_asset_issuer' = $3)) AND (ledger, id) < ($4::bigint, $5::text) ORDER BY ledger DESC, id DESC LIMIT $6",
     "paramCount": 6
