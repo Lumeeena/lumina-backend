@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import type { Pool } from 'pg';
 import {
   getAccountOperationsInLedger,
+  getTableCountEstimateOrExact,
   getTradesFromDb,
   getTransactions,
   getTransactionsByLedger,
@@ -469,4 +470,50 @@ test('SQL snapshot: getTradesFromDb filtered and paginated forward', async () =>
   assert.match(q.sql, /\(ledger_close_time,\s*id\)\s*<\s*\(\$\d+::timestamptz,\s*\$\d+::text\)/);
   assert.doesNotMatch(q.sql, /\bOFFSET\b/i);
   verifySqlSnapshot('getTradesFromDb_filtered_forward', q.sql, q.params);
+});
+
+// ─── Table Count Estimate Or Exact SQL Snapshots (#453) ──────────────────────
+
+test('SQL snapshot: getTableCountEstimateOrExact ledgers exact count', async () => {
+  const { pool, getLastQuery } = fakePool();
+  await getTableCountEstimateOrExact(pool, 'ledgers', 'mainnet');
+  const q = getLastQuery();
+  assert.deepEqual(q.params, ['mainnet']);
+  assert.doesNotMatch(q.sql, /mainnet/);
+  assert.match(q.sql, /\bnetwork\s*=\s*\$\d+/);
+  verifySqlSnapshot('getTableCountEstimateOrExact_ledgers', q.sql, q.params);
+});
+
+test('SQL snapshot: getTableCountEstimateOrExact exact fallback', async () => {
+  const { pool, getLastQuery } = fakePool();
+  await getTableCountEstimateOrExact(pool, 'transactions', 'mainnet');
+  const q = getLastQuery();
+  assert.deepEqual(q.params, ['mainnet']);
+  assert.doesNotMatch(q.sql, /mainnet/);
+  assert.match(q.sql, /\bnetwork\s*=\s*\$\d+/);
+  verifySqlSnapshot('getTableCountEstimateOrExact_exactFallback', q.sql, q.params);
+});
+
+test('SQL snapshot: getTableCountEstimateOrExact pg_class estimate', async () => {
+  const { pool, getLastQuery } = fakePool();
+  await getTableCountEstimateOrExact(pool, 'transactions', 'mainnet', {
+    affordableThreshold: 0,
+  });
+  const q = getLastQuery();
+  assert.deepEqual(q.params, ['transactions']);
+  assert.doesNotMatch(q.sql, /transactions/);
+  verifySqlSnapshot('getTableCountEstimateOrExact_estimate', q.sql, q.params);
+});
+
+test('SQL snapshot: getTableCountEstimateOrExact filtered whereClause', async () => {
+  const { pool, getLastQuery } = fakePool();
+  await getTableCountEstimateOrExact(pool, 'transactions', 'mainnet', {
+    whereClause: 'network = $1 AND successful = $2',
+    params: ['mainnet', true],
+  });
+  const q = getLastQuery();
+  assert.deepEqual(q.params, ['mainnet', true]);
+  assert.doesNotMatch(q.sql, /mainnet|true/);
+  assert.match(q.sql, /\bnetwork\s*=\s*\$\d+/);
+  verifySqlSnapshot('getTableCountEstimateOrExact_filtered', q.sql, q.params);
 });
