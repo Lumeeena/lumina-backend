@@ -8,6 +8,7 @@ import {
   getOperations,
   getLedgers,
   getAccounts,
+  getAccountsFromDb,
   getEventsByContract,
   getContractStorageEntries,
 } from './db';
@@ -258,6 +259,41 @@ test('SQL snapshot: getAccounts address order default', async () => {
   await getAccounts(pool, { network: 'mainnet', limit: 20, orderBy: 'ADDRESS' });
   const q = getLastQuery();
   verifySqlSnapshot('getAccounts_address_default', q.sql, q.params);
+});
+
+test('SQL snapshot: getAccountsFromDb batch lookup', async () => {
+  const { pool, getLastQuery } = fakePool();
+  const addresses = [
+    'GBRPYHIL2CI537KXVHBV4Z6G7MXNGSQXN4F2XGJFFHJ3KJV3J4WKZQLQ',
+    'GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN7',
+  ];
+  await getAccountsFromDb(pool, 'mainnet', addresses);
+  const q = getLastQuery();
+  verifySqlSnapshot('getAccountsFromDb', q.sql, q.params);
+
+  // The whole batch is one array parameter, never interpolated into the statement.
+  assert.deepStrictEqual(q.params, [addresses, 'mainnet']);
+  for (const address of addresses) {
+    assert.ok(!q.sql.includes(address), 'addresses must be a bound parameter');
+  }
+  assert.ok(!q.sql.includes('mainnet'), 'network must be a bound parameter');
+  // The network scopes the lookup, so an address indexed on another network never matches.
+  assert.match(q.sql, /WHERE address = ANY\(\$1::text\[\]\) AND network = \$2/);
+  // A batch lookup by key: no pagination at all.
+  assert.doesNotMatch(q.sql, /\bOFFSET\b/i);
+});
+
+test('getAccountsFromDb with no addresses issues no query', async () => {
+  let queries = 0;
+  const pool = {
+    query: async () => {
+      queries += 1;
+      return { rows: [] };
+    },
+  } as unknown as Pool;
+  const result = await getAccountsFromDb(pool, 'mainnet', []);
+  assert.strictEqual(queries, 0);
+  assert.strictEqual(result.size, 0);
 });
 
 // ─── Events By Contract SQL Snapshots ────────────────────────────────────────

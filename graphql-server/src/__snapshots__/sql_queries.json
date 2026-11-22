@@ -1,4 +1,8 @@
 {
+  "getAccountsFromDb": {
+    "sql": "SELECT address, network, sequence, subentry_count, last_modified_ledger, num_sponsored, num_sponsoring, balances, flags, thresholds FROM accounts WHERE address = ANY($1::text[]) AND network = $2",
+    "paramCount": 2
+  },
   "getAccounts_address_default": {
     "sql": "SELECT address, network, sequence, subentry_count, last_modified_ledger, num_sponsored, num_sponsoring, balances, flags, thresholds FROM accounts WHERE network = $1 ORDER BY address ASC LIMIT $2",
     "paramCount": 2
