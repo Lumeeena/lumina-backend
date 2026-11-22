@@ -6,6 +6,7 @@ import type { Pool } from 'pg';
 import {
   getAccountOperationsInLedger,
   getTransactions,
+  getTransactionsByLedger,
   getOperations,
   getLedgers,
   getAccounts,
@@ -408,4 +409,16 @@ test('SQL snapshot: getAccountOperationsInLedger default query', async () => {
   assert.doesNotMatch(q.sql, /mainnet|500000|GBRPYHIL/);
   assert.match(q.sql, /\bnetwork\s*=\s*\$\d+/);
   verifySqlSnapshot('getAccountOperationsInLedger_default', q.sql, q.params);
+});
+
+// ─── Transactions By Ledger SQL Snapshots (#450) ─────────────────────────────
+
+test('SQL snapshot: getTransactionsByLedger default query', async () => {
+  const { pool, getLastQuery } = fakePool();
+  await getTransactionsByLedger(pool, 'mainnet', 500000);
+  const q = getLastQuery();
+  assert.deepEqual(q.params, [500000, 'mainnet']);
+  assert.doesNotMatch(q.sql, /mainnet|500000/);
+  assert.match(q.sql, /\bnetwork\s*=\s*\$\d+/);
+  verifySqlSnapshot('getTransactionsByLedger_default', q.sql, q.params);
 });
