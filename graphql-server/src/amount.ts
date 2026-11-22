@@ -18,12 +18,19 @@
  * be a rounding bug wearing a parsing costume.
  */
 
+/** Stellar ledger amounts always have 7 decimal places (1 unit = 10^7 stroops). */
 const SCALE = 7;
+/** Multiplier converting whole units into integer stroops (10_000_000n). */
 const SCALE_FACTOR = 10n ** BigInt(SCALE);
 
 /** Only plain decimal: an optional sign, digits, and an optional fraction. */
 const DECIMAL_TEXT = /^[+-]?(?:\d+(?:\.\d*)?|\.\d+)$/;
 
+/**
+ * Immutable fixed-point Stellar asset amount backed by an integer `bigint`
+ * stroop count. Avoids IEEE-754 double rounding for balances up to 2^63 - 1
+ * stroops.
+ */
 export class StellarAmount {
   /** Value in stroops. The single source of truth; nothing is stored as a double. */
   private readonly stroops: bigint;
@@ -32,6 +39,7 @@ export class StellarAmount {
     this.stroops = stroops;
   }
 
+  /** Zero-stroop amount constant. */
   static readonly ZERO = new StellarAmount(0n);
 
   /**
@@ -72,14 +80,17 @@ export class StellarAmount {
     return new StellarAmount(negative ? -stroops : stroops);
   }
 
+  /** Return the sum of this amount and `other`. */
   plus(other: StellarAmount): StellarAmount {
     return new StellarAmount(this.stroops + other.stroops);
   }
 
+  /** Return the difference `this - other`. */
   minus(other: StellarAmount): StellarAmount {
     return new StellarAmount(this.stroops - other.stroops);
   }
 
+  /** Return true when both amounts represent the exact same stroop count. */
   equals(other: StellarAmount): boolean {
     return this.stroops === other.stroops;
   }
@@ -104,6 +115,7 @@ export class StellarAmount {
     return fraction ? `${sign}${whole}.${fraction}` : `${sign}${whole}`;
   }
 
+  /** Alias for {@link toFixed} so string coercion yields canonical decimal text. */
   toString(): string {
     return this.toFixed();
   }
@@ -111,4 +123,5 @@ export class StellarAmount {
 
 /** Exported so a test can state an expectation in stroops rather than guessing at the scale. */
 export const STROOPS_PER_UNIT = SCALE_FACTOR;
+/** Number of fractional decimal places on every Stellar ledger amount (7). */
 export const AMOUNT_DECIMALS = SCALE;

@@ -15,6 +15,10 @@
     "sql": "SELECT address, network, sequence, subentry_count, last_modified_ledger, num_sponsored, num_sponsoring, balances, flags, thresholds FROM accounts WHERE network = $1 AND (last_modified_ledger, address) < ($2::bigint, $3::text) ORDER BY last_modified_ledger DESC, address ASC LIMIT $4",
     "paramCount": 4
   },
+  "getActivityRollups_default": {
+    "sql": "SELECT bucket_start, granularity, network, transaction_count, operation_count, active_accounts, total_volume::text AS total_volume FROM activity_rollups WHERE network = $1 AND granularity = $2 AND bucket_start >= $3 AND bucket_start < $4 ORDER BY bucket_start ASC LIMIT $5",
+    "paramCount": 5
+  },
   "getContractStorageEntries_default": {
     "sql": "SELECT contract_id, network, key, durability, state, value, value_xdr, live_until_ledger, last_modified_ledger FROM contract_storage_entries WHERE contract_id = $1 AND network = $2 ORDER BY last_modified_ledger DESC, key DESC LIMIT $3",
     "paramCount": 3
@@ -66,6 +70,14 @@
   "getOperations_forward": {
     "sql": "SELECT id, network, type, transaction_hash, ledger, created_at, source_account, jsonb_build_object( 'from', details->'from', 'to', details->'to', 'amount', details->'amount', 'asset_type', details->'asset_type', 'asset_code', details->'asset_code', 'asset_issuer', details->'asset_issuer', 'starting_balance', details->'starting_balance', 'funder', details->'funder', 'account', details->'account', 'into', details->'into', 'offer_id', details->'offer_id', 'price', details->'price', 'selling_asset_type', details->'selling_asset_type', 'selling_asset_code', details->'selling_asset_code', 'selling_asset_issuer', details->'selling_asset_issuer', 'buying_asset_type', details->'buying_asset_type', 'buying_asset_code', details->'buying_asset_code', 'buying_asset_issuer', details->'buying_asset_issuer', 'bump_to', details->'bump_to', 'name', details->'name', 'value', details->'value' ) AS details FROM operations WHERE network = $1 AND (ledger, id) < ($2::bigint, $3::text) ORDER BY ledger DESC, id DESC LIMIT $4",
     "paramCount": 4
+  },
+  "getRollupConsistency_base": {
+    "sql": "SELECT COUNT(*)::text AS count FROM transactions WHERE network = $1 AND created_at >= $2 AND created_at < $2::timestamptz + CASE WHEN $3 = 'day' THEN INTERVAL '1 day' ELSE INTERVAL '1 hour' END",
+    "paramCount": 3
+  },
+  "getRollupConsistency_rollup": {
+    "sql": "SELECT transaction_count::text FROM activity_rollups WHERE network = $1 AND granularity = $2 AND bucket_start = $3",
+    "paramCount": 3
   },
   "getTopAccountsByActivity_all": {
     "sql": "WITH account_ops AS ( SELECT o.source_account AS account, COUNT(*) AS operation_count FROM operations o WHERE o.network = $1 GROUP BY o.source_account ), trade_legs AS ( SELECT t.base_account AS account, t.base_amount AS volume FROM trades t WHERE t.network = $1 UNION ALL SELECT t.counter_account AS account, t.counter_amount AS volume FROM trades t WHERE t.network = $1 AND t.counter_account IS NOT NULL ), account_trades AS ( SELECT tl.account, COUNT(*) AS trade_count, COALESCE(SUM(tl.volume), 0) AS total_volume FROM trade_legs tl GROUP BY tl.account ), combined AS ( SELECT COALESCE(ops.account, tr.account) AS account, COALESCE(ops.operation_count, 0) AS operation_count, COALESCE(tr.trade_count, 0) AS trade_count, COALESCE(tr.total_volume, 0) AS total_volume FROM account_ops ops FULL OUTER JOIN account_trades tr ON ops.account = tr.account ) SELECT account, operation_count, trade_count, total_volume::text AS total_volume, (operation_count + trade_count * 2)::float AS score FROM combined WHERE account IS NOT NULL ORDER BY score DESC, total_volume DESC, account ASC LIMIT $2",

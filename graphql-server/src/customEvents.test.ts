@@ -4,6 +4,7 @@ import type { Pool } from 'pg';
 import {
   buildFilterClause,
   CustomQueryError,
+  getContractSchema,
   getCustomEvents,
   mapCustomEvent,
   type StoredContractSchema,
@@ -292,4 +293,72 @@ test('a field the stored row lacks is surfaced as an explicit null', () => {
   // The schema drives the field list, so a client always sees every declared
   // field rather than having to guess whether one was omitted.
   assert.deepEqual(mapped.fields.map(f => f.value), ['GFROM', null, null]);
+});
+
+test('getContractSchema returns null when no schema is registered and scopes by network', async () => {
+  const calls: Recorded[] = [];
+  const emptyPool = {
+    query: async (sql: string, params: unknown[] = []) => {
+      calls.push({ sql, params });
+      return { rows: [] };
+    },
+  } as unknown as Pool;
+
+  assert.equal(await getContractSchema(emptyPool, 'testnet', CONTRACT), null);
+  assert.match(calls[0]!.sql, /contract_id = \$1 AND network = \$2/);
+  assert.deepEqual(calls[0]!.params, [CONTRACT, 'testnet']);
+});
+
+test('getCustomEvents applies where filters and network scoping', async () => {
+  const { pool, calls } = fakePool();
+
+  await getCustomEvents(pool, {
+    network: 'testnet',
+    contractId: CONTRACT,
+    event: 'transfer',
+    where: [{ field: 'amount', op: 'GTE', value: ' 100 ' }],
+    limit: 10,
+  });
+
+  const query = calls[1]!;
+  assert.match(query.sql, /network = \$3/);
+  assert.match(query.sql, /\(fields->>\$4\)::numeric >= \$5::numeric/);
+  assert.match(query.sql, /LIMIT \$6/);
+  assert.deepEqual(query.params, [CONTRACT, 'transfer', 'testnet', 'amount', '100', 10]);
+});
+
+test('backward pagination inverts SQL ordering and reverses returned rows', async () => {
+  const rowOld = {
+    event_id: 'evt1',
+    contract_id: CONTRACT,
+    event_name: 'transfer',
+    ledger: 100,
+    created_at: '2026-01-01T00:00:00.000Z' as unknown as Date,
+    schema_version: 1,
+    fields: { from: 'GA', to: 'GB', amount: '10' },
+  };
+  const rowNew = {
+    ...rowOld,
+    event_id: 'evt2',
+    ledger: 200,
+  };
+  const { pool, calls } = fakePool([rowOld, rowNew]);
+
+  const results = await getCustomEvents(pool, {
+    network: 'mainnet',
+    contractId: CONTRACT,
+    event: 'transfer',
+    limit: 2,
+    cursor: encodeCursor('customEvents', [300, 'evt3']),
+    direction: 'BACKWARD',
+    order: 'DESC',
+  });
+
+  assert.match(calls[1]!.sql, /\(ledger, event_id\) > \(\$4::bigint, \$5::text\)/);
+  assert.match(calls[1]!.sql, /ORDER BY ledger ASC, event_id ASC/);
+  assert.deepEqual(
+    results.map(r => r.eventId),
+    ['evt2', 'evt1']
+  );
+  assert.equal(results[0]!.createdAt, '2026-01-01T00:00:00.000Z');
 });

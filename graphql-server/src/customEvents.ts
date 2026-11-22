@@ -30,6 +30,11 @@ import type { Pool } from 'pg';
 import { ERROR_CODES, LuminaError, type ErrorCode } from './errorCodes';
 import { cursorCondition, KEYSETS, type PaginationDirection } from './pagination';
 
+/**
+ * Soroban integer types that support ordered range comparisons (`GT`, `GTE`,
+ * `LT`, `LTE`) and are cast to Postgres `numeric` (rather than `bigint`,
+ * which cannot represent `i128` or `u128`).
+ */
 export const NUMERIC_TYPES = new Set(['i32', 'u32', 'i64', 'u64', 'i128', 'u128']);
 
 /** Whitelisted operators. Nothing else can reach the statement. */
@@ -42,8 +47,13 @@ const OPERATORS: Record<string, string> = {
   LTE: '<=',
 };
 
+/**
+ * Inequality operators that require a numeric field so non-numeric values
+ * (such as addresses) are never silently compared lexicographically.
+ */
 const ORDERED_OPERATORS = new Set(['GT', 'GTE', 'LT', 'LTE']);
 
+/** A single typed field declared on a registered custom event schema. */
 export interface StoredSchemaField {
   name: string;
   type: string;
@@ -51,18 +61,21 @@ export interface StoredSchemaField {
   optional?: boolean;
 }
 
+/** An event variant declared within a contract's registered schema. */
 export interface StoredSchemaEvent {
   name: string;
   topic: string;
   fields: StoredSchemaField[];
 }
 
+/** Versioned custom-event schema registered for a Soroban contract. */
 export interface StoredContractSchema {
   contractId: string;
   version: number;
   events: StoredSchemaEvent[];
 }
 
+/** Client-supplied filter predicate validated against the event's schema. */
 export interface CustomEventFilter {
   field: string;
   op: string;
@@ -93,6 +106,10 @@ interface CustomEventRow {
   fields: Record<string, string | null>;
 }
 
+/**
+ * Look up the registered custom-event schema for a contract on a specific
+ * network, returning `null` if no schema has been registered.
+ */
 export async function getContractSchema(
   pool: Pool,
   network: string,
@@ -164,6 +181,7 @@ export function buildFilterClause(
   return clauses;
 }
 
+/** Arguments for querying decoded custom events with optional schema-checked filters and keyset pagination. */
 export interface CustomEventQuery {
   /** Network whose events to decode — schemas are registered per network too. */
   network: string;
@@ -176,6 +194,15 @@ export interface CustomEventQuery {
   order?: 'ASC' | 'DESC' | null;
 }
 
+/**
+ * Query decoded custom events for a contract and event name.
+ *
+ * Resolves the registered schema first (throwing `CustomQueryError` with
+ * `NOT_FOUND` if the contract or event is unknown), builds parameterized filter
+ * predicates and an optional keyset cursor condition, and reverses the returned
+ * rows when paginating `BACKWARD` so callers always receive results in the
+ * requested display order.
+ */
 export async function getCustomEvents(pool: Pool, query: CustomEventQuery) {
   const baseOrder = query.order ?? 'DESC';
   const direction = query.direction ?? 'FORWARD';

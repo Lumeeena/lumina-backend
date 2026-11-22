@@ -10,6 +10,8 @@ import {
   getAccounts,
   getEventsByContract,
   getContractStorageEntries,
+  getActivityRollups,
+  getRollupConsistency,
 } from './db';
 import { getOperationsByAsset, searchTransactions } from './search';
 import { getTopAccountsByActivity } from './topAccounts';
@@ -44,15 +46,21 @@ after(() => {
   }
 });
 
-function fakePool(): { pool: Pool; getLastQuery: () => { sql: string; params: unknown[] } } {
+function fakePool(): {
+  pool: Pool;
+  getLastQuery: () => { sql: string; params: unknown[] };
+  getQueries: () => { sql: string; params: unknown[] }[];
+} {
+  const queries: { sql: string; params: unknown[] }[] = [];
   let lastQuery = { sql: '', params: [] as unknown[] };
   const pool = {
     query: async (sql: string, params: unknown[] = []) => {
       lastQuery = { sql: sql.replace(/\s+/g, ' ').trim(), params };
+      queries.push(lastQuery);
       return { rows: [] };
     },
   } as unknown as Pool;
-  return { pool, getLastQuery: () => lastQuery };
+  return { pool, getLastQuery: () => lastQuery, getQueries: () => queries };
 }
 
 function verifySqlSnapshot(testName: string, sql: string, params: unknown[]) {
@@ -394,4 +402,51 @@ test('SQL snapshot: getTopAccountsByActivity all time', async () => {
   assert.doesNotMatch(q.sql, /history_operations|history_trades/);
   assert.deepEqual(q.params, ['testnet', 10]);
   verifySqlSnapshot('getTopAccountsByActivity_all', q.sql, q.params);
+});
+
+// ─── Activity Rollups SQL Snapshots (#460, #461) ─────────────────────────────
+
+test('SQL snapshot: getActivityRollups default query', async () => {
+  const { pool, getLastQuery } = fakePool();
+  await getActivityRollups(
+    pool,
+    'mainnet',
+    'hour',
+    '2026-01-01T00:00:00Z',
+    '2026-01-02T00:00:00Z',
+    24
+  );
+  const q = getLastQuery();
+  assert.deepEqual(q.params, [
+    'mainnet',
+    'hour',
+    '2026-01-01T00:00:00Z',
+    '2026-01-02T00:00:00Z',
+    24,
+  ]);
+  assert.match(q.sql, /WHERE network = \$1/);
+  assert.doesNotMatch(q.sql, /\bOFFSET\b/i);
+  assert.doesNotMatch(q.sql, /mainnet|2026-01-01/);
+  verifySqlSnapshot('getActivityRollups_default', q.sql, q.params);
+});
+
+test('SQL snapshot: getRollupConsistency rollup and base queries', async () => {
+  const { pool, getQueries } = fakePool();
+  await getRollupConsistency(pool, 'mainnet', 'hour', '2026-01-01T00:00:00Z');
+  const queries = getQueries();
+  assert.equal(queries.length, 2);
+
+  const rollupQuery = queries[0]!;
+  assert.deepEqual(rollupQuery.params, ['mainnet', 'hour', '2026-01-01T00:00:00Z']);
+  assert.match(rollupQuery.sql, /WHERE network = \$1/);
+  assert.doesNotMatch(rollupQuery.sql, /\bOFFSET\b/i);
+  assert.doesNotMatch(rollupQuery.sql, /mainnet|2026-01-01/);
+  verifySqlSnapshot('getRollupConsistency_rollup', rollupQuery.sql, rollupQuery.params);
+
+  const baseQuery = queries[1]!;
+  assert.deepEqual(baseQuery.params, ['mainnet', '2026-01-01T00:00:00Z', 'hour']);
+  assert.match(baseQuery.sql, /WHERE network = \$1/);
+  assert.doesNotMatch(baseQuery.sql, /\bOFFSET\b/i);
+  assert.doesNotMatch(baseQuery.sql, /mainnet|2026-01-01/);
+  verifySqlSnapshot('getRollupConsistency_base', baseQuery.sql, baseQuery.params);
 });
