@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import type { Pool } from 'pg';
 import {
   getAccountOperationsInLedger,
+  getTradesFromDb,
   getTransactions,
   getTransactionsByLedger,
   getOperations,
@@ -421,4 +422,51 @@ test('SQL snapshot: getTransactionsByLedger default query', async () => {
   assert.doesNotMatch(q.sql, /mainnet|500000/);
   assert.match(q.sql, /\bnetwork\s*=\s*\$\d+/);
   verifySqlSnapshot('getTransactionsByLedger_default', q.sql, q.params);
+});
+
+// ─── Trades SQL Snapshots (#452) ─────────────────────────────────────────────
+
+test('SQL snapshot: getTradesFromDb default query', async () => {
+  const { pool, getLastQuery } = fakePool();
+  await getTradesFromDb(pool, 'mainnet', { limit: 20 });
+  const q = getLastQuery();
+  assert.deepEqual(q.params, ['mainnet', 20]);
+  assert.doesNotMatch(q.sql, /mainnet/);
+  assert.match(q.sql, /\bnetwork\s*=\s*\$\d+/);
+  assert.doesNotMatch(q.sql, /\bOFFSET\b/i);
+  verifySqlSnapshot('getTradesFromDb_default', q.sql, q.params);
+});
+
+test('SQL snapshot: getTradesFromDb filtered and paginated forward', async () => {
+  const { pool, getLastQuery } = fakePool();
+  const account = 'GBRPYHIL2CI537KXVHBV4Z6G7MXNGSQXN4F2XGJFFHJ3KJV3J4WKZQLQ';
+  const issuer = 'GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN';
+  await getTradesFromDb(pool, 'mainnet', {
+    account,
+    baseAsset: { assetType: 'native' },
+    counterAsset: {
+      assetType: 'credit_alphanum4',
+      assetCode: 'USDC',
+      assetIssuer: issuer,
+    },
+    cursor: encodeCursor('trades', ['2026-01-01T00:00:00Z', 'trade-123']),
+    limit: 20,
+  });
+  const q = getLastQuery();
+  assert.deepEqual(q.params, [
+    'mainnet',
+    account,
+    'native',
+    'credit_alphanum4',
+    'USDC',
+    issuer,
+    '2026-01-01T00:00:00Z',
+    'trade-123',
+    20,
+  ]);
+  assert.doesNotMatch(q.sql, /mainnet|GBRPYHIL|USDC|GA5ZSEJY|trade-123|2026-01-01/);
+  assert.match(q.sql, /\bnetwork\s*=\s*\$\d+/);
+  assert.match(q.sql, /\(ledger_close_time,\s*id\)\s*<\s*\(\$\d+::timestamptz,\s*\$\d+::text\)/);
+  assert.doesNotMatch(q.sql, /\bOFFSET\b/i);
+  verifySqlSnapshot('getTradesFromDb_filtered_forward', q.sql, q.params);
 });
