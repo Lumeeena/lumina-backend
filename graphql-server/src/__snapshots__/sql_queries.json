@@ -31,6 +31,10 @@
     "sql": "SELECT id, network, type, contract_id, ledger, created_at, paging_token, topics, value, transaction_hash FROM contract_events WHERE contract_id = $1 AND network = $2 AND $3 = ANY(topics) AND (ledger, id) < ($4::bigint, $5::text) ORDER BY ledger DESC, id DESC LIMIT $6",
     "paramCount": 6
   },
+  "getLedgersBySequences_default": {
+    "sql": "SELECT sequence, network, closed_at, transaction_count, operation_count, base_fee, base_reserve FROM ledgers WHERE sequence = ANY($1::bigint[]) AND network = $2",
+    "paramCount": 2
+  },
   "getLedgers_backward": {
     "sql": "SELECT sequence, network, closed_at, transaction_count, operation_count, base_fee, base_reserve FROM ledgers WHERE network = $1 AND (sequence) > ($2::bigint) ORDER BY sequence ASC LIMIT $3",
     "paramCount": 3

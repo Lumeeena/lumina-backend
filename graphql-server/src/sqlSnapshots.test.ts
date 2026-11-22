@@ -7,6 +7,7 @@ import {
   getTransactions,
   getOperations,
   getLedgers,
+  getLedgersBySequences,
   getAccounts,
   getEventsByContract,
   getContractStorageEntries,
@@ -214,6 +215,23 @@ test('SQL snapshot: getLedgers paginated backward', async () => {
   await getLedgers(pool, 'mainnet', 20, cursor, 'BACKWARD');
   const q = getLastQuery();
   verifySqlSnapshot('getLedgers_backward', q.sql, q.params);
+});
+
+test('SQL snapshot: getLedgersBySequences', async () => {
+  const { pool, getLastQuery } = fakePool();
+  await getLedgersBySequences(pool, 'mainnet', [100, 200, 300]);
+  const q = getLastQuery();
+  assert.deepEqual(q.params, [[100, 200, 300], 'mainnet']);
+  assert.doesNotMatch(q.sql, /mainnet|100|200|300/);
+  assert.match(q.sql, /network = \$2/);
+  verifySqlSnapshot('getLedgersBySequences_default', q.sql, q.params);
+});
+
+test('SQL snapshot: getLedgersBySequences skips query when sequences is empty', async () => {
+  const { pool, getLastQuery } = fakePool();
+  const result = await getLedgersBySequences(pool, 'mainnet', []);
+  assert.equal(result.size, 0);
+  assert.equal(getLastQuery().sql, '');
 });
 
 // ─── Accounts SQL Snapshots ──────────────────────────────────────────────────
