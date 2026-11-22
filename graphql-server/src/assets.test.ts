@@ -5,7 +5,9 @@ import {
   AssetError,
   balanceConditions,
   DEFAULT_BUCKET_SECONDS,
+  getAssetByKey,
   getAssetDetail,
+  getAssets,
   getAssetSupply,
   getAssetVolumeSeries,
   MAX_BUCKETS,
@@ -222,4 +224,109 @@ test('a native detail normalizes the asset display string', async () => {
   assert.equal(detail.asset, 'XLM');
   assert.equal(detail.native, true);
   assert.equal(detail.code, null);
+});
+
+// ── Asset directory & key lookup ─────────────────────────────────────────────
+
+test('getAssetByKey returns null when no asset row matches', async () => {
+  const { pool, calls } = fakePool(() => []);
+  const asset = await getAssetByKey(pool, 'mainnet', 'USDC', ISSUER);
+
+  assert.equal(asset, null);
+  assert.deepEqual(calls[0]?.params, ['USDC', ISSUER, 'mainnet']);
+  assert.match(calls[0]?.sql ?? '', /a\.asset_code = \$1 AND a\.asset_issuer = \$2 AND a\.network = \$3/);
+});
+
+test('getAssetByKey maps row fields and serializes issuer_metadata', async () => {
+  const { pool } = fakePool(() => [
+    {
+      asset_code: 'USDC',
+      asset_issuer: ISSUER,
+      holder_count: 42,
+      first_seen_ledger: 100,
+      last_activity_ledger: 200,
+      recent_volume: null,
+      issuer_home_domain: 'centre.io',
+      issuer_metadata: { name: 'USD Coin' },
+      is_lookalike: null,
+    },
+  ]);
+
+  const asset = await getAssetByKey(pool, 'mainnet', 'USDC', ISSUER);
+  assert.deepEqual(asset, {
+    code: 'USDC',
+    issuer: ISSUER,
+    holderCount: 42,
+    firstSeenLedger: 100,
+    lastActivityLedger: 200,
+    recentVolume: '0',
+    issuerHomeDomain: 'centre.io',
+    issuerMetadata: '{"name":"USD Coin"}',
+    isLookalike: false,
+  });
+});
+
+test('getAssets paginates by holders with limit+1 lookahead and keyset cursor', async () => {
+  const rowA = {
+    asset_code: 'AAA',
+    asset_issuer: ISSUER,
+    holder_count: 10,
+    first_seen_ledger: 1,
+    last_activity_ledger: 5,
+    recent_volume: '50',
+    issuer_home_domain: null,
+    issuer_metadata: null,
+    is_lookalike: false,
+  };
+  const rowB = { ...rowA, asset_code: 'BBB', holder_count: 8 };
+  const { pool, calls } = fakePool(() => [rowA, rowB]);
+
+  const page = await getAssets(pool, { network: 'mainnet', limit: 1 });
+
+  assert.deepEqual(calls[0]?.params, ['mainnet', 2]);
+  assert.match(calls[0]?.sql ?? '', /ORDER BY a\.holder_count DESC, a\.asset_code ASC, a\.asset_issuer ASC/);
+  assert.equal(page.items.length, 1);
+  assert.equal(page.items[0]?.code, 'AAA');
+  assert.deepEqual(page.pageInfo, {
+    hasNextPage: true,
+    cursor: `10|AAA|${ISSUER}`,
+  });
+});
+
+test('getAssets supports search filter and HOLDERS cursor predicate', async () => {
+  const { pool, calls } = fakePool(() => []);
+  const page = await getAssets(pool, {
+    network: 'testnet',
+    search: ' usd ',
+    limit: 5,
+    cursor: `10|AAA|${ISSUER}`,
+  });
+
+  assert.deepEqual(calls[0]?.params, ['testnet', 6, '%usd%', '10', 'AAA', ISSUER]);
+  assert.match(calls[0]?.sql ?? '', /a\.asset_code ILIKE \$3/);
+  assert.match(calls[0]?.sql ?? '', /a\.holder_count <= \$4::int/);
+  assert.deepEqual(page.pageInfo, { hasNextPage: false, cursor: null });
+});
+
+test('getAssets sorts by 7-day volume and uses volume keyset cursor', async () => {
+  const { pool, calls } = fakePool(() => []);
+  await getAssets(pool, {
+    network: 'mainnet',
+    sortBy: 'VOLUME',
+    cursor: `250.5|USDC|${ISSUER}`,
+  });
+
+  assert.deepEqual(calls[0]?.params, ['mainnet', 21, '250.5', 'USDC', ISSUER]);
+  assert.match(calls[0]?.sql ?? '', /WITH volume_agg AS/);
+  assert.match(calls[0]?.sql ?? '', /v\.recent_volume < \$3::numeric/);
+  assert.match(calls[0]?.sql ?? '', /ORDER BY v\.recent_volume DESC, a\.asset_code ASC, a\.asset_issuer ASC/);
+});
+
+test('getAssets rejects malformed pagination cursors with AssetError', async () => {
+  const { pool, calls } = fakePool(() => []);
+  await assert.rejects(
+    () => getAssets(pool, { network: 'mainnet', cursor: 'bad-cursor' }),
+    (err: unknown) => err instanceof AssetError && err.message === 'Invalid pagination cursor'
+  );
+  assert.equal(calls.length, 0);
 });
