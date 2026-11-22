@@ -1,7 +1,5 @@
 # Node
 node_modules/
-.env
-.env.local
 .env*.local
 
 # TypeScript compiled output
@@ -22,3 +20,4 @@ db/audit/.cache/
 
 # Stack tests (chaos, soak): service logs and recorded results, written per run.
 test/.artifacts/
+config.bat

@@ -10,6 +10,7 @@ import {
   getAccounts,
   getEventsByContract,
   getContractStorageEntries,
+  getAccountLifecycle,
 } from './db';
 import { getOperationsByAsset, searchTransactions } from './search';
 import { getTopAccountsByActivity } from './topAccounts';
@@ -394,4 +395,53 @@ test('SQL snapshot: getTopAccountsByActivity all time', async () => {
   assert.doesNotMatch(q.sql, /history_operations|history_trades/);
   assert.deepEqual(q.params, ['testnet', 10]);
   verifySqlSnapshot('getTopAccountsByActivity_all', q.sql, q.params);
+});
+
+// ─── Account Lifecycle SQL Snapshots ─────────────────────────────────────────
+
+test('SQL snapshot: getAccountLifecycle default query', async () => {
+  const { pool, getLastQuery } = fakePool();
+  await getAccountLifecycle(pool, {
+    network: 'mainnet',
+    accountId: 'GBRPYHIL2CI537KXVHBV4Z6G7MXNGSQXN4F2XGJFFHJ3KJV3J4WKZQLQ',
+    limit: 20,
+  });
+  const q = getLastQuery();
+  assert.doesNotMatch(q.sql, /OFFSET/i);
+  assert.match(q.sql, /network\s*=\s*\$\d+/i);
+  assert.match(q.sql, /account_id\s*=\s*\$\d+/i);
+  assert.doesNotMatch(q.sql, /GBRPYHIL2CI537KXVHBV4Z6G7MXNGSQXN4F2XGJFFHJ3KJV3J4WKZQLQ/);
+  verifySqlSnapshot('getAccountLifecycle_default', q.sql, q.params);
+});
+
+test('SQL snapshot: getAccountLifecycle paginated forward', async () => {
+  const { pool, getLastQuery } = fakePool();
+  await getAccountLifecycle(pool, {
+    network: 'mainnet',
+    accountId: 'GBRPYHIL2CI537KXVHBV4Z6G7MXNGSQXN4F2XGJFFHJ3KJV3J4WKZQLQ',
+    cursor: encodeCursor('accountLifecycle', [500, 'evt-123']),
+    direction: 'FORWARD',
+    limit: 20,
+  });
+  const q = getLastQuery();
+  assert.doesNotMatch(q.sql, /OFFSET/i);
+  assert.match(q.sql, /network\s*=\s*\$\d+/i);
+  assert.doesNotMatch(q.sql, /GBRPYHIL2CI537KXVHBV4Z6G7MXNGSQXN4F2XGJFFHJ3KJV3J4WKZQLQ/);
+  verifySqlSnapshot('getAccountLifecycle_forward', q.sql, q.params);
+});
+
+test('SQL snapshot: getAccountLifecycle paginated backward', async () => {
+  const { pool, getLastQuery } = fakePool();
+  await getAccountLifecycle(pool, {
+    network: 'mainnet',
+    accountId: 'GBRPYHIL2CI537KXVHBV4Z6G7MXNGSQXN4F2XGJFFHJ3KJV3J4WKZQLQ',
+    cursor: encodeCursor('accountLifecycle', [500, 'evt-123']),
+    direction: 'BACKWARD',
+    limit: 20,
+  });
+  const q = getLastQuery();
+  assert.doesNotMatch(q.sql, /OFFSET/i);
+  assert.match(q.sql, /network\s*=\s*\$\d+/i);
+  assert.doesNotMatch(q.sql, /GBRPYHIL2CI537KXVHBV4Z6G7MXNGSQXN4F2XGJFFHJ3KJV3J4WKZQLQ/);
+  verifySqlSnapshot('getAccountLifecycle_backward', q.sql, q.params);
 });

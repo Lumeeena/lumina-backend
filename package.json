@@ -10,10 +10,10 @@
     "client"
   ],
   "scripts": {
-    "build": "npm run build:shared && npm run build:graphql && npm run build:indexer && npm run build:client",
-    "build:graphql": "cd graphql-server && npm run build",
-    "build:indexer": "cd indexer && npm run build",
-    "build:client": "cd client && npm run build",
+    "build": "node init && npm run build:shared && npm run build:graphql && npm run build:indexer && npm run build:client",
+    "build:graphql": "node init && cd graphql-server && npm run build",
+    "build:indexer": "node init && cd indexer && npm run build",
+    "build:client": "node init && cd client && npm run build",
     "test": "npm run test:indexer && npm run test:graphql",
     "explain": "ts-node-transpile-only --project db/explain/tsconfig.json db/explain/run.ts capture",
     "explain:seed": "ts-node-transpile-only --project db/explain/tsconfig.json db/explain/run.ts seed",
@@ -30,7 +30,7 @@
     "test:soak:detector": "TS_NODE_PROJECT=test/tsconfig.json node --require ts-node/register --test test/soak/trend.test.ts test/soak/detectsLeak.test.ts",
     "manage-keys": "npm run --prefix graphql-server manage-keys --",
     "migrate": "npm run --prefix graphql-server migrate --",
-    "build:shared": "tsc -p shared/tsconfig.json",
+    "build:shared": "node init && tsc -p shared/tsconfig.json",
     "check:data-dictionary": "ts-node db/check-data-dictionary.ts"
   },
   "engines": {
