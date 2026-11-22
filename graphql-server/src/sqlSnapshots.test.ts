@@ -4,6 +4,7 @@ import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import type { Pool } from 'pg';
 import {
+  getAccountOperationsInLedger,
   getTransactions,
   getOperations,
   getLedgers,
@@ -394,4 +395,17 @@ test('SQL snapshot: getTopAccountsByActivity all time', async () => {
   assert.doesNotMatch(q.sql, /history_operations|history_trades/);
   assert.deepEqual(q.params, ['testnet', 10]);
   verifySqlSnapshot('getTopAccountsByActivity_all', q.sql, q.params);
+});
+
+// ─── Account Operations In Ledger SQL Snapshots (#451) ───────────────────────
+
+test('SQL snapshot: getAccountOperationsInLedger default query', async () => {
+  const { pool, getLastQuery } = fakePool();
+  const address = 'GBRPYHIL2CI537KXVHBV4Z6G7MXNGSQXN4F2XGJFFHJ3KJV3J4WKZQLQ';
+  await getAccountOperationsInLedger(pool, 'mainnet', 500000, address);
+  const q = getLastQuery();
+  assert.deepEqual(q.params, [500000, address, 'mainnet']);
+  assert.doesNotMatch(q.sql, /mainnet|500000|GBRPYHIL/);
+  assert.match(q.sql, /\bnetwork\s*=\s*\$\d+/);
+  verifySqlSnapshot('getAccountOperationsInLedger_default', q.sql, q.params);
 });

@@ -1,4 +1,8 @@
 {
+  "getAccountOperationsInLedger_default": {
+    "sql": "SELECT id, network, type, transaction_hash, ledger, created_at, source_account, jsonb_build_object( 'from', details->'from', 'to', details->'to', 'amount', details->'amount', 'asset_type', details->'asset_type', 'asset_code', details->'asset_code', 'asset_issuer', details->'asset_issuer', 'starting_balance', details->'starting_balance', 'funder', details->'funder', 'account', details->'account', 'into', details->'into', 'offer_id', details->'offer_id', 'price', details->'price', 'selling_asset_type', details->'selling_asset_type', 'selling_asset_code', details->'selling_asset_code', 'selling_asset_issuer', details->'selling_asset_issuer', 'buying_asset_type', details->'buying_asset_type', 'buying_asset_code', details->'buying_asset_code', 'buying_asset_issuer', details->'buying_asset_issuer', 'bump_to', details->'bump_to', 'name', details->'name', 'value', details->'value' ) AS details FROM operations WHERE ledger = $1 AND network = $3 AND ( source_account = $2 OR details->>'from' = $2 OR details->>'to' = $2 OR details->>'account' = $2 OR details->>'funder' = $2 ) ORDER BY id ASC",
+    "paramCount": 3
+  },
   "getAccounts_address_default": {
     "sql": "SELECT address, network, sequence, subentry_count, last_modified_ledger, num_sponsored, num_sponsoring, balances, flags, thresholds FROM accounts WHERE network = $1 ORDER BY address ASC LIMIT $2",
     "paramCount": 2
