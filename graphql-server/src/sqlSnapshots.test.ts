@@ -10,6 +10,7 @@ import {
   getAccounts,
   getAccountSigners,
   getSponsoredAccounts,
+  getContractDeployment,
   getEventsByContract,
   getContractStorageEntries,
 } from './db';
@@ -291,6 +292,21 @@ test('SQL snapshot: getSponsoredAccounts default query', async () => {
   assert.doesNotMatch(q.sql, /\bOFFSET\b/i);
   assert.deepEqual(q.params, [sponsor, 'mainnet', 20]);
   verifySqlSnapshot('getSponsoredAccounts_default', q.sql, q.params);
+});
+
+// ─── Contract Deployment SQL Snapshots (#456) ────────────────────────────────
+
+test('SQL snapshot: getContractDeployment default query', async () => {
+  const { pool, getLastQuery } = fakePool();
+  const contractId = 'CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC';
+  await getContractDeployment(pool, 'mainnet', contractId);
+  const q = getLastQuery();
+  assert.doesNotMatch(q.sql, /mainnet/);
+  assert.ok(!q.sql.includes(contractId));
+  assert.match(q.sql, /\bnetwork = \$1\b/);
+  assert.doesNotMatch(q.sql, /\bOFFSET\b/i);
+  assert.deepEqual(q.params, ['mainnet', contractId]);
+  verifySqlSnapshot('getContractDeployment_default', q.sql, q.params);
 });
 
 // ─── Events By Contract SQL Snapshots ────────────────────────────────────────

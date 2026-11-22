@@ -19,6 +19,10 @@
     "sql": "SELECT address, network, sequence, subentry_count, last_modified_ledger, num_sponsored, num_sponsoring, balances, flags, thresholds FROM accounts WHERE network = $1 AND (last_modified_ledger, address) < ($2::bigint, $3::text) ORDER BY last_modified_ledger DESC, address ASC LIMIT $4",
     "paramCount": 4
   },
+  "getContractDeployment_default": {
+    "sql": "SELECT contract_id, deployer, wasm_hash, deployed_ledger, deployed_at FROM contract_deployments WHERE network = $1 AND contract_id = $2",
+    "paramCount": 2
+  },
   "getContractStorageEntries_default": {
     "sql": "SELECT contract_id, network, key, durability, state, value, value_xdr, live_until_ledger, last_modified_ledger FROM contract_storage_entries WHERE contract_id = $1 AND network = $2 ORDER BY last_modified_ledger DESC, key DESC LIMIT $3",
     "paramCount": 3
