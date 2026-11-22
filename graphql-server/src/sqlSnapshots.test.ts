@@ -9,6 +9,7 @@ import {
   getLedgers,
   getAccounts,
   getAccountSigners,
+  getSponsoredAccounts,
   getEventsByContract,
   getContractStorageEntries,
 } from './db';
@@ -274,6 +275,22 @@ test('SQL snapshot: getAccountSigners default query', async () => {
   assert.doesNotMatch(q.sql, /\bOFFSET\b/i);
   assert.deepEqual(q.params, ['mainnet', address]);
   verifySqlSnapshot('getAccountSigners_default', q.sql, q.params);
+});
+
+// ─── Sponsored Accounts SQL Snapshots (#455) ─────────────────────────────────
+
+test('SQL snapshot: getSponsoredAccounts default query', async () => {
+  const { pool, getLastQuery } = fakePool();
+  const sponsor = 'GBRPYHIL2CI537KXVHBV4Z6G7MXNGSQXN4F2XGJFFHJ3KJV3J4WKZQLQ';
+  await getSponsoredAccounts(pool, 'mainnet', sponsor, 20);
+  const q = getLastQuery();
+  assert.doesNotMatch(q.sql, /mainnet/);
+  assert.ok(!q.sql.includes(sponsor));
+  assert.match(q.sql, /\bs\.network = a\.network\b/);
+  assert.match(q.sql, /\bs\.network = \$2\b/);
+  assert.doesNotMatch(q.sql, /\bOFFSET\b/i);
+  assert.deepEqual(q.params, [sponsor, 'mainnet', 20]);
+  verifySqlSnapshot('getSponsoredAccounts_default', q.sql, q.params);
 });
 
 // ─── Events By Contract SQL Snapshots ────────────────────────────────────────
