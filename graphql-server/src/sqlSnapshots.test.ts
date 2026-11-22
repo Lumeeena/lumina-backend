@@ -8,6 +8,7 @@ import {
   getOperations,
   getLedgers,
   getAccounts,
+  getAccountSigners,
   getEventsByContract,
   getContractStorageEntries,
 } from './db';
@@ -258,6 +259,21 @@ test('SQL snapshot: getAccounts address order default', async () => {
   await getAccounts(pool, { network: 'mainnet', limit: 20, orderBy: 'ADDRESS' });
   const q = getLastQuery();
   verifySqlSnapshot('getAccounts_address_default', q.sql, q.params);
+});
+
+// ─── Account Signers SQL Snapshots (#454) ────────────────────────────────────
+
+test('SQL snapshot: getAccountSigners default query', async () => {
+  const { pool, getLastQuery } = fakePool();
+  const address = 'GBRPYHIL2CI537KXVHBV4Z6G7MXNGSQXN4F2XGJFFHJ3KJV3J4WKZQLQ';
+  await getAccountSigners(pool, 'mainnet', address);
+  const q = getLastQuery();
+  assert.doesNotMatch(q.sql, /mainnet/);
+  assert.ok(!q.sql.includes(address));
+  assert.match(q.sql, /\bnetwork = \$1\b/);
+  assert.doesNotMatch(q.sql, /\bOFFSET\b/i);
+  assert.deepEqual(q.params, ['mainnet', address]);
+  verifySqlSnapshot('getAccountSigners_default', q.sql, q.params);
 });
 
 // ─── Events By Contract SQL Snapshots ────────────────────────────────────────

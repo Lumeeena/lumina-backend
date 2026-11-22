@@ -1,4 +1,8 @@
 {
+  "getAccountSigners_default": {
+    "sql": "SELECT key, type, weight FROM account_signers WHERE network = $1 AND account_address = $2 ORDER BY weight DESC, key ASC",
+    "paramCount": 2
+  },
   "getAccounts_address_default": {
     "sql": "SELECT address, network, sequence, subentry_count, last_modified_ledger, num_sponsored, num_sponsoring, balances, flags, thresholds FROM accounts WHERE network = $1 ORDER BY address ASC LIMIT $2",
     "paramCount": 2
