@@ -10,6 +10,7 @@ import {
   getAccounts,
   getEventsByContract,
   getContractStorageEntries,
+  getTransactionByHash,
 } from './db';
 import { getOperationsByAsset, searchTransactions } from './search';
 import { getTopAccountsByActivity } from './topAccounts';
@@ -144,6 +145,20 @@ test('SQL snapshot: getTransactions ascending order', async () => {
   });
   const q = getLastQuery();
   verifySqlSnapshot('getTransactions_ascending', q.sql, q.params);
+});
+
+// ─── Transaction By Hash SQL Snapshots ───────────────────────────────────────
+
+test('SQL snapshot: getTransactionByHash', async () => {
+  const { pool, getLastQuery } = fakePool();
+  await getTransactionByHash(pool, 'mainnet', 'abc123hash');
+  const q = getLastQuery();
+  assert.match(q.sql, /network\s*=\s*\$1/);
+  assert.match(q.sql, /hash\s*=\s*\$2/);
+  assert.doesNotMatch(q.sql, /abc123hash/);
+  assert.doesNotMatch(q.sql, /OFFSET/i);
+  assert.deepEqual(q.params, ['mainnet', 'abc123hash']);
+  verifySqlSnapshot('getTransactionByHash_default', q.sql, q.params);
 });
 
 // ─── Operations SQL Snapshots ────────────────────────────────────────────────
