@@ -10,6 +10,7 @@ import {
   getAccounts,
   getEventsByContract,
   getContractStorageEntries,
+  getAccountAsOfLedgerFromDb,
 } from './db';
 import { getOperationsByAsset, searchTransactions } from './search';
 import { getTopAccountsByActivity } from './topAccounts';
@@ -394,4 +395,48 @@ test('SQL snapshot: getTopAccountsByActivity all time', async () => {
   assert.doesNotMatch(q.sql, /history_operations|history_trades/);
   assert.deepEqual(q.params, ['testnet', 10]);
   verifySqlSnapshot('getTopAccountsByActivity_all', q.sql, q.params);
+});
+
+// ─── Account As Of Ledger SQL Snapshots ──────────────────────────────────────
+
+test('SQL snapshot: getAccountAsOfLedgerFromDb default query', async () => {
+  const { pool, getLastQuery } = fakePool();
+  await getAccountAsOfLedgerFromDb(
+    pool,
+    'mainnet',
+    'GBRPYHIL2CI537KXVHBV4Z6G7MXNGSQXN4F2XGJFFHJ3KJV3J4WKZQLQ',
+    500000
+  );
+  const q = getLastQuery();
+  assert.match(q.sql, /network\s*=\s*\$1/);
+  assert.match(q.sql, /account_id\s*=\s*\$2/);
+  assert.match(q.sql, /ledger\s*<=\s*\$3/);
+  assert.doesNotMatch(q.sql, /OFFSET/i);
+  assert.deepEqual(q.params, [
+    'mainnet',
+    'GBRPYHIL2CI537KXVHBV4Z6G7MXNGSQXN4F2XGJFFHJ3KJV3J4WKZQLQ',
+    500000,
+  ]);
+  verifySqlSnapshot('getAccountAsOfLedgerFromDb_default', q.sql, q.params);
+});
+
+test('SQL snapshot: getAccountAsOfLedgerFromDb testnet', async () => {
+  const { pool, getLastQuery } = fakePool();
+  await getAccountAsOfLedgerFromDb(
+    pool,
+    'testnet',
+    'GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF',
+    1
+  );
+  const q = getLastQuery();
+  assert.match(q.sql, /network\s*=\s*\$1/);
+  assert.match(q.sql, /account_id\s*=\s*\$2/);
+  assert.match(q.sql, /ledger\s*<=\s*\$3/);
+  assert.doesNotMatch(q.sql, /OFFSET/i);
+  assert.deepEqual(q.params, [
+    'testnet',
+    'GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF',
+    1,
+  ]);
+  verifySqlSnapshot('getAccountAsOfLedgerFromDb_testnet', q.sql, q.params);
 });
