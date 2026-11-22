@@ -7,6 +7,7 @@ import {
   getTransactions,
   getOperations,
   getLedgers,
+  getLedgerBySequence,
   getAccounts,
   getEventsByContract,
   getContractStorageEntries,
@@ -214,6 +215,22 @@ test('SQL snapshot: getLedgers paginated backward', async () => {
   await getLedgers(pool, 'mainnet', 20, cursor, 'BACKWARD');
   const q = getLastQuery();
   verifySqlSnapshot('getLedgers_backward', q.sql, q.params);
+});
+
+test('SQL snapshot: getLedgerBySequence', async () => {
+  const { pool, getLastQuery } = fakePool();
+  await getLedgerBySequence(pool, 'mainnet', 500000);
+  const q = getLastQuery();
+  verifySqlSnapshot('getLedgerBySequence', q.sql, q.params);
+
+  // Values are bound, never interpolated into the statement.
+  assert.deepStrictEqual(q.params, [500000, 'mainnet']);
+  assert.ok(!q.sql.includes('500000'), 'sequence must be a bound parameter');
+  assert.ok(!q.sql.includes('mainnet'), 'network must be a bound parameter');
+  // The network scopes the lookup, so the same sequence on another network never matches.
+  assert.match(q.sql, /WHERE sequence = \$1 AND network = \$2/);
+  // A point lookup: no pagination at all.
+  assert.doesNotMatch(q.sql, /\bOFFSET\b/i);
 });
 
 // ─── Accounts SQL Snapshots ──────────────────────────────────────────────────
