@@ -13,6 +13,8 @@ import {
   getNetworkStats,
   getEventsByContract,
   getContractStorageEntries,
+  getActivityRollups,
+  getRollupConsistency,
 } from './db';
 import { getOperationsByAsset, searchTransactions } from './search';
 import { getTopAccountsByActivity } from './topAccounts';
@@ -47,15 +49,21 @@ after(() => {
   }
 });
 
-function fakePool(): { pool: Pool; getLastQuery: () => { sql: string; params: unknown[] } } {
+function fakePool(): {
+  pool: Pool;
+  getLastQuery: () => { sql: string; params: unknown[] };
+  getQueries: () => { sql: string; params: unknown[] }[];
+} {
+  const queries: { sql: string; params: unknown[] }[] = [];
   let lastQuery = { sql: '', params: [] as unknown[] };
   const pool = {
     query: async (sql: string, params: unknown[] = []) => {
       lastQuery = { sql: sql.replace(/\s+/g, ' ').trim(), params };
+      queries.push(lastQuery);
       return { rows: [] };
     },
   } as unknown as Pool;
-  return { pool, getLastQuery: () => lastQuery };
+  return { pool, getLastQuery: () => lastQuery, getQueries: () => queries };
 }
 
 function verifySqlSnapshot(testName: string, sql: string, params: unknown[]) {
