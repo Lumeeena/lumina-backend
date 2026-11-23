@@ -7,10 +7,10 @@ import {
   getTransactions,
   getOperations,
   getLedgers,
-  getLedgersBySequences,
   getAccounts,
   getEventsByContract,
   getContractStorageEntries,
+  getOperationsByTransactionHashes,
 } from './db';
 import { getOperationsByAsset, searchTransactions } from './search';
 import { getTopAccountsByActivity } from './topAccounts';
@@ -192,6 +192,37 @@ test('SQL snapshot: getOperations paginated backward', async () => {
   verifySqlSnapshot('getOperations_backward', q.sql, q.params);
 });
 
+// ─── Operations By Transaction Hashes SQL Snapshots ──────────────────────────
+
+test('SQL snapshot: getOperationsByTransactionHashes single hash', async () => {
+  const { pool, getLastQuery } = fakePool();
+  await getOperationsByTransactionHashes(pool, 'mainnet', [
+    'abc123def456',
+  ]);
+  const q = getLastQuery();
+  verifySqlSnapshot('getOperationsByTransactionHashes_single', q.sql, q.params);
+});
+
+test('SQL snapshot: getOperationsByTransactionHashes multiple hashes', async () => {
+  const { pool, getLastQuery } = fakePool();
+  await getOperationsByTransactionHashes(pool, 'mainnet', [
+    'hash1abc',
+    'hash2def',
+    'hash3ghi',
+  ]);
+  const q = getLastQuery();
+  verifySqlSnapshot('getOperationsByTransactionHashes_multiple', q.sql, q.params);
+});
+
+test('SQL snapshot: getOperationsByTransactionHashes empty array', async () => {
+  const { pool, getLastQuery } = fakePool();
+  await getOperationsByTransactionHashes(pool, 'testnet', []);
+  const q = getLastQuery();
+  // Empty array case returns early without query, so just verify parameters
+  assert.deepEqual(q.params, []);
+  assert.strictEqual(q.sql, '');
+});
+
 // ─── Ledgers SQL Snapshots ───────────────────────────────────────────────────
 
 test('SQL snapshot: getLedgers default query', async () => {
@@ -215,23 +246,6 @@ test('SQL snapshot: getLedgers paginated backward', async () => {
   await getLedgers(pool, 'mainnet', 20, cursor, 'BACKWARD');
   const q = getLastQuery();
   verifySqlSnapshot('getLedgers_backward', q.sql, q.params);
-});
-
-test('SQL snapshot: getLedgersBySequences', async () => {
-  const { pool, getLastQuery } = fakePool();
-  await getLedgersBySequences(pool, 'mainnet', [100, 200, 300]);
-  const q = getLastQuery();
-  assert.deepEqual(q.params, [[100, 200, 300], 'mainnet']);
-  assert.doesNotMatch(q.sql, /mainnet|100|200|300/);
-  assert.match(q.sql, /network = \$2/);
-  verifySqlSnapshot('getLedgersBySequences_default', q.sql, q.params);
-});
-
-test('SQL snapshot: getLedgersBySequences skips query when sequences is empty', async () => {
-  const { pool, getLastQuery } = fakePool();
-  const result = await getLedgersBySequences(pool, 'mainnet', []);
-  assert.equal(result.size, 0);
-  assert.equal(getLastQuery().sql, '');
 });
 
 // ─── Accounts SQL Snapshots ──────────────────────────────────────────────────

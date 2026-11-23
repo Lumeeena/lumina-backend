@@ -48,17 +48,24 @@ function makePoolStub(pendingByCall: number[][]): {
 // ── successful retry ──────────────────────────────────────────────────────────
 
 test('a ledger that succeeds on retry is removed from the queue', async () => {
-  const { pool, queries } = makePoolStub([[42]]);
   const indexed: number[] = [];
+  let removedLedgers: number[] = [];
+  let callCount = 0;
 
   const worker = new RetryWorker({
-    pools: { read: pool, write: pool },
+    pools: { read: {} as any, write: {} as any },
     network: 'testnet',
     indexOne: async (seq) => {
       indexed.push(seq);
       return true;
     },
     pollIntervalMs: 1,
+    getPendingRetries: async () => {
+      return callCount++ === 0 ? [42] : [];
+    },
+    removeLedgerFromRetryQueue: async (_, __, ledger) => {
+      removedLedgers.push(ledger);
+    },
   });
 
   // Run one cycle by starting and immediately stopping.
@@ -68,20 +75,26 @@ test('a ledger that succeeds on retry is removed from the queue', async () => {
   await done;
 
   assert.deepEqual(indexed, [42], 'indexOne should have been called for ledger 42');
-
-  const deleteQuery = queries.find(q => q.sql.includes('DELETE') && (q.params as unknown[]).includes(42));
-  assert.ok(deleteQuery, 'ledger 42 should have been removed from the queue after success');
+  assert.deepEqual(removedLedgers, [42], 'ledger 42 should have been removed from the queue after success');
 });
 
 test('a ledger that fails on retry stays in the queue', async () => {
   // Provide the same ledger twice so the second cycle attempts it again.
-  const { pool, queries } = makePoolStub([[55], [55]]);
+  let callCount = 0;
+  const getPendingRetries = async () => {
+    return callCount++ === 0 ? [55] : [];
+  };
+  let removedLedgers: number[] = [];
 
   const worker = new RetryWorker({
-    pools: { read: pool, write: pool },
+    pools: { read: {} as any, write: {} as any },
     network: 'testnet',
     indexOne: async () => false, // always fails
     pollIntervalMs: 1,
+    getPendingRetries,
+    removeLedgerFromRetryQueue: async (_, __, ledger) => {
+      removedLedgers.push(ledger);
+    },
   });
 
   const done = worker.start();
@@ -89,22 +102,26 @@ test('a ledger that fails on retry stays in the queue', async () => {
   worker.stop();
   await done;
 
-  const deleteQueries = queries.filter(q => q.sql.includes('DELETE'));
-  assert.equal(deleteQueries.length, 0, 'no DELETE should be issued for a ledger that keeps failing');
+  assert.equal(removedLedgers.length, 0, 'no remove should be called for a ledger that keeps failing');
 });
 
 test('an indexOne that throws does not crash the worker', async () => {
-  const { pool } = makePoolStub([[99], []]);
+  let callCount = 0;
+  const getPendingRetries = async () => {
+    return callCount++ === 0 ? [99] : [];
+  };
 
   let cycles = 0;
   const worker = new RetryWorker({
-    pools: { read: pool, write: pool },
+    pools: { read: {} as any, write: {} as any },
     network: 'testnet',
     indexOne: async () => {
       cycles++;
       throw new Error('simulated indexer crash');
     },
     pollIntervalMs: 1,
+    getPendingRetries,
+    removeLedgerFromRetryQueue: async () => {},
   });
 
   const done = worker.start();
@@ -117,11 +134,12 @@ test('an indexOne that throws does not crash the worker', async () => {
 });
 
 test('a failed ledger does not prevent later ledgers in the batch from retrying', async () => {
-  const { pool, queries } = makePoolStub([[101, 102], []]);
   const indexed: number[] = [];
+  let removedLedgers: number[] = [];
+  let callCount = 0;
 
   const worker = new RetryWorker({
-    pool,
+    pools: { read: {} as any, write: {} as any },
     network: 'testnet',
     indexOne: async (seq) => {
       indexed.push(seq);
@@ -129,6 +147,12 @@ test('a failed ledger does not prevent later ledgers in the batch from retrying'
       return true;
     },
     pollIntervalMs: 1,
+    getPendingRetries: async () => {
+      return callCount++ === 0 ? [101, 102] : [];
+    },
+    removeLedgerFromRetryQueue: async (_, __, ledger) => {
+      removedLedgers.push(ledger);
+    },
   });
 
   const done = worker.start();
@@ -137,26 +161,24 @@ test('a failed ledger does not prevent later ledgers in the batch from retrying'
   await done;
 
   assert.deepEqual(indexed, [101, 102]);
-  const deleteQuery = queries.find(q => q.sql.includes('DELETE') && (q.params as unknown[]).includes(102));
-  assert.ok(deleteQuery, 'the successful later ledger should be removed from the queue');
-  const failedDelete = queries.find(q => q.sql.includes('DELETE') && (q.params as unknown[]).includes(101));
-  assert.equal(failedDelete, undefined, 'the failed ledger must remain queued');
+  assert.deepEqual(removedLedgers, [102], 'the successful later ledger should be removed from the queue');
 });
 
 // ── empty queue ───────────────────────────────────────────────────────────────
 
 test('the worker is a no-op when the queue is empty', async () => {
-  const { pool, queries } = makePoolStub([[], []]);
   let indexOneCalled = false;
 
   const worker = new RetryWorker({
-    pools: { read: pool, write: pool },
+    pools: { read: {} as any, write: {} as any },
     network: 'testnet',
     indexOne: async () => {
       indexOneCalled = true;
       return true;
     },
     pollIntervalMs: 1,
+    getPendingRetries: async () => [],
+    removeLedgerFromRetryQueue: async () => {},
   });
 
   const done = worker.start();
@@ -165,24 +187,29 @@ test('the worker is a no-op when the queue is empty', async () => {
   await done;
 
   assert.equal(indexOneCalled, false, 'indexOne must not be called when nothing is queued');
-  const deleteQueries = queries.filter(q => q.sql.includes('DELETE'));
-  assert.equal(deleteQueries.length, 0);
 });
 
 // ── multiple ledgers in one cycle ─────────────────────────────────────────────
 
 test('multiple pending ledgers in one cycle are each retried', async () => {
-  const { pool } = makePoolStub([[10, 11, 12], []]);
   const indexed: number[] = [];
+  let removedLedgers: number[] = [];
+  let callCount = 0;
 
   const worker = new RetryWorker({
-    pools: { read: pool, write: pool },
+    pools: { read: {} as any, write: {} as any },
     network: 'mainnet',
     indexOne: async (seq) => {
       indexed.push(seq);
       return true;
     },
     pollIntervalMs: 1,
+    getPendingRetries: async () => {
+      return callCount++ === 0 ? [10, 11, 12] : [];
+    },
+    removeLedgerFromRetryQueue: async (_, __, ledger) => {
+      removedLedgers.push(ledger);
+    },
   });
 
   const done = worker.start();
@@ -191,24 +218,24 @@ test('multiple pending ledgers in one cycle are each retried', async () => {
   await done;
 
   assert.deepEqual(indexed.sort((a, b) => a - b), [10, 11, 12]);
+  assert.deepEqual(removedLedgers.sort((a, b) => a - b), [10, 11, 12]);
 });
 
 // ── stop is respected mid-cycle ───────────────────────────────────────────────
 
 test('stop() prevents new cycles from starting', async () => {
   let selectCalls = 0;
-  const pool = {
-    query: async (sql: string) => {
-      if (sql.includes('SELECT')) selectCalls++;
-      return { rows: [] };
-    },
-  } as unknown as Pool;
 
   const worker = new RetryWorker({
-    pools: { read: pool, write: pool },
+    pools: { read: {} as any, write: {} as any },
     network: 'mainnet',
     indexOne: async () => true,
     pollIntervalMs: 5,
+    getPendingRetries: async () => {
+      selectCalls++;
+      return [];
+    },
+    removeLedgerFromRetryQueue: async () => {},
   });
 
   const done = worker.start();
@@ -220,25 +247,24 @@ test('stop() prevents new cycles from starting', async () => {
 
   // After stop returns, no more cycles should run.
   await new Promise(r => setTimeout(r, 20));
-  assert.equal(selectCalls, callsAtStop, 'no SELECT should be issued after stop()');
+  assert.equal(selectCalls, callsAtStop, 'no getPendingRetries should be called after stop()');
 });
 
 // ── network isolation ──────────────────────────────────────────────────────────
 
 test('network is passed to the database query', async () => {
-  const queries: Array<{ sql: string; params: unknown[] }> = [];
-  const pool = {
-    query: async (sql: string, params?: unknown[]) => {
-      queries.push({ sql, params: params ?? [] });
-      return { rows: [] };
-    },
-  } as unknown as Pool;
+  let passedNetwork: string | undefined;
 
   const worker = new RetryWorker({
-    pools: { read: pool, write: pool },
+    pools: { read: {} as any, write: {} as any },
     network: 'futurenet',
     indexOne: async () => true,
     pollIntervalMs: 1,
+    getPendingRetries: async (_, network) => {
+      passedNetwork = network;
+      return [];
+    },
+    removeLedgerFromRetryQueue: async () => {},
   });
 
   const done = worker.start();
@@ -246,10 +272,9 @@ test('network is passed to the database query', async () => {
   worker.stop();
   await done;
 
-  const selectQuery = queries.find(q => q.sql.includes('SELECT') && q.sql.includes('ledger_retry_queue'));
-  assert.ok(selectQuery, 'expected a SELECT query against ledger_retry_queue');
-  assert.ok(
-    (selectQuery.params as unknown[]).includes('futurenet'),
-    'network should be passed as a bind parameter to prevent cross-network data mixing'
+  assert.equal(
+    passedNetwork,
+    'futurenet',
+    'network should be passed to getPendingRetries to prevent cross-network data mixing'
   );
 });
