@@ -168,9 +168,9 @@ test('SQL snapshot: getTransactionByHash', async () => {
   const { pool, getLastQuery } = fakePool();
   await getTransactionByHash(pool, 'mainnet', 'abc123hash');
   const q = getLastQuery();
-  assert.match(q.sql, /hash = \\$1 AND network = \\$2/);
+  assert.match(q.sql, /hash = \$1 AND network = \$2/);
   assert.doesNotMatch(q.sql, /abc123hash|mainnet/);
-  assert.doesNotMatch(q.sql, /\\bOFFSET\\b/i);
+  assert.doesNotMatch(q.sql, /\bOFFSET\b/i);
   assert.deepEqual(q.params, ['abc123hash', 'mainnet']);
   verifySqlSnapshot('getTransactionByHash_default', q.sql, q.params);
 });
