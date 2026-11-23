@@ -22,6 +22,10 @@
  * that regressed rather than only against plans that happened to work.
  */
 
+/**
+ * One node of a Postgres `EXPLAIN (FORMAT JSON)` plan, with only the fields
+ * this audit reads. Child nodes are listed under `Plans`.
+ */
 export interface PlanNode {
   'Node Type': string;
   'Relation Name'?: string;
@@ -38,6 +42,12 @@ export interface ScanRef {
   index: string | null;
 }
 
+/**
+ * A diff-stable summary of one query's plan: the hash of its SQL text, the
+ * indexes it reads, its sequential scans and sorts, and the rows it returned.
+ * The fields are chosen so that only a real change in access path or result
+ * size changes the signature, not planner noise.
+ */
 export interface PlanSignature {
   /** Hash of the statement text: catches an edit the plan shape survives. */
   sqlHash: string;
@@ -60,6 +70,7 @@ export interface PlanSignature {
   rowsReturned: number;
 }
 
+/** The kinds of change `diffSignatures` reports between a baseline and a current plan. */
 export type DeltaKind =
   | 'sql-changed'
   | 'index-lost'
@@ -70,6 +81,7 @@ export type DeltaKind =
   | 'sort-removed'
   | 'rows-changed';
 
+/** One change between a baseline and a current plan: its kind and a sentence describing it for the audit report. */
 export interface Delta {
   kind: DeltaKind;
   detail: string;

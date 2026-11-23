@@ -1,24 +1,49 @@
+/**
+ * API key storage for the GraphQL server: generating keys, storing only their
+ * hashes, and reading or changing the `api_keys` rows that the auth and export
+ * paths check.
+ *
+ * The plaintext key is shown to the operator once, at creation, and never
+ * stored. Every later lookup is by its SHA-256 hash (see `hashApiKey`). The
+ * functions that take an `identifier` accept either a numeric row id or a
+ * hash; see `getApiKey` for how the two are told apart.
+ */
 import crypto from 'crypto';
 import { Pool } from 'pg';
 
+/**
+ * A row of the `api_keys` table as this module reads it. Never contains the
+ * plaintext key, because the table has no column for it.
+ */
 export interface ApiKeyRecord {
   id: number;
+  /** SHA-256 hex digest of the plaintext key. This is the stored lookup value. */
   keyHash: string;
+  /** Display prefix, `deriveKeyPrefix` output (first 12 characters then `...`). */
   keyPrefix: string;
   label: string;
+  /** Requests per minute allowed for this key. */
   rateLimit: number;
   createdAt: Date;
+  /** Set when the key was revoked. Null while the key is active. */
   revokedAt: Date | null;
   updatedAt: Date;
 }
 
+/**
+ * Returned only by `createApiKey`. It is the one place the plaintext key exists
+ * after generation, and it is not recoverable from the database afterwards.
+ */
 export interface CreatedApiKey extends ApiKeyRecord {
+  /** The full `lum_…` key. Show it to the operator now; it cannot be shown again. */
   plaintextKey: string;
 }
 
 /**
  * Generates a cryptographically secure API key with the "lum_" prefix.
- * 32 bytes (256 bits) of randomness formatted as hex.
+ *
+ * The key is `lum_` followed by 32 random bytes (256 bits) in hex, 68 characters
+ * in total. Randomness comes from `crypto.randomBytes`.
  */
 export function generateApiKey(): string {
   const token = crypto.randomBytes(32).toString('hex');
@@ -26,14 +51,24 @@ export function generateApiKey(): string {
 }
 
 /**
- * Computes the deterministic SHA-256 hash of an API key for secure storage and comparison.
+ * Computes the SHA-256 hex digest of an API key, for storage and lookup.
+ *
+ * The input is trimmed of leading and trailing whitespace before hashing, so
+ * `hashApiKey(' key ')` equals `hashApiKey('key')`. Callers therefore never need
+ * to trim first, and a key pasted with a trailing newline still matches. Nothing
+ * else is normalised: case and interior characters are significant.
  */
 export function hashApiKey(key: string): string {
   return crypto.createHash('sha256').update(key.trim()).digest('hex');
 }
 
 /**
- * Derives a human-friendly prefix from a plaintext key or key hash for display in CLI listings.
+ * Derives the display prefix for a key: its first 12 characters followed by
+ * `...`, for example `lum_a1b2c3d4...`.
+ *
+ * The prefix is stored in `key_prefix` at creation so CLI listings can show a key
+ * without revealing it. It takes the plaintext key only. Passing a hash gives the
+ * first 12 hex characters of the hash, which is not a meaningful prefix.
  */
 export function deriveKeyPrefix(plaintextKey: string): string {
   // e.g. "lum_a1b2c3d4..."
@@ -41,7 +76,8 @@ export function deriveKeyPrefix(plaintextKey: string): string {
 }
 
 /**
- * Map raw database row to typed ApiKeyRecord.
+ * Maps a raw `api_keys` row to `ApiKeyRecord`. `revoked_at` is kept as null when
+ * the column is null, so callers can test `revokedAt === null` for "active".
  */
 function mapApiKeyRow(row: Record<string, unknown>): ApiKeyRecord {
   return {
@@ -57,9 +93,16 @@ function mapApiKeyRow(row: Record<string, unknown>): ApiKeyRecord {
 }
 
 /**
- * Create a new API key.
+ * Creates a new active API key and inserts its hash, prefix and label.
+ *
+ * The label is trimmed and must not be empty afterwards. `rateLimit` must be a
+ * positive integer, in requests per minute. The default of 60 applies when the
+ * argument is omitted. The source does not record why 60 was chosen.
+ *
  * The plaintext key is returned in the result and must be displayed immediately,
  * because only its cryptographic hash is stored in the database.
+ *
+ * @throws if the label is blank or the rate limit is not a positive integer.
  */
 export async function createApiKey(
   pool: Pool,
@@ -94,8 +137,11 @@ export async function createApiKey(
 }
 
 /**
- * List all API keys in the database ordered by creation date descending.
- * Does NOT contain plaintext keys (as they are not stored).
+ * Lists every API key, revoked ones included, newest first.
+ *
+ * Ordered by `created_at` descending, with `id` descending as the tie-break.
+ * Returns hashes and metadata only. Plaintext keys are not stored, so they
+ * cannot be listed.
  */
 export async function listApiKeys(pool: Pool): Promise<ApiKeyRecord[]> {
   const query = `
@@ -108,7 +154,16 @@ export async function listApiKeys(pool: Pool): Promise<ApiKeyRecord[]> {
 }
 
 /**
- * Retrieve metadata for a single key by ID or hash.
+ * Retrieves metadata for one key, by row id or by hash.
+ *
+ * The identifier is treated as a row id when it is a number or a string of
+ * digits (after trimming). Anything else is treated as a hash. A hash that
+ * happens to be all digits is therefore looked up as an id and will not match;
+ * `findApiKeyByHash` exists for callers that already hold a hash.
+ *
+ * Revoked keys are returned, with `revokedAt` set.
+ *
+ * @returns The record, or `null` if no row matches.
  */
 export async function getApiKey(
   pool: Pool,
@@ -142,6 +197,7 @@ export async function getApiKey(
  * digits, in which case the guess would silently look up an id and miss.
  */
 export async function findApiKeyByHash(pool: Pool, keyHash: string): Promise<ApiKeyRecord | null> {
+  // The hash is passed through unmodified. It is not trimmed or case-folded.
   const query = `
     SELECT id, key_hash, key_prefix, label, rate_limit, created_at, revoked_at, updated_at
     FROM api_keys
@@ -154,7 +210,13 @@ export async function findApiKeyByHash(pool: Pool, keyHash: string): Promise<Api
 }
 
 /**
- * Revoke an API key by setting its revoked_at timestamp.
+ * Revokes an API key by setting `revoked_at` to now.
+ *
+ * Identifier rules match `getApiKey`. Revoking an already-revoked key succeeds
+ * and overwrites `revoked_at` with the new time, so the original revocation time
+ * is lost.
+ *
+ * @throws `API key not found` if no row matches.
  */
 export async function revokeApiKey(
   pool: Pool,
@@ -183,7 +245,14 @@ export async function revokeApiKey(
 }
 
 /**
- * Set a new rate limit (requests per minute) for an API key.
+ * Sets a new rate limit, in requests per minute, for an API key.
+ *
+ * Identifier rules match `getApiKey`. The limit is validated before the database
+ * is touched, so an invalid value never issues a query. Revoked keys can be
+ * updated too.
+ *
+ * @throws if `newLimit` is not a positive integer, or `API key not found` if no
+ *   row matches.
  */
 export async function setApiKeyLimit(
   pool: Pool,
@@ -216,6 +285,20 @@ export async function setApiKeyLimit(
   return mapApiKeyRow(res.rows[0]);
 }
 
+/**
+ * Turns the export permission for an API key on or off by setting `export_enabled`.
+ *
+ * This is separate from revocation. The export check in `export.ts` requires both
+ * `revoked_at IS NULL` and `export_enabled = TRUE`, so a revoked key cannot export
+ * whatever this flag says, and an active key cannot export while this flag is off.
+ * This function does not check `revoked_at`, so it can change the flag on a
+ * revoked key.
+ *
+ * Identifier rules match `getApiKey`. The update is a single statement, and the
+ * function requires it to match exactly one row.
+ *
+ * @throws `API key not found` if no row matches.
+ */
 export async function setApiKeyExportPermission(pool: Pool, identifier: number | string, enabled: boolean): Promise<void> {
   const numeric = typeof identifier === 'number' || /^\d+$/.test(String(identifier).trim());
   const result = numeric

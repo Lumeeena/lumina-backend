@@ -9,6 +9,7 @@ import {
   getApiKey,
   revokeApiKey,
   setApiKeyLimit,
+  setApiKeyExportPermission,
 } from './keys';
 import { runCli, parsePositiveInteger } from './manageKeys';
 
@@ -201,6 +202,28 @@ describe('API Keys — DB Operations', () => {
     await assert.rejects(
       async () => setApiKeyLimit(pool, 4, -10),
       /Rate limit must be a positive integer/
+    );
+  });
+
+  it('setApiKeyExportPermission picks the id or hash branch and rejects unknown keys', async () => {
+    // This flag is the switch the export endpoint checks, so the branch chosen for
+    // each identifier shape and the not-found failure are pinned here.
+    const byId = createMockPool([{ id: 7 }]);
+    await setApiKeyExportPermission(byId, '7', true);
+    assert.match(byId.queries[0].sql, /SET export_enabled = \$2/);
+    assert.match(byId.queries[0].sql, /WHERE id = \$1/);
+    assert.deepEqual(byId.queries[0].params, ['7', true]);
+
+    const hash = 'a'.repeat(64);
+    const byHash = createMockPool([{ id: 8 }]);
+    await setApiKeyExportPermission(byHash, hash, false);
+    assert.match(byHash.queries[0].sql, /WHERE key_hash = \$1/);
+    assert.deepEqual(byHash.queries[0].params, [hash, false]);
+
+    const missing = createMockPool([]);
+    await assert.rejects(
+      async () => setApiKeyExportPermission(missing, 9, true),
+      /API key not found: 9/
     );
   });
 });

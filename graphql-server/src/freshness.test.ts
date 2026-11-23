@@ -75,6 +75,20 @@ test('an unreachable Horizon is an answer, not an error', async () => {
   assert.equal(report.stale, true);
 });
 
+test('a Horizon read that returns no ledger is unknown, not zero', async () => {
+  // A resolved null is a different path from a rejected read: the `?.` in
+  // getIndexerStatus must turn it into an unknown lag, not a lag of the full tip.
+  const report = await getIndexerStatus(poolWithTip(900), MAINNET, {
+    readHorizonLedger: async () => null,
+    now: () => NOW,
+  });
+
+  assert.equal(report.latestIndexedLedger, 900);
+  assert.equal(report.horizonLedger, null);
+  assert.equal(report.lagLedgers, null);
+  assert.equal(report.stale, true);
+});
+
 test('an unreachable database is an answer, not an error', async () => {
   const failing = {
     query: async () => {
