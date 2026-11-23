@@ -285,10 +285,10 @@ test('SQL snapshot: getAccountLifecycle default query', async () => {
   const q = getLastQuery();
   assert.deepEqual(q.params, ['mainnet', JSON.stringify({ account: address }), 20]);
   assert.doesNotMatch(q.sql, /mainnet|GBRPYHIL/);
-  assert.match(q.sql, /WHERE network = \\$1 AND type IN \\('create_account', 'account_merge'\\)/);
-  assert.match(q.sql, /details @> \\$2::jsonb/);
-  assert.match(q.sql, /ORDER BY ledger DESC, id DESC LIMIT \\$3/);
-  assert.doesNotMatch(q.sql, /\\bOFFSET\\b/i);
+  assert.match(q.sql, /WHERE network = \$1 AND type IN \('create_account', 'account_merge'\)/);
+  assert.match(q.sql, /details @> \$2::jsonb/);
+  assert.match(q.sql, /ORDER BY ledger DESC, id DESC LIMIT \$3/);
+  assert.doesNotMatch(q.sql, /\bOFFSET\b/i);
   verifySqlSnapshot('getAccountLifecycle_default', q.sql, q.params);
 });
 
@@ -300,11 +300,11 @@ test('SQL snapshot: getAccountLifecycle paginated forward', async () => {
   const q = getLastQuery();
   assert.deepEqual(q.params, ['mainnet', JSON.stringify({ account: address }), 500000, 'operation-123', 20]);
   assert.doesNotMatch(q.sql, /mainnet|GBRPYHIL|500000|operation-123/);
-  assert.match(q.sql, /WHERE network = \\$1 AND type IN \\('create_account', 'account_merge'\\)/);
-  assert.match(q.sql, /details @> \\$2::jsonb/);
-  assert.match(q.sql, /\\(ledger, id\\) < \\(\\$3::bigint, \\$4::text\\)/);
-  assert.match(q.sql, /ORDER BY ledger DESC, id DESC LIMIT \\$5/);
-  assert.doesNotMatch(q.sql, /\\bOFFSET\\b/i);
+  assert.match(q.sql, /WHERE network = \$1 AND type IN \('create_account', 'account_merge'\)/);
+  assert.match(q.sql, /details @> \$2::jsonb/);
+  assert.match(q.sql, /\(ledger, id\) < \(\$3::bigint, \$4::text\)/);
+  assert.match(q.sql, /ORDER BY ledger DESC, id DESC LIMIT \$5/);
+  assert.doesNotMatch(q.sql, /\bOFFSET\b/i);
   verifySqlSnapshot('getAccountLifecycle_forward', q.sql, q.params);
 });
 
