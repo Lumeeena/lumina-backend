@@ -10,6 +10,7 @@ import {
   getAccounts,
   getEventsByContract,
   getContractStorageEntries,
+  getOperationsByTransactionHashes,
 } from './db';
 import { getOperationsByAsset, searchTransactions } from './search';
 import { getTopAccountsByActivity } from './topAccounts';
@@ -189,6 +190,37 @@ test('SQL snapshot: getOperations paginated backward', async () => {
   });
   const q = getLastQuery();
   verifySqlSnapshot('getOperations_backward', q.sql, q.params);
+});
+
+// ─── Operations By Transaction Hashes SQL Snapshots ──────────────────────────
+
+test('SQL snapshot: getOperationsByTransactionHashes single hash', async () => {
+  const { pool, getLastQuery } = fakePool();
+  await getOperationsByTransactionHashes(pool, 'mainnet', [
+    'abc123def456',
+  ]);
+  const q = getLastQuery();
+  verifySqlSnapshot('getOperationsByTransactionHashes_single', q.sql, q.params);
+});
+
+test('SQL snapshot: getOperationsByTransactionHashes multiple hashes', async () => {
+  const { pool, getLastQuery } = fakePool();
+  await getOperationsByTransactionHashes(pool, 'mainnet', [
+    'hash1abc',
+    'hash2def',
+    'hash3ghi',
+  ]);
+  const q = getLastQuery();
+  verifySqlSnapshot('getOperationsByTransactionHashes_multiple', q.sql, q.params);
+});
+
+test('SQL snapshot: getOperationsByTransactionHashes empty array', async () => {
+  const { pool, getLastQuery } = fakePool();
+  await getOperationsByTransactionHashes(pool, 'testnet', []);
+  const q = getLastQuery();
+  // Empty array case returns early without query, so just verify parameters
+  assert.deepEqual(q.params, []);
+  assert.strictEqual(q.sql, '');
 });
 
 // ─── Ledgers SQL Snapshots ───────────────────────────────────────────────────
