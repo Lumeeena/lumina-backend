@@ -1,5 +1,9 @@
 /**
- * Asset detail in one call: supply, holder count and a bucketed volume series.
+ * Asset detail and directory queries:
+ * - **Detail (`getAssetDetail`)**: supply, holder count, and a bucketed volume series in one call.
+ * - **Directory (`getAssets`, `getAssetByKey`)**: keyset-paginated browsing by holder count or
+ *   7-day volume, plus single-asset lookup from the pre-aggregated `assets` and
+ *   `asset_volume_buckets` tables.
  *
  * ## How supply is derived
  *
@@ -44,15 +48,31 @@ export class AssetError extends InvalidInputError {
   }
 }
 
-/** Daily buckets when the client passes no `bucketSeconds`. */
+/**
+ * Daily buckets (86,400s) when the client omits `bucketSeconds`.
+ * Pairs with `DEFAULT_RANGE_DAYS` (30) to yield ~30 data points by default,
+ * balancing chart readability with `generate_series` / join cost.
+ */
 export const DEFAULT_BUCKET_SECONDS = 86400;
-/** Trailing window when the client passes no `from`/`to`. */
+/**
+ * Trailing 30-day window when the client omits `from`/`to`.
+ * Provides a meaningful recent trend without scanning unbounded operation history.
+ */
 export const DEFAULT_RANGE_DAYS = 30;
-/** Below this a bucket is noise and the series explodes; reject it. */
+/**
+ * Minimum allowed bucket width (60s).
+ * Sub-minute buckets are mostly noise against ~5s ledger close times and would
+ * quickly hit `MAX_BUCKETS` even over short time ranges.
+ */
 export const MIN_BUCKET_SECONDS = 60;
-/** Upper bound on buckets per call so one detail page cannot fan out. */
+/**
+ * Upper bound on buckets per detail query (1,000).
+ * Caps `generate_series` output and GraphQL response size so a single call
+ * cannot fan out into tens of thousands of rows.
+ */
 export const MAX_BUCKETS = 1000;
 
+/** Input parameters for `getAssetDetail`. */
 export interface AssetDetailQuery {
   /** Network whose holders and volume to count. */
   network: string;
@@ -62,12 +82,14 @@ export interface AssetDetailQuery {
   bucketSeconds?: number | null;
 }
 
+/** Validated, concrete time bounds and bucket width produced by `resolveRange`. */
 export interface ResolvedRange {
   start: Date;
   end: Date;
   bucketSeconds: number;
 }
 
+/** Single time-bucketed volume point returned in `AssetDetail.series`. */
 export interface VolumeBucket {
   bucketStart: string;
   bucketEnd: string;
@@ -75,6 +97,7 @@ export interface VolumeBucket {
   operationCount: number;
 }
 
+/** Combined supply, holder count, and volume series returned by `getAssetDetail`. */
 export interface AssetDetail {
   asset: string;
   code: string | null;
@@ -157,6 +180,12 @@ export function balanceConditions(asset: ParsedAsset, params: unknown[]): string
   return `((b->>'asset_code' = ${code} AND b->>'asset_issuer' = ${issuer}) AND (b->>'balance')::numeric > 0)`;
 }
 
+/**
+ * Compute current holder count and total gross supply for `asset` on `network`
+ * from `accounts.balances`, excluding zero-balance trustlines.
+ * Returns `{ supply: '0', holders: 0 }` when no matching balances exist;
+ * `supply` is returned as a decimal string to preserve `numeric` precision.
+ */
 export async function getAssetSupply(
   pool: Pool,
   network: string,
@@ -176,6 +205,12 @@ export async function getAssetSupply(
   };
 }
 
+/**
+ * Query a zero-filled, ascending time series of operation volume and count for
+ * `asset` over `range`. Uses `generate_series` left-joined to `operations` via
+ * `assetConditions` and ignores non-numeric `details->>'amount'` values when
+ * summing volume.
+ */
 export async function getAssetVolumeSeries(
   pool: Pool,
   network: string,
@@ -248,6 +283,7 @@ export async function getAssetDetail(pool: Pool, query: AssetDetailQuery): Promi
 
 // ─── Assets browsing (Issue #74) ─────────────────────────────────────────────
 
+/** Filter, sort, and keyset-pagination parameters for `getAssets`. */
 export interface AssetsQuery {
   network: string;
   sortBy?: 'HOLDERS' | 'VOLUME';
@@ -256,6 +292,7 @@ export interface AssetsQuery {
   cursor?: string | null;
 }
 
+/** Indexed issued-asset summary returned by `getAssets` and `getAssetByKey`. */
 export interface Asset {
   code: string;
   issuer: string;
@@ -268,11 +305,13 @@ export interface Asset {
   isLookalike?: boolean;
 }
 
+/** Forward-pagination metadata for `AssetPage`. */
 export interface AssetPageInfo {
   hasNextPage: boolean;
   cursor: string | null;
 }
 
+/** Paginated list of assets returned by `getAssets`. */
 export interface AssetPage {
   items: Asset[];
   pageInfo: AssetPageInfo;
@@ -310,7 +349,8 @@ function encodeCursor(value: string | number, code: string, issuer: string): str
 }
 
 /**
- * Get a single asset by code and issuer.
+ * Get a single asset by code and issuer on `network`, including its trailing
+ * 7-day volume from `asset_volume_buckets`. Returns `null` if not indexed.
  */
 export async function getAssetByKey(
   pool: Pool,
@@ -356,8 +396,11 @@ export async function getAssetByKey(
 }
 
 /**
- * Browse assets with keyset pagination.
- * Sorted by holder count (descending) or recent volume (descending).
+ * Browse assets with keyset pagination, sorted by holder count (default) or
+ * trailing 7-day volume (descending), with `(asset_code, asset_issuer)` ascending
+ * tie-breakers. Defaults to `limit = 20` and fetches `limit + 1` rows to
+ * determine `hasNextPage` without a separate `COUNT(*)` query. Throws
+ * `AssetError` on malformed cursors (`"value|code|issuer"`).
  */
 export async function getAssets(pool: Pool, query: AssetsQuery): Promise<AssetPage> {
   const limit = query.limit ?? 20;

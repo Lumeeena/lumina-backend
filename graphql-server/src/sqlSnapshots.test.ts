@@ -12,8 +12,13 @@ import {
   getOperations,
   getLedgers,
   getAccounts,
+  getAccountSigners,
+  getSponsoredAccounts,
+  getContractDeployment,
   getEventsByContract,
   getContractStorageEntries,
+  getActivityRollups,
+  getRollupConsistency,
 } from './db';
 import { getOperationsByAsset, searchTransactions } from './search';
 import { getTopAccountsByActivity } from './topAccounts';
@@ -48,15 +53,21 @@ after(() => {
   }
 });
 
-function fakePool(): { pool: Pool; getLastQuery: () => { sql: string; params: unknown[] } } {
+function fakePool(): {
+  pool: Pool;
+  getLastQuery: () => { sql: string; params: unknown[] };
+  getQueries: () => { sql: string; params: unknown[] }[];
+} {
+  const queries: { sql: string; params: unknown[] }[] = [];
   let lastQuery = { sql: '', params: [] as unknown[] };
   const pool = {
     query: async (sql: string, params: unknown[] = []) => {
       lastQuery = { sql: sql.replace(/\s+/g, ' ').trim(), params };
+      queries.push(lastQuery);
       return { rows: [] };
     },
   } as unknown as Pool;
-  return { pool, getLastQuery: () => lastQuery };
+  return { pool, getLastQuery: () => lastQuery, getQueries: () => queries };
 }
 
 function verifySqlSnapshot(testName: string, sql: string, params: unknown[]) {
@@ -262,6 +273,52 @@ test('SQL snapshot: getAccounts address order default', async () => {
   await getAccounts(pool, { network: 'mainnet', limit: 20, orderBy: 'ADDRESS' });
   const q = getLastQuery();
   verifySqlSnapshot('getAccounts_address_default', q.sql, q.params);
+});
+
+// ─── Account Signers SQL Snapshots (#454) ────────────────────────────────────
+
+test('SQL snapshot: getAccountSigners default query', async () => {
+  const { pool, getLastQuery } = fakePool();
+  const address = 'GBRPYHIL2CI537KXVHBV4Z6G7MXNGSQXN4F2XGJFFHJ3KJV3J4WKZQLQ';
+  await getAccountSigners(pool, 'mainnet', address);
+  const q = getLastQuery();
+  assert.doesNotMatch(q.sql, /mainnet/);
+  assert.ok(!q.sql.includes(address));
+  assert.match(q.sql, /\bnetwork = \$1\b/);
+  assert.doesNotMatch(q.sql, /\bOFFSET\b/i);
+  assert.deepEqual(q.params, ['mainnet', address]);
+  verifySqlSnapshot('getAccountSigners_default', q.sql, q.params);
+});
+
+// ─── Sponsored Accounts SQL Snapshots (#455) ─────────────────────────────────
+
+test('SQL snapshot: getSponsoredAccounts default query', async () => {
+  const { pool, getLastQuery } = fakePool();
+  const sponsor = 'GBRPYHIL2CI537KXVHBV4Z6G7MXNGSQXN4F2XGJFFHJ3KJV3J4WKZQLQ';
+  await getSponsoredAccounts(pool, 'mainnet', sponsor, 20);
+  const q = getLastQuery();
+  assert.doesNotMatch(q.sql, /mainnet/);
+  assert.ok(!q.sql.includes(sponsor));
+  assert.match(q.sql, /\bs\.network = a\.network\b/);
+  assert.match(q.sql, /\bs\.network = \$2\b/);
+  assert.doesNotMatch(q.sql, /\bOFFSET\b/i);
+  assert.deepEqual(q.params, [sponsor, 'mainnet', 20]);
+  verifySqlSnapshot('getSponsoredAccounts_default', q.sql, q.params);
+});
+
+// ─── Contract Deployment SQL Snapshots (#456) ────────────────────────────────
+
+test('SQL snapshot: getContractDeployment default query', async () => {
+  const { pool, getLastQuery } = fakePool();
+  const contractId = 'CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC';
+  await getContractDeployment(pool, 'mainnet', contractId);
+  const q = getLastQuery();
+  assert.doesNotMatch(q.sql, /mainnet/);
+  assert.ok(!q.sql.includes(contractId));
+  assert.match(q.sql, /\bnetwork = \$1\b/);
+  assert.doesNotMatch(q.sql, /\bOFFSET\b/i);
+  assert.deepEqual(q.params, ['mainnet', contractId]);
+  verifySqlSnapshot('getContractDeployment_default', q.sql, q.params);
 });
 
 // ─── Events By Contract SQL Snapshots ────────────────────────────────────────

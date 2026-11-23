@@ -8,7 +8,8 @@
  * false result or thrown error leaves it available for a future poll.
  */
 
-import { getPendingRetries, removeLedgerFromRetryQueue, type Pools } from './db';
+import type { Pool } from 'pg';
+import type { Pools } from './db';
 import { subsystem } from './logger';
 
 const log = subsystem('retry-worker');
@@ -22,6 +23,16 @@ export interface RetryWorkerOptions {
   indexOne: (sequence: number) => Promise<boolean>;
   /** Delay between queue polls. Defaults to the 30-second production cadence. */
   pollIntervalMs?: number;
+  /**
+   * Optional function to get pending retries from the database.
+   * If not provided, the function from db.ts will be used (may have ESM issues in tests).
+   */
+  getPendingRetries?: (pool: Pool, network: string, limit: number) => Promise<number[]>;
+  /**
+   * Optional function to remove a ledger from the retry queue.
+   * If not provided, the function from db.ts will be used (may have ESM issues in tests).
+   */
+  removeLedgerFromRetryQueue?: (pool: Pool, network: string, ledger: number) => Promise<void>;
 }
 
 export class RetryWorker {
@@ -31,6 +42,8 @@ export class RetryWorker {
   private pollIntervalMs: number;
   private running = false;
   private stopped = false;
+  private getPendingRetries: (pool: Pool, network: string, limit: number) => Promise<number[]>;
+  private removeLedgerFromRetryQueue: (pool: Pool, network: string, ledger: number) => Promise<void>;
 
   constructor(options: RetryWorkerOptions) {
     this.pools = options.pools;
@@ -39,6 +52,11 @@ export class RetryWorker {
     // The production caller uses the same 30-second cadence explicitly. The
     // default keeps direct users of this worker on that operational policy.
     this.pollIntervalMs = options.pollIntervalMs ?? 30000;
+
+    // If the functions are provided (e.g., from tests), use them directly.
+    // Otherwise, they will be loaded lazily when first needed.
+    this.getPendingRetries = options.getPendingRetries as any;
+    this.removeLedgerFromRetryQueue = options.removeLedgerFromRetryQueue as any;
   }
 
   /**
@@ -81,11 +99,19 @@ export class RetryWorker {
 
   /** Process at most ten due ledgers, preserving queue rows on failure. */
   private async processRetries(): Promise<void> {
+    // Lazy import to avoid loading db.ts (which has ESM issues) at module load time,
+    // but only if the functions weren't provided by the caller (e.g., tests).
+    if (!this.getPendingRetries || !this.removeLedgerFromRetryQueue) {
+      const dbModule = await import('./db');
+      if (!this.getPendingRetries) this.getPendingRetries = dbModule.getPendingRetries;
+      if (!this.removeLedgerFromRetryQueue) this.removeLedgerFromRetryQueue = dbModule.removeLedgerFromRetryQueue;
+    }
+
     // Ten rows per pass bounds the work done by one cycle while allowing the
     // next poll to continue draining a larger backlog. Queue reads run on the
     // read pool: a backlog scan must not take a connection from the write
     // path, which is about to re-index these very ledgers.
-    const pendingLedgers = await getPendingRetries(this.pools.read, this.network, 10);
+    const pendingLedgers = await this.getPendingRetries(this.pools.read, this.network, 10);
 
     if (pendingLedgers.length === 0) return;
 
@@ -100,7 +126,7 @@ export class RetryWorker {
       try {
         const success = await this.indexOne(ledger);
         if (success) {
-          await removeLedgerFromRetryQueue(this.pools.write, this.network, ledger);
+          await this.removeLedgerFromRetryQueue(this.pools.write, this.network, ledger);
           log.info({ network: this.network, ledger }, 'retry succeeded; removed from queue');
         }
       } catch (err) {
