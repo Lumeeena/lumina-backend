@@ -24,6 +24,12 @@ import type { LedgerNotifier } from './pubsub';
 import { subsystem } from './logger';
 import { createExtendedSubscriptionResolvers } from './subscriptionsExtended';
 
+/**
+ * Context provided to GraphQL Subscription resolvers for live WebSocket connections.
+ * Contains the PostgreSQL connection pool for querying ledger contents on arrival,
+ * the network registry for multi-chain routing, the pub/sub LedgerNotifier emitting
+ * ledger landing events, and an optional subsystem logger.
+ */
 export interface SubscriptionContext {
   pool: Pool;
   /**

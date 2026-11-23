@@ -301,3 +301,54 @@ test('resolve passes the payload straight through', () => {
   assert.equal(resolvers.newTransaction.resolve(tx), tx);
   assert.equal(resolvers.accountActivity.resolve(tx), tx);
 });
+
+test('failed ledger load logs warning with detail to ctx.requestLogger', async () => {
+  const { notifier, push } = fakeNotifier();
+  const warnings: Array<{ message: string; detail?: any }> = [];
+  const mockLogger = {
+    warn: (message: string, detail?: any) => warnings.push({ message, detail }),
+  };
+
+  let first = true;
+  const pool = {
+    query: async () => {
+      if (first) {
+        first = false;
+        throw new Error('database connection timeout');
+      }
+      return { rows: [txRow('tx_healthy')] };
+    },
+  } as unknown as Pool;
+
+  const stream = resolvers.newTransaction.subscribe(
+    {},
+    {},
+    { pool, notifier, requestLogger: mockLogger } as unknown as SubscriptionContext
+  );
+
+  push({ kind: 'ledger', ledger: 888 });
+  push({ kind: 'ledger', ledger: 889 });
+
+  const result = (await take(stream, 1)) as { hash: string }[];
+  assert.equal(result.length, 1);
+  assert.equal(result[0].hash, 'tx_healthy');
+  assert.equal(warnings.length, 1);
+  assert.equal(warnings[0].message, 'subscription failed to read ledger');
+  assert.match(warnings[0].detail?.error, /database connection timeout/);
+});
+
+test('non-ledger notification kind is ignored by expandLedgers and performs no database query', async () => {
+  const { notifier, push } = fakeNotifier();
+  const { pool, calls } = fakePool(() => [txRow('tx_real_ledger')]);
+
+  const stream = resolvers.newTransaction.subscribe({}, {}, { pool, notifier } as SubscriptionContext);
+  push({ kind: 'custom_notification', ledger: 999 } as any);
+  push({ kind: 'ledger', ledger: 1000 });
+
+  const result = (await take(stream, 1)) as { hash: string }[];
+  assert.equal(result.length, 1);
+  assert.equal(result[0].hash, 'tx_real_ledger');
+  assert.equal(calls.length, 1, 'database should only be queried for the real ledger notification');
+  assert.deepEqual(calls[0].params, [1000, 'mainnet']);
+});
+

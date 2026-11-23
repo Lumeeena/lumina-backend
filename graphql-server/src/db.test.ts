@@ -12,15 +12,19 @@ import {
   getLedgerCoverage,
   getOperations,
   getTransactions,
+  getTransactionsByHashes,
+  getLedgersBySequences,
+  getTableCountEstimateOrExact,
   handlePoolErrors,
   mapAccount,
   mapEvent,
   mapLedger,
   mapOperation,
   mapTransaction,
+  mapContractStorageEntry,
   type AccountOrder,
 } from './db';
-import { encodeCursor, InvalidCursorError } from './pagination';
+import { encodeCursor, InvalidCursorError, CountPrecision } from './pagination';
 
 function fakePool(rows: unknown[]): { pool: Pool; queries: { sql: string; params: unknown[] }[] } {
   const queries: { sql: string; params: unknown[] }[] = [];
@@ -528,3 +532,126 @@ test('handlePoolErrors covers a client whose connection dies while it is checked
   assert.doesNotThrow(() => client.emit('error', new Error('Connection terminated unexpectedly')));
   await pool.end();
 });
+
+test('getTableCountEstimateOrExact returns exact count for ledgers table', async () => {
+  const { pool, queries } = fakePool([{ count: '1250' }]);
+  const result = await getTableCountEstimateOrExact(pool, 'ledgers', 'mainnet');
+
+  assert.equal(result.value, 1250);
+  assert.equal(result.precision, CountPrecision.EXACT);
+  assert.equal(result.isEstimate, false);
+  assert.match(queries[0].sql, /SELECT COUNT\(\*\)::bigint AS count FROM ledgers WHERE network = \$1/);
+});
+
+test('getTableCountEstimateOrExact returns exact count when reltuples is below affordableThreshold', async () => {
+  const queries: { sql: string; params: unknown[] }[] = [];
+  const pool = {
+    query: async (sql: string, params: unknown[] = []) => {
+      queries.push({ sql, params });
+      if (sql.includes('pg_class')) {
+        return { rows: [{ reltuples: '3500' }] };
+      }
+      return { rows: [{ count: '3480' }] };
+    },
+  } as unknown as Pool;
+
+  const result = await getTableCountEstimateOrExact(pool, 'contracts', 'testnet');
+
+  assert.equal(result.value, 3480);
+  assert.equal(result.precision, CountPrecision.EXACT);
+  assert.equal(result.isEstimate, false);
+  assert.equal(queries.length, 2, 'should query pg_class first then execute exact COUNT(*)');
+});
+
+test('getTableCountEstimateOrExact returns reltuples estimate when row count exceeds affordableThreshold', async () => {
+  const queries: { sql: string; params: unknown[] }[] = [];
+  const pool = {
+    query: async (sql: string, params: unknown[] = []) => {
+      queries.push({ sql, params });
+      return { rows: [{ reltuples: '250000' }] };
+    },
+  } as unknown as Pool;
+
+  const result = await getTableCountEstimateOrExact(pool, 'transactions', 'mainnet');
+
+  assert.equal(result.value, 250000);
+  assert.equal(result.precision, CountPrecision.ESTIMATE);
+  assert.equal(result.isEstimate, true);
+  assert.equal(queries.length, 1, 'should only query pg_class and skip expensive COUNT(*) scan');
+});
+
+test('getTableCountEstimateOrExact returns exact count when custom whereClause is provided', async () => {
+  const { pool, queries } = fakePool([{ count: '42' }]);
+  const result = await getTableCountEstimateOrExact(pool, 'transactions', 'mainnet', {
+    whereClause: 'network = $1 AND successful = true',
+    params: ['mainnet'],
+  });
+
+  assert.equal(result.value, 42);
+  assert.equal(result.precision, CountPrecision.EXACT);
+  assert.equal(result.isEstimate, false);
+  assert.match(queries[0].sql, /WHERE network = \$1 AND successful = true/);
+});
+
+test('getTransactionsByHashes binds hashes and network using ANY operator', async () => {
+  const { pool, queries } = fakePool([
+    {
+      hash: 'hash_1',
+      network: 'mainnet',
+      ledger: 100,
+      created_at: new Date('2026-01-01T00:00:00Z'),
+      source_account: 'GABC',
+      fee_charged: '100',
+      operation_count: 1,
+      successful: true,
+      memo_type: 'none',
+      memo: null,
+    },
+  ]);
+
+  const results = await getTransactionsByHashes(pool, 'mainnet', ['hash_1', 'hash_2']);
+  assert.equal(results.size, 1);
+  assert.equal(results.get('hash_1')?.hash, 'hash_1');
+  assert.match(queries[0].sql, /WHERE hash = ANY\(\$1::text\[\]\) AND network = \$2/);
+  assert.deepEqual(queries[0].params, [['hash_1', 'hash_2'], 'mainnet']);
+});
+
+test('getLedgersBySequences binds sequence numbers and network using ANY operator', async () => {
+  const { pool, queries } = fakePool([
+    {
+      network: 'mainnet',
+      sequence: '100',
+      closed_at: new Date('2026-01-01T00:00:00Z'),
+      transaction_count: 1,
+      operation_count: 1,
+      base_fee: '100',
+      base_reserve: '5000000',
+    },
+  ]);
+
+  const results = await getLedgersBySequences(pool, 'mainnet', [100, 101]);
+  assert.equal(results.size, 1);
+  assert.equal(results.get(100)?.sequence, 100);
+  assert.match(queries[0].sql, /WHERE sequence = ANY\(\$1::bigint\[\]\) AND network = \$2/);
+  assert.deepEqual(queries[0].params, [[100, 101], 'mainnet']);
+});
+
+test('mapContractStorageEntry formats storage record with enum durability and state', () => {
+  const entry = mapContractStorageEntry({
+    contract_id: 'CAAAA',
+    network: 'mainnet',
+    key: 'storage_key',
+    durability: 'persistent',
+    state: 'active',
+    value: '{"data":1}',
+    value_xdr: 'AAAA==',
+    live_until_ledger: '500000',
+    last_modified_ledger: '450000',
+  });
+
+  assert.equal(entry.contractId, 'CAAAA');
+  assert.equal(entry.durability, 'PERSISTENT');
+  assert.equal(entry.state, 'ACTIVE');
+  assert.equal(entry.liveUntilLedger, 500000);
+});
+

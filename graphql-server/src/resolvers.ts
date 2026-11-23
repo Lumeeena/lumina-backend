@@ -1,3 +1,14 @@
+/**
+ * GraphQL Resolvers for Lumina Stellar Explorer & Indexer.
+ *
+ * This module defines the complete resolver map exposing Stellar ledger data,
+ * accounts, transactions, operations, Soroban smart contract storage and events,
+ * asset telemetry, and live WebSocket subscriptions.
+ *
+ * Resolvers read from PostgreSQL (populated by the Lumina indexer) and fall back
+ * to Horizon endpoints only when data for unindexed historical accounts is requested.
+ * Field resolutions are batch-loaded via DataLoader to eliminate N+1 roundtrips.
+ */
 import type { Pool } from 'pg';
 import { GraphQLError } from 'graphql';
 import {
@@ -63,6 +74,11 @@ import { getTopAccountsByActivity, normalizeTopAccountsWindow } from './topAccou
 import { ERROR_CODES } from './errorCodes';
 import { latestLedgerCache } from './latestLedgerCache';
 
+/**
+ * Execution context provided to all GraphQL field resolvers on every incoming request.
+ * Contains database pool access, network routing configuration, memoized DataLoader instances,
+ * and authenticated caller credentials.
+ */
 export interface BaseContext {
   pool: Pool;
   /**
@@ -96,8 +112,21 @@ export interface BaseContext {
   queryMemo?: Map<string, Promise<unknown>>;
 }
 
+/**
+ * Standard request Context type passed into Apollo Server resolver functions.
+ */
 export type Context = BaseContext;
 
+/**
+ * Factory creating a fresh, request-scoped GraphQL execution context.
+ *
+ * Instantiates dedicated DataLoader caches for the request and attaches
+ * the PostgreSQL connection pool, network registry, and authenticated caller.
+ *
+ * @param pool Active PostgreSQL database connection pool
+ * @param extra Optional overrides for caller, registry, or query memoization
+ * @returns Fully initialized Context instance
+ */
 export function createContext(
   pool: Pool,
   extra: Partial<Omit<Context, 'pool' | 'loaders'>> = {}
@@ -192,6 +221,13 @@ function formatGranularity(dbValue: string): 'HOUR' | 'DAY' {
   throw new Error(`Unexpected stored granularity "${dbValue}".`);
 }
 
+/**
+ * Complete GraphQL resolver map matching the schema defined in schema.graphql.
+ *
+ * Implements Query root resolvers (transactions, ledgers, accounts, operations, contracts, etc.),
+ * field-level nested resolvers (Transaction, Operation, Ledger, Account relations),
+ * and live Subscription resolvers via WebSocket.
+ */
 export const resolvers = {
   Subscription: createSubscriptionResolvers(),
 

@@ -55,6 +55,9 @@ interface LedgerRow {
   base_reserve: string;
 }
 
+/**
+ * Raw database row shape for a transaction record from the `transactions` table.
+ */
 export interface TransactionRow {
   hash: string;
   network: string;
@@ -68,6 +71,9 @@ export interface TransactionRow {
   memo: string | null;
 }
 
+/**
+ * Raw database row shape for an operation record from the `operations` table.
+ */
 export interface OperationRow {
   id: string;
   network: string;
@@ -173,6 +179,10 @@ const TRADE_COLUMNS = `id, paging_token, ledger_close_time, trade_type, base_acc
 
 // ─── GraphQL-shaped mappers (camelCase, matching schema.graphql) ──────────────
 
+/**
+ * Transforms a raw database `LedgerRow` into the GraphQL `Ledger` type.
+ * Converts numeric strings and dates to corresponding GraphQL scalars.
+ */
 export function mapLedger(row: LedgerRow) {
   return {
     network: row.network,
@@ -185,6 +195,10 @@ export function mapLedger(row: LedgerRow) {
   };
 }
 
+/**
+ * Transforms a raw database `TransactionRow` into the GraphQL `Transaction` type.
+ * Preserves `fee_charged` as string to avoid precision loss with 64-bit Stellar amounts.
+ */
 export function mapTransaction(row: TransactionRow) {
   return {
     network: row.network,
@@ -211,6 +225,10 @@ function formatAsset(type?: string, code?: string, issuer?: string): string | nu
   return `${code}:${issuer}`;
 }
 
+/**
+ * Transforms a raw database `OperationRow` into the GraphQL `Operation` type.
+ * Unpacks operation details JSON and normalizes asset identifiers.
+ */
 export function mapOperation(row: OperationRow) {
   const d = row.details;
   return {
@@ -241,6 +259,9 @@ export function mapOperation(row: OperationRow) {
   };
 }
 
+/**
+ * Intermediate normalized account shape extracted from the `accounts` table.
+ */
 export interface NormalizedAccount {
   network: string;
   address: string;
@@ -254,6 +275,10 @@ export interface NormalizedAccount {
   thresholds: Record<string, number>;
 }
 
+/**
+ * Maps a `NormalizedAccount` record into the GraphQL `Account` type.
+ * Formats subentries, sponsorship balances, and threshold flags.
+ */
 export function mapAccount(a: NormalizedAccount) {
   return {
     network: a.network,
@@ -286,6 +311,10 @@ export function mapAccount(a: NormalizedAccount) {
   };
 }
 
+/**
+ * Transforms a raw database `EventRow` into the GraphQL `ContractEvent` type.
+ * Formats topics and JSON-encoded event values for contract inspection.
+ */
 export function mapEvent(row: EventRow) {
   return {
     network: row.network,
@@ -321,6 +350,9 @@ function storageStateEnum(state: string): 'ACTIVE' | 'ARCHIVED' {
   throw new Error(`unknown contract storage state in database: ${state}`);
 }
 
+/**
+ * Transforms a raw database `ContractStorageEntryRow` into the GraphQL `ContractStorageEntry` type.
+ */
 export function mapContractStorageEntry(row: ContractStorageEntryRow) {
   return {
     network: row.network,
@@ -338,6 +370,9 @@ export function mapContractStorageEntry(row: ContractStorageEntryRow) {
   };
 }
 
+/**
+ * Transforms a raw database storage history row into GraphQL `ContractStorageKeyHistoryEntry`.
+ */
 export function mapContractStorageKeyHistoryEntry(row: ContractStorageKeyHistoryRow) {
   return {
     value: row.value === null ? null : JSON.stringify(row.value),
@@ -350,6 +385,9 @@ export function mapContractStorageKeyHistoryEntry(row: ContractStorageKeyHistory
 
 type LedgerOrder = 'ASC' | 'DESC';
 
+/**
+ * Optional filtering and ordering parameters for `getTransactions` queries.
+ */
 export interface TransactionQueryOptions {
   order?: LedgerOrder;
   direction?: PaginationDirection;
@@ -359,6 +397,10 @@ export interface TransactionQueryOptions {
   sourceAccount?: string | null;
 }
 
+/**
+ * Retrieves a keyset-paginated slice of transactions matching optional filters.
+ * Utilizes composite index `(network, ledger DESC, hash DESC)` for fast stable paging.
+ */
 export async function getTransactions(
   pool: Pool,
   network: string,
@@ -406,6 +448,9 @@ export async function getTransactions(
   return isForward ? items : items.reverse();
 }
 
+/**
+ * Fetches a single transaction by its 32-byte hexadecimal hash on the specified network.
+ */
 export async function getTransactionByHash(pool: Pool, network: string, hash: string) {
   const { rows } = await pool.query<TransactionRow>(
     `SELECT ${TRANSACTION_COLUMNS} FROM transactions WHERE hash = $1 AND network = $2`,
@@ -418,12 +463,18 @@ export async function getTransactionByHash(pool: Pool, network: string, hash: st
 export const TRANSACTIONS_BY_HASHES_SQL =
   `SELECT ${TRANSACTION_COLUMNS} FROM transactions WHERE hash = ANY($1::text[]) AND network = $2`;
 
+/**
+ * Batch-loads multiple transactions by their hashes using PostgreSQL `= ANY(::text[])`.
+ */
 export async function getTransactionsByHashes(pool: Pool, network: string, hashes: readonly string[]) {
   if (hashes.length === 0) return new Map<string, ReturnType<typeof mapTransaction>>();
   const { rows } = await pool.query<TransactionRow>(TRANSACTIONS_BY_HASHES_SQL, [hashes, network]);
   return new Map(rows.map(row => [row.hash, mapTransaction(row)]));
 }
 
+/**
+ * Retrieves a keyset-paginated slice of operations matching optional filters.
+ */
 export async function getOperations(
   pool: Pool,
   opts: {
@@ -492,6 +543,9 @@ export async function getAccountLifecycle(
   return rows.map(mapOperation);
 }
 
+/**
+ * Fetches all operations associated with a single transaction hash.
+ */
 export async function getOperationsByTransactionHash(pool: Pool, network: string, hash: string) {
   const { rows } = await pool.query<OperationRow>(
     `SELECT ${OPERATION_COLUMNS} FROM operations WHERE transaction_hash = $1 AND network = $2 ORDER BY id ASC`,
@@ -500,6 +554,9 @@ export async function getOperationsByTransactionHash(pool: Pool, network: string
   return rows.map(mapOperation);
 }
 
+/**
+ * Batch-loads operations for a collection of transaction hashes, used by DataLoaders.
+ */
 export async function getOperationsByTransactionHashes(
   pool: Pool,
   network: string,
@@ -548,6 +605,9 @@ export async function getLedgers(
   return isForward ? items : items.reverse();
 }
 
+/**
+ * Fetches a single ledger record by its sequence number on the specified network.
+ */
 export async function getLedgerBySequence(pool: Pool, network: string, sequence: number) {
   const { rows } = await pool.query<LedgerRow>(
     `SELECT ${LEDGER_COLUMNS} FROM ledgers WHERE sequence = $1 AND network = $2`,
@@ -556,11 +616,17 @@ export async function getLedgerBySequence(pool: Pool, network: string, sequence:
   return rows[0] ? mapLedger(rows[0]) : null;
 }
 
+/**
+ * Continuous range of indexed ledger sequences [start, end].
+ */
 export interface LedgerSequenceRange {
   startLedger: number;
   endLedger: number;
 }
 
+/**
+ * Summary of indexed ledger sequence coverage, reporting contiguous intervals and gaps.
+ */
 export interface LedgerCoverage {
   network: string;
   startLedger: number;
@@ -653,6 +719,9 @@ export async function getLedgerCoverage(
   };
 }
 
+/**
+ * Batch-loads multiple ledgers by their sequence numbers using PostgreSQL `= ANY(::bigint[])`.
+ */
 export async function getLedgersBySequences(pool: Pool, network: string, sequences: readonly number[]) {
   if (sequences.length === 0) return new Map<number, ReturnType<typeof mapLedger>>();
   const { rows } = await pool.query<LedgerRow>(
@@ -662,6 +731,9 @@ export async function getLedgersBySequences(pool: Pool, network: string, sequenc
   return new Map(rows.map(row => [Number(row.sequence), mapLedger(row)]));
 }
 
+/**
+ * Reads the highest recorded ledger sequence and close time for a network.
+ */
 export async function getLatestLedgerFromDb(pool: Pool, network: string) {
   const { rows } = await pool.query<LedgerRow>(
     `SELECT ${LEDGER_COLUMNS} FROM ledgers WHERE network = $1 ORDER BY sequence DESC LIMIT 1`,
@@ -697,6 +769,9 @@ export async function getIndexedTip(
   };
 }
 
+/**
+ * Fetches an account record from the database by its Stellar public key (G-address).
+ */
 export async function getAccountFromDb(pool: Pool, network: string, address: string) {
   const { rows } = await pool.query<AccountRow>(
     `SELECT ${ACCOUNT_COLUMNS} FROM accounts WHERE address = $1 AND network = $2`,
@@ -731,6 +806,9 @@ export async function getAccountAsOfLedgerFromDb(
   return accountFromRow(rows[0]);
 }
 
+/**
+ * Batch-loads multiple account records by their public addresses using `= ANY(::text[])`.
+ */
 export async function getAccountsFromDb(pool: Pool, network: string, addresses: readonly string[]) {
   if (addresses.length === 0) return new Map<string, ReturnType<typeof mapAccount>>();
   const { rows } = await pool.query<AccountRow>(
@@ -765,8 +843,14 @@ export const ACCOUNT_ORDERS = {
   },
 } as const;
 
+/**
+ * Valid ordering column keys for account listings.
+ */
 export type AccountOrder = keyof typeof ACCOUNT_ORDERS;
 
+/**
+ * Canonical string array of valid account ordering option names.
+ */
 export const ACCOUNT_ORDER_NAMES = Object.keys(ACCOUNT_ORDERS) as AccountOrder[];
 
 function accountFromRow(row: AccountRow) {
@@ -835,6 +919,9 @@ export async function getAccounts(
   return isForward ? items : items.reverse();
 }
 
+/**
+ * Retrieves transactions where the specified account was the source account.
+ */
 export async function getAccountTransactions(pool: Pool, network: string, address: string, limit: number) {
   const { rows } = await pool.query<TransactionRow>(
     `SELECT ${TRANSACTION_COLUMNS} FROM transactions WHERE source_account = $1 AND network = $2 ORDER BY ledger DESC LIMIT $3`,
@@ -843,6 +930,9 @@ export async function getAccountTransactions(pool: Pool, network: string, addres
   return rows.map(mapTransaction);
 }
 
+/**
+ * Retrieves operations where the specified account was the source account.
+ */
 export async function getAccountOperations(pool: Pool, network: string, address: string, limit: number) {
   const { rows } = await pool.query<OperationRow>(
     `SELECT ${OPERATION_COLUMNS} FROM operations WHERE source_account = $1 AND network = $2 ORDER BY ledger DESC LIMIT $3`,
@@ -851,6 +941,9 @@ export async function getAccountOperations(pool: Pool, network: string, address:
   return rows.map(mapOperation);
 }
 
+/**
+ * Queries smart contract events for a given contract ID with optional topic and ledger filters.
+ */
 export async function getEventsByContract(
   pool: Pool,
   opts: {
@@ -1032,6 +1125,9 @@ export async function getAccountOperationsInLedger(
   return rows.map(mapOperation);
 }
 
+/**
+ * Filter parameters for trade subscription events.
+ */
 export interface LedgerTradeSubscriptionFilter {
   baseAssetCode?: string | null;
   counterAssetCode?: string | null;
@@ -1077,6 +1173,9 @@ export async function getTradesByLedger(
   return rows.map(mapTrade);
 }
 
+/**
+ * Filter parameters for contract event subscription streams.
+ */
 export interface LedgerContractEventSubscriptionFilter {
   contractId?: string | null;
   type?: string | null;
@@ -1111,6 +1210,9 @@ export async function getContractEventsByLedger(
   return rows.map(mapEvent);
 }
 
+/**
+ * Raw database row shape for orderbook and liquidity pool trades from `trades`.
+ */
 export interface TradeRow {
   id: string;
   paging_token: string;
@@ -1135,6 +1237,9 @@ export interface TradeRow {
   network: string;
 }
 
+/**
+ * Transforms a raw database `TradeRow` into the GraphQL `Trade` type.
+ */
 export function mapTrade(row: TradeRow) {
   return {
     id: row.id,
@@ -1160,6 +1265,9 @@ export function mapTrade(row: TradeRow) {
   };
 }
 
+/**
+ * Optional filters for querying historical trades (account, asset, or offer).
+ */
 export interface TradeFilter {
   baseAsset?: { assetType?: string | null; assetCode?: string | null; assetIssuer?: string | null };
   counterAsset?: { assetType?: string | null; assetCode?: string | null; assetIssuer?: string | null };
@@ -1168,6 +1276,9 @@ export interface TradeFilter {
   cursor?: string | null;
 }
 
+/**
+ * Queries trade executions from the database with stable keyset pagination.
+ */
 export async function getTradesFromDb(
   pool: Pool,
   network: string,
@@ -1232,6 +1343,14 @@ export async function getTradesFromDb(
   return rows.map(mapTrade);
 }
 
+/**
+ * Computes an exact or estimated row count for a table.
+ *
+ * Tuning Constant:
+ * `affordableThreshold = 5000`: When `pg_class.reltuples` indicates fewer than 5,000 rows,
+ * an exact `COUNT(*)` table scan completes in sub-millisecond time. For larger tables,
+ * the function returns PostgreSQL's statistical estimate to avoid heavy sequential disk scans.
+ */
 export async function getTableCountEstimateOrExact(
   pool: Pool,
   tableName: string,
@@ -1287,12 +1406,18 @@ export async function getTableCountEstimateOrExact(
 
 // ─── Signers & Sponsorship (#226) ────────────────────────────────────────────
 
+/**
+ * Raw database row shape for multi-sig account signer entries.
+ */
 export interface SignerRow {
   key: string;
   type: string;
   weight: number;
 }
 
+/**
+ * Queries all secondary signers authorized on a Stellar account.
+ */
 export async function getAccountSigners(
   pool: Pool,
   network: string,
@@ -1307,6 +1432,9 @@ export async function getAccountSigners(
   return rows;
 }
 
+/**
+ * Lists accounts sponsored by a given sponsor address.
+ */
 export async function getSponsoredAccounts(
   pool: Pool,
   network: string,
@@ -1339,6 +1467,9 @@ export async function getSponsoredAccounts(
   );
 }
 
+/**
+ * Keyset-paginated lookup of accounts sponsored by a given sponsor address.
+ */
 export async function getSponsoredAccountsPage(
   pool: Pool,
   network: string,
@@ -1382,6 +1513,9 @@ export async function getSponsoredAccountsPage(
 
 // ─── Contracts & Deployments (#227) ──────────────────────────────────────────
 
+/**
+ * Raw database row shape for Soroban smart contract deployments.
+ */
 export interface ContractDeploymentRow {
   contract_id: string;
   deployer: string;
@@ -1390,6 +1524,9 @@ export interface ContractDeploymentRow {
   deployed_at: string;
 }
 
+/**
+ * Fetches deployment metadata (WASM hash, deployer, salt) for a smart contract.
+ */
 export async function getContractDeployment(
   pool: Pool,
   network: string,
@@ -1404,6 +1541,9 @@ export async function getContractDeployment(
   return rows[0] ?? null;
 }
 
+/**
+ * Lists deployed smart contracts ordered by deployment time.
+ */
 export async function getContracts(
   pool: Pool,
   network: string,
@@ -1428,6 +1568,9 @@ export async function getContracts(
   return rows;
 }
 
+/**
+ * Keyset-paginated lookup of smart contracts deployed on a network.
+ */
 export async function getContractsPage(
   pool: Pool,
   network: string,
@@ -1451,6 +1594,9 @@ export async function getContractsPage(
   return rows;
 }
 
+/**
+ * Lists all smart contract instances instantiated from a shared WASM hash.
+ */
 export async function getSharedWasmContracts(
   pool: Pool,
   network: string,
@@ -1471,6 +1617,9 @@ export async function getSharedWasmContracts(
 
 // ─── Network Statistics (#228) ───────────────────────────────────────────────
 
+/**
+ * Raw database row shape for aggregated hourly/daily network telemetry buckets.
+ */
 export interface NetworkStatsBucketRow {
   bucket_start: string;
   transaction_count: number;
@@ -1479,6 +1628,9 @@ export interface NetworkStatsBucketRow {
   total_volume: string;
 }
 
+/**
+ * Aggregates network ledger metrics over requested time intervals.
+ */
 export async function getNetworkStats(
   pool: Pool,
   network: string,
@@ -1506,6 +1658,9 @@ export async function getNetworkStats(
 
 // ─── Activity Rollups (#229) ─────────────────────────────────────────────────
 
+/**
+ * Raw database row shape for pre-aggregated daily activity rollups.
+ */
 export interface ActivityRollupRow {
   bucket_start: string;
   granularity: string;
@@ -1516,6 +1671,9 @@ export interface ActivityRollupRow {
   total_volume: string;
 }
 
+/**
+ * Queries daily transaction and fee rollups across a date window.
+ */
 export async function getActivityRollups(
   pool: Pool,
   network: string,
@@ -1539,6 +1697,9 @@ export async function getActivityRollups(
   return rows;
 }
 
+/**
+ * Validates integrity between detailed transactions table and daily rollup summaries.
+ */
 export async function getRollupConsistency(
   pool: Pool,
   network: string,
