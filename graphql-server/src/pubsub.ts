@@ -21,6 +21,14 @@ import { Client } from 'pg';
 import { RateLimitedError } from './errorCodes';
 import { INDEXED_CHANNEL, parseNotification, type IndexedNotification } from './notifications';
 
+/**
+ * Settings for a {@link LedgerNotifier}. Only `connectionString` is required.
+ *
+ * `index.ts` supplies `maxSubscribers` and `queueLimit` from `MAX_SUBSCRIPTIONS`
+ * and `SUBSCRIPTION_QUEUE_LIMIT`, whose documented defaults (500 and 64) are the
+ * ones used here when a caller leaves them out. The source does not record why
+ * those numbers were chosen; the README describes what each one bounds.
+ */
 export interface NotifierOptions {
   connectionString: string;
   /** Injected so tests can drive a fake connection without a database. */
@@ -31,12 +39,18 @@ export interface NotifierOptions {
    * reap it, and by the integration test deciding what to terminate.
    */
   applicationName?: string;
-  /** Maximum simultaneous subscriptions. Beyond this, `subscribe` throws. */
+  /** Maximum simultaneous subscriptions. Beyond this, `subscribe` throws. Default 500. */
   maxSubscribers?: number;
-  /** Per-subscriber buffer depth before the oldest notification is dropped. */
+  /**
+   * Per-subscriber buffer depth before the oldest notification is dropped.
+   * Default 64.
+   */
   queueLimit?: number;
+  /** Delay before the first reconnect attempt after the LISTEN connection is lost. Each failed attempt doubles it. Default 1 s. */
   reconnectDelayMs?: number;
+  /** Ceiling for the doubled reconnect delay, so a long outage retries at a steady rate. Default 30 s. */
   maxReconnectDelayMs?: number;
+  /** Receives connection events and listener failures. Silent when omitted. */
   log?: (message: string, detail?: unknown) => void;
   /** Injected for tests; defaults to `setTimeout`. */
   schedule?: (fn: () => void, ms: number) => void;
@@ -68,6 +82,14 @@ interface Subscriber {
   dropped: number;
 }
 
+/**
+ * Holds one LISTEN connection and fans each notification out to every open
+ * subscription, the way the module comment describes.
+ *
+ * Create one per process. Each instance opens its own connection, so a second
+ * one adds another Postgres connection held for notifications. Call {@link start} once, {@link subscribe} per client
+ * subscription, and {@link stop} at shutdown.
+ */
 export class LedgerNotifier {
   private client: ListenClient | null = null;
   private subscribers = new Set<Subscriber>();
