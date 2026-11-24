@@ -42,6 +42,11 @@ Representative test cases covered:
   - Generated SQL asserted for representative address, network, and limit arguments
   - Values bound as parameters (never interpolated)
   - Network included in the filter predicate; no `OFFSET` pagination
+- **`getAccountAsOfLedgerFromDb`**:
+  - Generated SQL asserted for representative address, network, and ledger arguments
+  - Values bound as parameters (never interpolated)
+  - The `WHERE` clause is asserted to be exactly `address = $1 AND network = $2 AND last_modified_ledger <= $3`, so the network is always part of the filter
+  - A single-row `ORDER BY last_modified_ledger DESC LIMIT 1` lookup against `account_state_history`; it does not paginate, so there is no keyset comparison, and `OFFSET` is asserted absent
 - **`getEventsByContract`**:
   - Default query
   - Filtered by topic and cursor

@@ -307,6 +307,60 @@ test('SQL snapshot: getAccounts address order default', async () => {
   verifySqlSnapshot('getAccounts_address_default', q.sql, q.params);
 });
 
+// ─── Account As Of Ledger SQL Snapshots (#446) ───────────────────────────────
+
+test('SQL snapshot: getAccountAsOfLedgerFromDb representative arguments', async () => {
+  const { pool, getLastQuery, getQueries } = fakePool();
+  const address = 'GBRPYHIL2CI537KXVHBV4Z6G7MXNGSQXN4F2XGJFFHJ3KJV3J4WKZQLQ';
+  const result = await getAccountAsOfLedgerFromDb(pool, 'mainnet', address, 52000000);
+  const q = getLastQuery();
+
+  // One statement, and no stored state at or before the ledger means null.
+  assert.equal(getQueries().length, 1);
+  assert.equal(result, null);
+
+  // Values are bound as parameters, in the order the statement numbers them,
+  // and never interpolated into the SQL text.
+  assert.deepEqual(q.params, [address, 'mainnet', 52000000]);
+  assert.ok(!q.sql.includes(address));
+  assert.doesNotMatch(q.sql, /mainnet|52000000/);
+
+  // Reads the history table, not the current-state `accounts` table.
+  assert.match(q.sql, /\bFROM account_state_history\b/);
+  assert.doesNotMatch(q.sql, /\bFROM accounts\b/);
+
+  // The network is part of the predicate. It is the only one of the three
+  // predicates that keeps a testnet account's history out of a mainnet answer.
+  const where = q.sql.match(/\bWHERE (.+?) ORDER BY\b/)?.[1];
+  assert.ok(where, 'statement has a WHERE clause before ORDER BY');
+  assert.deepEqual(where.split(' AND '), [
+    'address = $1',
+    'network = $2',
+    'last_modified_ledger <= $3',
+  ]);
+
+  // "At or before" the ledger, newest first, one row. This is a point lookup,
+  // not a paged list: there is no cursor and so no keyset comparison to assert,
+  // and it must not grow an OFFSET.
+  assert.match(q.sql, /\bORDER BY last_modified_ledger DESC LIMIT 1$/);
+  assert.doesNotMatch(q.sql, /\bOFFSET\b/i);
+  assert.doesNotMatch(q.sql, /\(\s*last_modified_ledger\s*,/);
+
+  verifySqlSnapshot('getAccountAsOfLedgerFromDb_representative', q.sql, q.params);
+});
+
+test('SQL snapshot: getAccountAsOfLedgerFromDb binds the network it is given', async () => {
+  const { pool, getLastQuery } = fakePool();
+  const address = 'GBRPYHIL2CI537KXVHBV4Z6G7MXNGSQXN4F2XGJFFHJ3KJV3J4WKZQLQ';
+  await getAccountAsOfLedgerFromDb(pool, 'testnet', address, 1);
+  const q = getLastQuery();
+
+  // Same statement for every network; only the bound value differs.
+  assert.deepEqual(q.params, [address, 'testnet', 1]);
+  assert.doesNotMatch(q.sql, /testnet/);
+  assert.match(q.sql, /\bnetwork = \$2\b/);
+});
+
 // ─── Account Operations SQL Snapshots (#449) ─────────────────────────────────
 
 test('SQL snapshot: getAccountOperations default query', async () => {
@@ -619,20 +673,4 @@ test('SQL snapshot: getTableCountEstimateOrExact filtered whereClause', async ()
   assert.doesNotMatch(q.sql, /mainnet|true/);
   assert.match(q.sql, /\bnetwork\s*=\s*\$\d+/);
   verifySqlSnapshot('getTableCountEstimateOrExact_filtered', q.sql, q.params);
-});
-
-
-// ─── Account State As Of Ledger SQL Snapshots (#446) ─────────────────────────
-test('SQL snapshot: getAccountAsOfLedgerFromDb', async () => {
-  const { pool, getLastQuery } = fakePool();
-  const address = 'GBRPYHIL2CI537KXVHBV4Z6G7MXNGSQXN4F2XGJFFHJ3KJV3J4WKZQLQ';
-  await getAccountAsOfLedgerFromDb(pool, 'mainnet', address, 500000);
-  const q = getLastQuery();
-
-  assert.deepEqual(q.params, [address, 'mainnet', 500000]);
-  assert.doesNotMatch(q.sql, /mainnet|500000|GBRPYHIL/);
-  assert.match(q.sql, /WHERE address = \$1 AND network = \$2 AND last_modified_ledger <= \$3/);
-  assert.match(q.sql, /ORDER BY last_modified_ledger DESC LIMIT 1/);
-  assert.doesNotMatch(q.sql, /\bOFFSET\b/i);
-  verifySqlSnapshot('getAccountAsOfLedgerFromDb_default', q.sql, q.params);
 });

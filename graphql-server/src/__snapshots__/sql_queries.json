@@ -1,5 +1,5 @@
 {
-  "getAccountAsOfLedgerFromDb_default": {
+  "getAccountAsOfLedgerFromDb_representative": {
     "sql": "SELECT address, network, sequence, subentry_count, last_modified_ledger, num_sponsored, num_sponsoring, balances, flags, thresholds FROM account_state_history WHERE address = $1 AND network = $2 AND last_modified_ledger <= $3 ORDER BY last_modified_ledger DESC LIMIT 1",
     "paramCount": 3
   },
