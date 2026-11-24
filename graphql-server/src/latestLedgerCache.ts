@@ -1,3 +1,8 @@
+/**
+ * Small per-network cache for latest-ledger reads.
+ * Generation tokens prevent a stale asynchronous result from repopulating the
+ * cache after a ledger notification invalidates it.
+ */
 import { latestLedgerCacheInvalidations, latestLedgerCacheRequests } from './metrics';
 
 interface CacheEntry {
@@ -5,6 +10,10 @@ interface CacheEntry {
   cachedAt: number;
 }
 
+/**
+ * Creates an isolated cache with TTL and generation-checked writes for tests
+ * and for the process-wide instance below.
+ */
 export function createLatestLedgerCache(ttlMs: number, now: () => number = Date.now) {
   const entries = new Map<string, CacheEntry>();
   const generations = new Map<string, number>();
@@ -55,5 +64,7 @@ export function createLatestLedgerCache(ttlMs: number, now: () => number = Date.
   };
 }
 
+// Four seconds avoids repeated reads during bursts while keeping new ledgers visible promptly.
 const latestLedgerCacheTtlMs = parseInt(process.env['LATEST_LEDGER_CACHE_TTL_MS'] ?? '4000', 10);
+/** Process-wide latest-ledger cache, partitioned by network. */
 export const latestLedgerCache = createLatestLedgerCache(latestLedgerCacheTtlMs);
