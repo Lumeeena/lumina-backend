@@ -11,6 +11,7 @@ import {
   getTransactionsByLedger,
   getOperations,
   getLedgers,
+  getLatestLedgerFromDb,
   getAccounts,
   getAccountSigners,
   getSponsoredAccounts,
@@ -229,6 +230,20 @@ test('SQL snapshot: getLedgers paginated backward', async () => {
   await getLedgers(pool, 'mainnet', 20, cursor, 'BACKWARD');
   const q = getLastQuery();
   verifySqlSnapshot('getLedgers_backward', q.sql, q.params);
+});
+
+test('SQL snapshot: getLatestLedgerFromDb representative arguments', async () => {
+  const { pool, getLastQuery } = fakePool();
+  await getLatestLedgerFromDb(pool, 'mainnet');
+  const q = getLastQuery();
+
+  assert.deepEqual(q.params, ['mainnet']);
+  assert.match(q.sql, /FROM ledgers WHERE network = \$1/);
+  assert.doesNotMatch(q.sql, /mainnet/i);
+  assert.doesNotMatch(q.sql, /\bOFFSET\b/i);
+  assert.match(q.sql, /\bORDER BY sequence DESC LIMIT 1\b/);
+
+  verifySqlSnapshot('getLatestLedgerFromDb_representative', q.sql, q.params);
 });
 
 // ─── Accounts SQL Snapshots ──────────────────────────────────────────────────
