@@ -38,6 +38,10 @@ Representative test cases covered:
   - Default `RECENT_ACTIVITY` order (`last_modified_ledger DESC, address ASC`)
   - Forward and backward pagination with tiebreaker inversion
   - `ADDRESS` order forward and backward
+- **`getAccountOperations`**:
+  - Generated SQL asserted for representative address, network, and limit arguments
+  - Values bound as parameters (never interpolated)
+  - Network included in the filter predicate; no `OFFSET` pagination
 - **`getEventsByContract`**:
   - Default query
   - Filtered by topic and cursor

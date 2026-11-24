@@ -53,6 +53,17 @@ function formatDate(date: Date | null): string {
   return date.toISOString().replace('T', ' ').substring(0, 19);
 }
 
+/**
+ * Parses a CLI argument as a whole positive integer, or returns `null`.
+ *
+ * Surrounding whitespace is ignored. Anything else is rejected rather than parsed
+ * loosely: signs, decimals, exponent notation such as `1e3`, trailing text such
+ * as `10foo`, zero, and values above `Number.MAX_SAFE_INTEGER`. A typo therefore
+ * cannot quietly set a different limit from the one the operator meant.
+ *
+ * @param input The raw command-line argument.
+ * @returns The integer, or `null` when the input is not a positive safe integer.
+ */
 export function parsePositiveInteger(input: string): number | null {
   const trimmed = input.trim();
   if (!/^\d+$/.test(trimmed)) return null;
@@ -61,6 +72,18 @@ export function parsePositiveInteger(input: string): number | null {
   return num;
 }
 
+/**
+ * Runs one `manage-keys` subcommand against `pool`. `main` calls it with the real
+ * database pool; tests pass a stub pool and inspect what was written.
+ *
+ * Input errors (missing arguments, a bad rate limit, an unknown command) print
+ * usage or an error to stderr and exit the process with status 1, so this
+ * function only returns normally after a successful command. Database errors
+ * propagate to the caller as rejected promises.
+ *
+ * @param args The arguments after the script name, e.g. `['create', 'my-app', '120']`.
+ * @param pool The database pool to run the command against.
+ */
 export async function runCli(args: string[], pool: Pool): Promise<void> {
   const [command, arg1, arg2] = args;
   if (!command) usage();
@@ -72,6 +95,7 @@ export async function runCli(args: string[], pool: Pool): Promise<void> {
         usage();
       }
       const label = arg1;
+      // Same default as createApiKey in keys.ts, so the CLI and the library agree.
       let rateLimit = 60;
       if (arg2) {
         const parsed = parsePositiveInteger(arg2);

@@ -38,6 +38,7 @@ type Env = Record<string, string | undefined>;
 /** Seven days: long enough to outlive a client session, short enough to turn over. */
 export const DEFAULT_PERSISTED_QUERY_TTL_SECONDS = 7 * 24 * 60 * 60;
 
+/** Validated persisted-query feature flag and cache lifetime. */
 export interface PersistedQueryConfig {
   /** False means hash-only requests are answered with `PERSISTED_QUERY_NOT_SUPPORTED`. */
   enabled: boolean;

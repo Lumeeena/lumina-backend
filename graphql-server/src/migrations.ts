@@ -1,9 +1,36 @@
+/**
+ * Applies, reads and rolls back the SQL migrations in `db/migrations/`, and
+ * records each applied one in `schema_migrations`.
+ *
+ * Two callers reach this module: `migrate.ts` for the command-line runner, and
+ * the server's startup, which runs it only when `RUN_MIGRATIONS_ON_STARTUP` is
+ * `true`. Both go through `runMigrations`, so the advisory lock, the
+ * out-of-order check and the `CONCURRENTLY` handling apply to every path that
+ * changes the schema.
+ *
+ * A forward migration is `<version>.sql`; an optional `<version>.down.sql`
+ * reverses it. The version is the filename without its extension and is stored
+ * verbatim in `schema_migrations`, so renaming a file that has already been
+ * applied makes the runner report it as unknown.
+ */
 import { existsSync, readFileSync, readdirSync } from 'fs';
 import { join, resolve } from 'path';
 import type { Pool, PoolClient } from 'pg';
 
+/** One migration file: its version (the filename stem) and its SQL, with `\echo` lines removed. */
 export interface Migration { version: string; sql: string; }
 
+/**
+ * Read every forward migration in `directory`, sorted by filename.
+ *
+ * `001_init.sql` pulls in the full schema with a psql `\ir` include. node-postgres
+ * cannot follow that, so the include is replaced with the file's contents here,
+ * and `\echo` lines are dropped because the server would reject them as SQL.
+ *
+ * With no `directory`, the first of two locations that exists is used, then
+ * `db/migrations` under the working directory. The source does not record which
+ * deployment each location serves.
+ */
 export function loadMigrations(directory?: string): Migration[] {
   directory ??= [resolve(__dirname, '../../db/migrations'), resolve(__dirname, '../db/migrations')].find(existsSync)
     ?? resolve(process.cwd(), 'db/migrations');
@@ -15,6 +42,16 @@ export function loadMigrations(directory?: string): Migration[] {
   });
 }
 
+/**
+ * Compare the database's history with the files and say what is applied and
+ * what is pending.
+ *
+ * Throws in two cases, and both are refused rather than worked around: the
+ * database records a version no file provides (it was migrated by a newer build,
+ * or a file was removed), or a pending migration sits before an applied one
+ * (someone applied a later file out of order, so the earlier one would be
+ * skipped by a plain "run what is pending" pass).
+ */
 export async function migrationStatus(pool: Pick<Pool, 'query'>, migrations: Migration[]) {
   const result = await pool.query<{ version: string }>('SELECT version FROM schema_migrations ORDER BY version');
   const applied = new Set(result.rows.map(row => row.version));
@@ -30,6 +67,18 @@ export async function migrationStatus(pool: Pick<Pool, 'query'>, migrations: Mig
   return { applied: migrations.filter(migration => applied.has(migration.version)).map(migration => migration.version), pending: pending.map(migration => migration.version) };
 }
 
+/**
+ * Apply every pending migration in filename order, unless `apply` is false, and
+ * return the resulting status either way.
+ *
+ * Holds a Postgres advisory lock for the whole run, so two processes starting
+ * at once (for example two replicas with `RUN_MIGRATIONS_ON_STARTUP=true`) queue
+ * behind each other instead of interleaving. The lock is released and the client
+ * returned to the pool even when a migration fails.
+ *
+ * The lock key, `74192061`, is shared with both rollback functions. It is a
+ * fixed number, and the source does not record why this value was chosen.
+ */
 export async function runMigrations(pool: Pool, migrations: Migration[], apply = true): Promise<Awaited<ReturnType<typeof migrationStatus>>> {
   const client = await pool.connect();
   try {
@@ -52,7 +101,12 @@ export async function runMigrations(pool: Pool, migrations: Migration[], apply =
   }
 }
 
-/** Migrations that build or drop indexes CONCURRENTLY, which cannot run inside a transaction. */
+/**
+ * Migrations that build or drop indexes CONCURRENTLY, which cannot run inside a transaction.
+ *
+ * Membership is by hand: a new migration that uses CONCURRENTLY must be added
+ * here, or it runs inside BEGIN/COMMIT and Postgres rejects it.
+ */
 const CONCURRENT_MIGRATIONS = new Set([
   '004_search_indexes',
   '008_accounts_listing_index',
@@ -100,6 +154,7 @@ export const IRREVERSIBLE_MIGRATIONS = [
   '023_remove_placeholder_contract_interfaces',
 ] as const;
 
+/** Whether `version` is listed in {@link IRREVERSIBLE_MIGRATIONS}. `rollbackMigration` checks this before reading any file. */
 export function isMigrationIrreversible(version: string): boolean {
   return (IRREVERSIBLE_MIGRATIONS as readonly string[]).includes(version);
 }
@@ -123,7 +178,12 @@ export function loadDownMigrations(directory?: string): Map<string, Migration> {
 }
 
 /**
- * Rollback a specific migration by executing its down script and removing it from `schema_migrations`.
+ * Roll back one applied migration: run its `.down.sql` and delete its history row, in one transaction.
+ *
+ * Refuses an irreversible migration before touching the database, and refuses
+ * one that is not applied, so a rollback cannot run a down script for a
+ * migration that never ran. The applied check runs under the advisory lock, so
+ * a concurrent rollback of the same version fails instead of running twice.
  */
 export async function rollbackMigration(pool: Pool, targetVersion: string, directory?: string): Promise<void> {
   if (isMigrationIrreversible(targetVersion)) {
@@ -167,7 +227,11 @@ export async function rollbackMigration(pool: Pool, targetVersion: string, direc
 }
 
 /**
- * Rollback the most recently applied migration.
+ * Roll back the most recently applied migration and return its version, or `null` if none is applied.
+ *
+ * "Most recent" means latest `applied_at`, with the version as the tie-breaker.
+ * The lock is taken twice, once to read the latest row and once inside
+ * `rollbackMigration`, so the read is not held across the rollback itself.
  */
 export async function rollbackLastMigration(pool: Pool, directory?: string): Promise<string | null> {
   const client = await pool.connect();

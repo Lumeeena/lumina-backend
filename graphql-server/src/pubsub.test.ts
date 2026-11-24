@@ -137,6 +137,31 @@ test('notification listeners receive events without consuming subscription slots
   await notifier.stop();
 });
 
+test('a throwing notification listener is logged and does not stop delivery', async () => {
+  // Listeners run before subscribers, on the same connection every subscriber
+  // shares. An exception escaping publish() would end that connection's event
+  // handler and leave every stream silent until the next reconnect.
+  const logged: string[] = [];
+  const { notifier, clients } = harness({ log: message => { logged.push(message); } });
+  const received: IndexedNotification[] = [];
+  notifier.onNotification(() => {
+    throw new Error('webhook dispatch exploded');
+  });
+  notifier.onNotification(notification => received.push(notification));
+  await notifier.start();
+
+  const sub = notifier.subscribe();
+  const next = sub.next();
+  clients[0].emit(ledgerPayload(300));
+
+  assert.equal((await next).value?.ledger, 300, 'the subscriber still receives the notification');
+  assert.equal(received.length, 1, 'a listener registered after the failing one still runs');
+  assert.ok(logged.includes('notification listener failed'), 'the failure is logged');
+  assert.equal(notifier.connected, true, 'the connection is not torn down');
+
+  await notifier.stop();
+});
+
 test('notifications on another channel are ignored', async () => {
   const { notifier, clients } = harness();
   await notifier.start();
