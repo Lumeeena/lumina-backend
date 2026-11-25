@@ -1232,6 +1232,118 @@ export async function getTradesFromDb(
   return rows.map(mapTrade);
 }
 
+export interface OfferFilter {
+  sellingAsset?: string | null;
+  buyingAsset?: string | null;
+  seller?: string | null;
+  limit?: number;
+  cursor?: string | null;
+}
+
+export interface OfferRow {
+  id: string;
+  seller: string;
+  selling_asset: string;
+  buying_asset: string;
+  amount: string;
+  price: string;
+  price_n: string | null;
+  price_d: string | null;
+  ledger: string;
+  created_at: Date;
+}
+
+export function mapOffer(row: OfferRow) {
+  return {
+    id: row.id,
+    seller: row.seller,
+    sellingAsset: row.selling_asset,
+    buyingAsset: row.buying_asset,
+    amount: String(row.amount),
+    price: String(row.price),
+    priceNumerator: row.price_n,
+    priceDenominator: row.price_d,
+    ledger: Number(row.ledger),
+    createdAt: row.created_at.toISOString(),
+  };
+}
+
+/**
+ * Current offers derived from indexed manage-offer operations.
+ *
+ * The newest operation for each offer id is its current state; a zero amount
+ * means the offer was deleted and is excluded. Prices are numeric so the
+ * keyset cursor compares against the same ordering the page uses.
+ */
+export async function getOffersFromDb(
+  pool: Pool,
+  network: string,
+  filter: OfferFilter = {}
+) {
+  const limit = Math.min(filter.limit ?? 20, 100);
+  const conditions = ['amount > 0', 'price IS NOT NULL'];
+  const params: unknown[] = [network];
+
+  if (filter.sellingAsset) {
+    params.push(filter.sellingAsset);
+    conditions.push(`selling_asset = $${params.length}`);
+  }
+  if (filter.buyingAsset) {
+    params.push(filter.buyingAsset);
+    conditions.push(`buying_asset = $${params.length}`);
+  }
+  if (filter.seller) {
+    params.push(filter.seller);
+    conditions.push(`seller = $${params.length}`);
+  }
+
+  const cursorClause = cursorCondition(params, KEYSETS.offers, filter.cursor, 'FORWARD', 'ASC');
+  if (cursorClause) {
+    conditions.push(cursorClause);
+  }
+
+  params.push(limit);
+  const limitPos = params.length;
+
+  const sql = `
+    WITH latest_offers AS (
+      SELECT DISTINCT ON (o.details->>'offer_id', o.network)
+        o.details->>'offer_id' AS id,
+        o.source_account AS seller,
+        CASE
+          WHEN o.details->>'selling_asset_type' = 'native' THEN 'XLM'
+          WHEN o.details->>'selling_asset_type' IS NULL THEN NULL
+          ELSE o.details->>'selling_asset_code' || ':' || o.details->>'selling_asset_issuer'
+        END AS selling_asset,
+        CASE
+          WHEN o.details->>'buying_asset_type' = 'native' THEN 'XLM'
+          WHEN o.details->>'buying_asset_type' IS NULL THEN NULL
+          ELSE o.details->>'buying_asset_code' || ':' || o.details->>'buying_asset_issuer'
+        END AS buying_asset,
+        COALESCE((o.details->>'amount')::numeric, 0) AS amount,
+        NULLIF(o.details->>'price', '')::numeric AS price,
+        o.details->'price_r'->>'n' AS price_n,
+        o.details->'price_r'->>'d' AS price_d,
+        o.ledger::text AS ledger,
+        o.created_at
+      FROM operations o
+      WHERE o.network = $1
+        AND o.type IN ('manage_sell_offer', 'manage_buy_offer', 'create_passive_sell_offer')
+        AND o.details->>'offer_id' IS NOT NULL
+        AND o.details->>'offer_id' <> ''
+      ORDER BY o.details->>'offer_id', o.network, o.ledger DESC, o.id DESC
+    )
+    SELECT id, seller, selling_asset, buying_asset, amount, price, price_n, price_d, ledger, created_at
+    FROM latest_offers
+    WHERE ${conditions.join(' AND ')}
+    ORDER BY price ASC, id ASC
+    LIMIT $${limitPos}
+  `;
+
+  const { rows } = await pool.query<OfferRow>(sql, params);
+  return rows.map(mapOffer);
+}
+
 export async function getTableCountEstimateOrExact(
   pool: Pool,
   tableName: string,
