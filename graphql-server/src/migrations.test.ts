@@ -2,8 +2,18 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { readdirSync } from 'node:fs';
 import { join } from 'node:path';
-import type { Pool } from 'pg';
-import { isMigrationIrreversible, loadDownMigrations, loadMigrations, migrationStatus, rollbackMigration, splitStatements } from './migrations';
+import type { Pool, PoolClient } from 'pg';
+import {
+  isMigrationIrreversible,
+  loadDownMigrations,
+  loadMigrations,
+  migrationStatus,
+  rollbackLastMigration,
+  rollbackMigration,
+  runMigrations,
+  splitStatements,
+  type Migration,
+} from './migrations';
 
 const MIGRATIONS_DIR = join(__dirname, '..', '..', 'db', 'migrations');
 
@@ -124,11 +134,52 @@ test('concurrent migrations are sent one statement at a time', () => {
   ]);
 });
 
+test('splits the initial schema without breaking dollar-quoted functions', () => {
+  const migration = loadMigrations(MIGRATIONS_DIR).find(item => item.version === '001_init');
+  assert.ok(migration);
+
+  const statements = splitStatements(migration.sql);
+  const ensurePartitions = statements.find(statement =>
+    statement.includes('CREATE OR REPLACE FUNCTION ensure_operations_partitions')
+  );
+  assert.ok(ensurePartitions);
+  assert.match(ensurePartitions, /RETURNS void AS \$\$[\s\S]*END;\s*\$\$ LANGUAGE plpgsql/);
+});
+
 test('migration status refuses a later migration when an earlier one is pending', async () => {
   const pool = { query: async () => ({ rows: [{ version: '002_account_event_columns' }] }) } as unknown as Pool;
   await assert.rejects(() => migrationStatus(pool, [
     { version: '001_init', sql: '' }, { version: '002_account_event_columns', sql: '' },
   ]), /out of order/);
+});
+
+test('runMigrations records history for scripts without a history insert', async () => {
+  const recorded: string[] = [];
+  const statements: string[] = [];
+  const client = {
+    query: async (sql: string, values?: unknown[]) => {
+      statements.push(sql);
+      if (sql.startsWith('SELECT version FROM schema_migrations')) {
+        return { rows: recorded.map(version => ({ version })) };
+      }
+      if (sql.startsWith('INSERT INTO schema_migrations')) {
+        const version = values?.[0];
+        assert.equal(typeof version, 'string');
+        if (typeof version === 'string') recorded.push(version);
+      }
+      return { rows: [] };
+    },
+    release: () => undefined,
+  } as unknown as PoolClient;
+  const pool = { connect: async () => client } as unknown as Pool;
+  const version = '20261124120000_test_migration_history';
+
+  const status = await runMigrations(pool, [{ version, sql: 'CREATE TABLE example (id INTEGER);' }]);
+
+  assert.deepEqual(status.applied, [version]);
+  assert.deepEqual(recorded, [version]);
+  assert.ok(statements.includes('BEGIN'));
+  assert.ok(statements.includes('COMMIT'));
 });
 
 test('loadDownMigrations loads all down migration scripts', () => {
@@ -171,4 +222,104 @@ test('rollbackMigration rejects irreversible migrations', async () => {
     () => rollbackMigration(fakePool, '006_partition_operations'),
     /irreversible and cannot be rolled back/
   );
+});
+
+/**
+ * A pool whose one client records each statement under a short label, so a
+ * test can assert the order of a whole run without matching the SQL text.
+ * `applied` is what the history table reports; `failOn` makes that statement throw.
+ */
+function recordingPool(applied: string[], failOn?: string): { pool: Pool; sent: string[] } {
+  const sent: string[] = [];
+  const client = {
+    query: async (sql: string, params?: unknown[]) => {
+      const label = /CREATE TABLE IF NOT EXISTS schema_migrations/.test(sql) ? 'create history table'
+        : /pg_advisory_unlock/.test(sql) ? 'unlock'
+        : /pg_advisory_lock/.test(sql) ? 'lock'
+        : /^SELECT version FROM schema_migrations ORDER BY version$/.test(sql) ? 'read history'
+        : /^INSERT INTO schema_migrations \(version\) VALUES \(\$1\)/.test(sql) ? 'record migration'
+        : /ORDER BY applied_at DESC/.test(sql) ? 'read latest'
+        : /^SELECT version FROM schema_migrations WHERE version = \$1$/.test(sql) ? 'check applied'
+        : sql.replace(/\s+/g, ' ').trim();
+      sent.push(label);
+      if (failOn !== undefined && sql === failOn) throw new Error('syntax error at or near "BOOM"');
+      if (label === 'read history') return { rows: applied.map(version => ({ version })) };
+      if (label === 'record migration') {
+        const version = params?.[0];
+        if (typeof version === 'string' && !applied.includes(version)) applied.push(version);
+      }
+      if (label === 'read latest') return { rows: applied.slice(0, 1).map(version => ({ version })) };
+      if (label === 'check applied') return { rows: applied.filter(version => version === params?.[0]).map(version => ({ version })) };
+      return { rows: [] };
+    },
+    release: () => { sent.push('RELEASE'); },
+  };
+  return { pool: { connect: async () => client } as unknown as Pool, sent };
+}
+
+test('runMigrations applies pending migrations in order, each in its own transaction, under the advisory lock', async () => {
+  const { pool, sent } = recordingPool(['001_init']);
+  const migrations: Migration[] = [
+    { version: '001_init', sql: 'CREATE TABLE a ()' },
+    { version: '002_b', sql: 'CREATE TABLE b ()' },
+    // Concurrent builds are sent one statement at a time, never inside BEGIN.
+    { version: '004_search_indexes', sql: 'CREATE INDEX CONCURRENTLY x ON t (c);\nCREATE INDEX CONCURRENTLY y ON t (d);' },
+  ];
+
+  await runMigrations(pool, migrations);
+
+  assert.deepEqual(sent, [
+    'create history table',
+    'lock',
+    'read history',
+    'BEGIN',
+    'CREATE TABLE b ()',
+    'record migration',
+    'COMMIT',
+    'CREATE INDEX CONCURRENTLY x ON t (c)',
+    'CREATE INDEX CONCURRENTLY y ON t (d)',
+    'record migration',
+    'read history',
+    'unlock',
+    'RELEASE',
+  ]);
+});
+
+test('a failing migration rolls back, releases the lock and the client, and rethrows', async () => {
+  const { pool, sent } = recordingPool([], 'BOOM');
+
+  await assert.rejects(() => runMigrations(pool, [{ version: '002_b', sql: 'BOOM' }]), /syntax error/);
+
+  assert.equal(sent.includes('COMMIT'), false, 'a failed migration must never commit');
+  assert.deepEqual(sent.slice(-3), ['ROLLBACK', 'unlock', 'RELEASE']);
+});
+
+test('rollbackLastMigration returns null and changes nothing when no migration is applied', async () => {
+  const { pool, sent } = recordingPool([]);
+
+  assert.equal(await rollbackLastMigration(pool, MIGRATIONS_DIR), null);
+  assert.deepEqual(sent, ['lock', 'read latest', 'unlock', 'RELEASE']);
+});
+
+test('rollbackLastMigration runs the latest migration\'s down script and removes its history row', async () => {
+  const { pool, sent } = recordingPool(['002_account_event_columns']);
+
+  assert.equal(await rollbackLastMigration(pool, MIGRATIONS_DIR), '002_account_event_columns');
+
+  // The lookup and the rollback each take the lock; the rollback re-checks it.
+  assert.deepEqual(sent.slice(0, 4), ['lock', 'read latest', 'unlock', 'RELEASE']);
+  assert.deepEqual(sent.slice(4, 7), ['lock', 'check applied', 'BEGIN']);
+  assert.match(sent[7], /DROP COLUMN IF EXISTS num_sponsored/);
+  assert.equal(sent[8], 'DELETE FROM schema_migrations WHERE version = $1');
+  assert.deepEqual(sent.slice(9), ['COMMIT', 'unlock', 'RELEASE']);
+});
+
+test('rollbackMigration refuses a version that was never applied, before running any SQL', async () => {
+  const { pool, sent } = recordingPool([]);
+
+  await assert.rejects(
+    () => rollbackMigration(pool, '002_account_event_columns', MIGRATIONS_DIR),
+    /has not been applied/
+  );
+  assert.equal(sent.includes('BEGIN'), false);
 });

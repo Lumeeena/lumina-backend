@@ -414,12 +414,13 @@ export async function getTransactionByHash(pool: Pool, network: string, hash: st
   return rows[0] ? mapTransaction(rows[0]) : null;
 }
 
+/** Exported so the SQL snapshot test can assert the exact statement. */
+export const TRANSACTIONS_BY_HASHES_SQL =
+  `SELECT ${TRANSACTION_COLUMNS} FROM transactions WHERE hash = ANY($1::text[]) AND network = $2`;
+
 export async function getTransactionsByHashes(pool: Pool, network: string, hashes: readonly string[]) {
   if (hashes.length === 0) return new Map<string, ReturnType<typeof mapTransaction>>();
-  const { rows } = await pool.query<TransactionRow>(
-    `SELECT ${TRANSACTION_COLUMNS} FROM transactions WHERE hash = ANY($1::text[]) AND network = $2`,
-    [hashes, network]
-  );
+  const { rows } = await pool.query<TransactionRow>(TRANSACTIONS_BY_HASHES_SQL, [hashes, network]);
   return new Map(rows.map(row => [row.hash, mapTransaction(row)]));
 }
 

@@ -75,3 +75,17 @@ test('sign is reported from the stroop count', () => {
   assert.equal(StellarAmount.from('-0.0000001').isPositive(), false);
   assert.equal(StellarAmount.ZERO.isPositive(), false);
 });
+
+test('from() returns an existing StellarAmount unchanged and handles edge formats', () => {
+  const original = StellarAmount.from('1.5000000');
+  assert.equal(StellarAmount.from(original), original);
+  assert.ok(original.equals(StellarAmount.from('1.5')));
+  assert.ok(original.equals(StellarAmount.from('  1.5  ')));
+  assert.ok(original.equals(StellarAmount.from(15_000_000n)));
+  assert.equal(StellarAmount.from('.5').toFixed(), '0.5');
+  assert.equal(StellarAmount.from('-.5').toFixed(), '-0.5');
+  assert.equal(StellarAmount.from('5.').toFixed(), '5');
+  assert.equal(StellarAmount.from(-5n).toFixed(), '-0.0000005');
+  assert.throws(() => StellarAmount.from(null as unknown as string), /Invalid Stellar amount/);
+  assert.throws(() => StellarAmount.from(undefined as unknown as string), /Invalid Stellar amount/);
+});

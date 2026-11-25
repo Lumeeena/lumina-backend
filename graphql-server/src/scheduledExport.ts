@@ -1,3 +1,8 @@
+/**
+ * Scheduled S3 export lifecycle for recoverable indexer snapshots.
+ * Exports are streamed in bounded batches so a large database does not need to
+ * fit in process memory, and retention only touches this service's own prefix.
+ */
 import { DeleteObjectCommand, ListObjectsV2Command, S3Client } from '@aws-sdk/client-s3';
 import { Upload } from '@aws-sdk/lib-storage';
 import { randomUUID } from 'crypto';
@@ -26,6 +31,7 @@ async function* exportLines(pool: Pool): AsyncGenerator<string> {
   }
 }
 
+/** Validated storage, scheduling, and optional static-credential settings. */
 export interface ScheduledExportOptions {
   bucket: string;
   prefix: string;
@@ -37,6 +43,10 @@ export interface ScheduledExportOptions {
   credentials?: { accessKeyId: string; secretAccessKey: string; sessionToken?: string };
 }
 
+/**
+ * Parses export settings, returning null when exports are intentionally not
+ * configured. Invalid partial credentials or unsafe intervals fail at startup.
+ */
 export function scheduledExportOptions(env = process.env): ScheduledExportOptions | null {
   const bucket = env['S3_EXPORT_BUCKET']?.trim();
   if (!bucket) return null;
@@ -63,6 +73,10 @@ export function scheduledExportOptions(env = process.env): ScheduledExportOption
   };
 }
 
+/**
+ * Starts an immediate export and periodic follow-ups, serializing runs so a
+ * slow upload cannot overlap and delete objects from another active run.
+ */
 export function startScheduledExports(
   pool: Pool,
   options: ScheduledExportOptions,
@@ -114,6 +128,10 @@ export function startScheduledExports(
   };
 }
 
+/**
+ * Deletes only completed Lumina export objects older than the configured
+ * retention boundary, following S3 continuation tokens until the prefix ends.
+ */
 export async function removeExpiredObjects(client: S3Client, options: ScheduledExportOptions, now: number): Promise<void> {
   const prefix = options.prefix ? `${options.prefix}/` : '';
   const cutoff = now - options.retentionDays * 24 * 60 * 60 * 1000;

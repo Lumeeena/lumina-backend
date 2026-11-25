@@ -38,6 +38,15 @@ Representative test cases covered:
   - Default `RECENT_ACTIVITY` order (`last_modified_ledger DESC, address ASC`)
   - Forward and backward pagination with tiebreaker inversion
   - `ADDRESS` order forward and backward
+- **`getAccountOperations`**:
+  - Generated SQL asserted for representative address, network, and limit arguments
+  - Values bound as parameters (never interpolated)
+  - Network included in the filter predicate; no `OFFSET` pagination
+- **`getAccountAsOfLedgerFromDb`**:
+  - Generated SQL asserted for representative address, network, and ledger arguments
+  - Values bound as parameters (never interpolated)
+  - The `WHERE` clause is asserted to be exactly `address = $1 AND network = $2 AND last_modified_ledger <= $3`, so the network is always part of the filter
+  - A single-row `ORDER BY last_modified_ledger DESC LIMIT 1` lookup against `account_state_history`; it does not paginate, so there is no keyset comparison, and `OFFSET` is asserted absent
 - **`getEventsByContract`**:
   - Default query
   - Filtered by topic and cursor
@@ -50,6 +59,15 @@ Representative test cases covered:
 - **`searchTransactions`**:
   - Trigram ranking and similarity query
   - Backward pagination with inverted rank/ledger ordering
+- **`getTransactionsByHashes`**:
+  - Generated SQL asserted for representative hash arguments
+  - Values bound as parameters (never interpolated)
+  - Network included in every predicate
+  - Any pagination uses keyset comparison rather than `OFFSET`
+- **`getOperationsByTransactionHash`**:
+  - Generated SQL asserted for a representative transaction hash
+  - Hash and network values bound as parameters (never interpolated)
+  - Network included in the query predicate; no `OFFSET` pagination
 
 ---
 

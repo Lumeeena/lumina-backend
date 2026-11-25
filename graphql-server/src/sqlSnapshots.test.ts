@@ -4,13 +4,24 @@ import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import type { Pool } from 'pg';
 import {
+  getAccountAsOfLedgerFromDb,
+  getAccountOperationsInLedger,
+  getAccountLifecycle,
+  getTableCountEstimateOrExact,
+  getTradesFromDb,
   getTransactions,
+  getAccountTransactions,
   getOperations,
+  getOperationsByTransactionHash,
+  getAccountOperations,
   getLedgers,
+  getLedgerBySequence,
   getAccounts,
   getAccountsFromDb,
   getEventsByContract,
   getContractStorageEntries,
+  getActivityRollups,
+  getRollupConsistency,
 } from './db';
 import { getOperationsByAsset, searchTransactions } from './search';
 import { getTopAccountsByActivity } from './topAccounts';
@@ -45,15 +56,21 @@ after(() => {
   }
 });
 
-function fakePool(): { pool: Pool; getLastQuery: () => { sql: string; params: unknown[] } } {
+function fakePool(): {
+  pool: Pool;
+  getLastQuery: () => { sql: string; params: unknown[] };
+  getQueries: () => { sql: string; params: unknown[] }[];
+} {
+  const queries: { sql: string; params: unknown[] }[] = [];
   let lastQuery = { sql: '', params: [] as unknown[] };
   const pool = {
     query: async (sql: string, params: unknown[] = []) => {
       lastQuery = { sql: sql.replace(/\s+/g, ' ').trim(), params };
+      queries.push(lastQuery);
       return { rows: [] };
     },
   } as unknown as Pool;
-  return { pool, getLastQuery: () => lastQuery };
+  return { pool, getLastQuery: () => lastQuery, getQueries: () => queries };
 }
 
 function verifySqlSnapshot(testName: string, sql: string, params: unknown[]) {
@@ -147,6 +164,23 @@ test('SQL snapshot: getTransactions ascending order', async () => {
   verifySqlSnapshot('getTransactions_ascending', q.sql, q.params);
 });
 
+// ─── Account Transactions SQL Snapshots ──────────────────────────────────────
+
+test('SQL snapshot: getAccountTransactions representative arguments', async () => {
+  const { pool, getLastQuery } = fakePool();
+  const address = 'GBRPYHIL2CI537KXVHBV4Z6G7MXNGSQXN4F2XGJFFHJ3KJV3J4WKZQLQ';
+  await getAccountTransactions(pool, 'mainnet', address, 20);
+  const q = getLastQuery();
+
+  assert.deepEqual(q.params, [address, 'mainnet', 20]);
+  assert.match(q.sql, /WHERE source_account = \$1 AND network = \$2/);
+  assert.doesNotMatch(q.sql, /mainnet|GBRPYHIL2CI537KXVHBV4Z6G7MXNGSQXN4F2XGJFFHJ3KJV3J4WKZQLQ/i);
+  assert.doesNotMatch(q.sql, /\bOFFSET\b/i);
+  assert.match(q.sql, /\bLIMIT \$3\b/);
+
+  verifySqlSnapshot('getAccountTransactions_representative', q.sql, q.params);
+});
+
 // ─── Operations SQL Snapshots ────────────────────────────────────────────────
 
 test('SQL snapshot: getOperations default query', async () => {
@@ -166,6 +200,21 @@ test('SQL snapshot: getOperations filtered by account and type', async () => {
   });
   const q = getLastQuery();
   verifySqlSnapshot('getOperations_filtered', q.sql, q.params);
+});
+
+test('SQL snapshot: getOperationsByTransactionHash', async () => {
+  const { pool, getLastQuery } = fakePool();
+  const hash = 'tx-hash-not-interpolated-123';
+  const network = 'testnet';
+  await getOperationsByTransactionHash(pool, network, hash);
+  const q = getLastQuery();
+
+  assert.match(q.sql, /WHERE transaction_hash = \$1 AND network = \$2/);
+  assert.doesNotMatch(q.sql, new RegExp(hash));
+  assert.doesNotMatch(q.sql, new RegExp(network));
+  assert.doesNotMatch(q.sql, /\bOFFSET\b/i);
+  assert.deepEqual(q.params, [hash, network]);
+  verifySqlSnapshot('getOperationsByTransactionHash_default', q.sql, q.params);
 });
 
 test('SQL snapshot: getOperations paginated forward', async () => {
@@ -215,6 +264,22 @@ test('SQL snapshot: getLedgers paginated backward', async () => {
   await getLedgers(pool, 'mainnet', 20, cursor, 'BACKWARD');
   const q = getLastQuery();
   verifySqlSnapshot('getLedgers_backward', q.sql, q.params);
+});
+
+test('SQL snapshot: getLedgerBySequence', async () => {
+  const { pool, getLastQuery } = fakePool();
+  await getLedgerBySequence(pool, 'mainnet', 500000);
+  const q = getLastQuery();
+  verifySqlSnapshot('getLedgerBySequence', q.sql, q.params);
+
+  // Values are bound, never interpolated into the statement.
+  assert.deepStrictEqual(q.params, [500000, 'mainnet']);
+  assert.ok(!q.sql.includes('500000'), 'sequence must be a bound parameter');
+  assert.ok(!q.sql.includes('mainnet'), 'network must be a bound parameter');
+  // The network scopes the lookup, so the same sequence on another network never matches.
+  assert.match(q.sql, /WHERE sequence = \$1 AND network = \$2/);
+  // A point lookup: no pagination at all.
+  assert.doesNotMatch(q.sql, /\bOFFSET\b/i);
 });
 
 // ─── Accounts SQL Snapshots ──────────────────────────────────────────────────
@@ -430,4 +495,122 @@ test('SQL snapshot: getTopAccountsByActivity all time', async () => {
   assert.doesNotMatch(q.sql, /history_operations|history_trades/);
   assert.deepEqual(q.params, ['testnet', 10]);
   verifySqlSnapshot('getTopAccountsByActivity_all', q.sql, q.params);
+});
+
+// ─── Account Operations In Ledger SQL Snapshots (#451) ───────────────────────
+
+test('SQL snapshot: getAccountOperationsInLedger default query', async () => {
+  const { pool, getLastQuery } = fakePool();
+  const address = 'GBRPYHIL2CI537KXVHBV4Z6G7MXNGSQXN4F2XGJFFHJ3KJV3J4WKZQLQ';
+  await getAccountOperationsInLedger(pool, 'mainnet', 500000, address);
+  const q = getLastQuery();
+  assert.deepEqual(q.params, [500000, address, 'mainnet']);
+  assert.doesNotMatch(q.sql, /mainnet|500000|GBRPYHIL/);
+  assert.match(q.sql, /\bnetwork\s*=\s*\$\d+/);
+  verifySqlSnapshot('getAccountOperationsInLedger_default', q.sql, q.params);
+});
+
+// ─── Transactions By Ledger SQL Snapshots (#450) ─────────────────────────────
+
+test('SQL snapshot: getTransactionsByLedger default query', async () => {
+  const { pool, getLastQuery } = fakePool();
+  await getTransactionsByLedger(pool, 'mainnet', 500000);
+  const q = getLastQuery();
+  assert.deepEqual(q.params, [500000, 'mainnet']);
+  assert.doesNotMatch(q.sql, /mainnet|500000/);
+  assert.match(q.sql, /\bnetwork\s*=\s*\$\d+/);
+  verifySqlSnapshot('getTransactionsByLedger_default', q.sql, q.params);
+});
+
+// ─── Trades SQL Snapshots (#452) ─────────────────────────────────────────────
+
+test('SQL snapshot: getTradesFromDb default query', async () => {
+  const { pool, getLastQuery } = fakePool();
+  await getTradesFromDb(pool, 'mainnet', { limit: 20 });
+  const q = getLastQuery();
+  assert.deepEqual(q.params, ['mainnet', 20]);
+  assert.doesNotMatch(q.sql, /mainnet/);
+  assert.match(q.sql, /\bnetwork\s*=\s*\$\d+/);
+  assert.doesNotMatch(q.sql, /\bOFFSET\b/i);
+  verifySqlSnapshot('getTradesFromDb_default', q.sql, q.params);
+});
+
+test('SQL snapshot: getTradesFromDb filtered and paginated forward', async () => {
+  const { pool, getLastQuery } = fakePool();
+  const account = 'GBRPYHIL2CI537KXVHBV4Z6G7MXNGSQXN4F2XGJFFHJ3KJV3J4WKZQLQ';
+  const issuer = 'GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN';
+  await getTradesFromDb(pool, 'mainnet', {
+    account,
+    baseAsset: { assetType: 'native' },
+    counterAsset: {
+      assetType: 'credit_alphanum4',
+      assetCode: 'USDC',
+      assetIssuer: issuer,
+    },
+    cursor: encodeCursor('trades', ['2026-01-01T00:00:00Z', 'trade-123']),
+    limit: 20,
+  });
+  const q = getLastQuery();
+  assert.deepEqual(q.params, [
+    'mainnet',
+    account,
+    'native',
+    'credit_alphanum4',
+    'USDC',
+    issuer,
+    '2026-01-01T00:00:00Z',
+    'trade-123',
+    20,
+  ]);
+  assert.doesNotMatch(q.sql, /mainnet|GBRPYHIL|USDC|GA5ZSEJY|trade-123|2026-01-01/);
+  assert.match(q.sql, /\bnetwork\s*=\s*\$\d+/);
+  assert.match(q.sql, /\(ledger_close_time,\s*id\)\s*<\s*\(\$\d+::timestamptz,\s*\$\d+::text\)/);
+  assert.doesNotMatch(q.sql, /\bOFFSET\b/i);
+  verifySqlSnapshot('getTradesFromDb_filtered_forward', q.sql, q.params);
+});
+
+// ─── Table Count Estimate Or Exact SQL Snapshots (#453) ──────────────────────
+
+test('SQL snapshot: getTableCountEstimateOrExact ledgers exact count', async () => {
+  const { pool, getLastQuery } = fakePool();
+  await getTableCountEstimateOrExact(pool, 'ledgers', 'mainnet');
+  const q = getLastQuery();
+  assert.deepEqual(q.params, ['mainnet']);
+  assert.doesNotMatch(q.sql, /mainnet/);
+  assert.match(q.sql, /\bnetwork\s*=\s*\$\d+/);
+  verifySqlSnapshot('getTableCountEstimateOrExact_ledgers', q.sql, q.params);
+});
+
+test('SQL snapshot: getTableCountEstimateOrExact exact fallback', async () => {
+  const { pool, getLastQuery } = fakePool();
+  await getTableCountEstimateOrExact(pool, 'transactions', 'mainnet');
+  const q = getLastQuery();
+  assert.deepEqual(q.params, ['mainnet']);
+  assert.doesNotMatch(q.sql, /mainnet/);
+  assert.match(q.sql, /\bnetwork\s*=\s*\$\d+/);
+  verifySqlSnapshot('getTableCountEstimateOrExact_exactFallback', q.sql, q.params);
+});
+
+test('SQL snapshot: getTableCountEstimateOrExact pg_class estimate', async () => {
+  const { pool, getLastQuery } = fakePool();
+  await getTableCountEstimateOrExact(pool, 'transactions', 'mainnet', {
+    affordableThreshold: 0,
+  });
+  const q = getLastQuery();
+  assert.deepEqual(q.params, ['transactions']);
+  assert.doesNotMatch(q.sql, /transactions/);
+  verifySqlSnapshot('getTableCountEstimateOrExact_estimate', q.sql, q.params);
+});
+
+test('SQL snapshot: getTableCountEstimateOrExact filtered whereClause', async () => {
+  const { pool, getLastQuery } = fakePool();
+  await getTableCountEstimateOrExact(pool, 'transactions', 'mainnet', {
+    whereClause: 'network = $1 AND successful = $2',
+    params: ['mainnet', true],
+  });
+  const q = getLastQuery();
+  assert.deepEqual(q.params, ['mainnet', true]);
+  assert.doesNotMatch(q.sql, /mainnet|true/);
+  assert.match(q.sql, /\bnetwork\s*=\s*\$\d+/);
+  verifySqlSnapshot('getTableCountEstimateOrExact_filtered', q.sql, q.params);
 });

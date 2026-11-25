@@ -15,6 +15,10 @@ import { ERROR_CODES, LuminaError } from './errorCodes';
 import { logger } from './logger';
 import { parseBool } from './security';
 
+/**
+ * The message callers see in place of an unexpected error's text. It is
+ * deliberately generic: it names no table, column or query.
+ */
 export const MASKED_ERROR_MESSAGE = 'Internal server error';
 
 /**
@@ -25,12 +29,26 @@ export function shouldMaskErrors(env: NodeJS.ProcessEnv = process.env): boolean 
   return parseBool(env['MASK_INTERNAL_ERRORS']) ?? env['NODE_ENV'] === 'production';
 }
 
+/**
+ * Options for `createErrorMasker`.
+ *
+ * - `enabled`: when false, every error passes through unchanged.
+ * - `log`: receives the full error under a correlation id. Defaults to the
+ *   app logger.
+ * - `newId`: produces the correlation id. Defaults to `randomUUID`.
+ */
 export interface ErrorMaskOptions {
   enabled: boolean;
   log?: (fields: Record<string, unknown>, message: string) => void;
   newId?: () => string;
 }
 
+/**
+ * Builds the error formatter for one server. Pass the returned function to
+ * Apollo's `formatError`. Only errors Apollo classified as internal are
+ * masked. Each masked error is logged in full under a correlation id, and the
+ * same id is returned to the caller so an operator can match the two.
+ */
 export function createErrorMasker(options: ErrorMaskOptions) {
   const log = options.log ?? ((fields, message) => logger.error(fields, message));
   const newId = options.newId ?? randomUUID;

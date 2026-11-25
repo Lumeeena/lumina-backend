@@ -21,6 +21,10 @@
  */
 import { GraphQLError, type GraphQLFormattedError } from 'graphql';
 
+/**
+ * Stable string codes the server puts in `extensions.code`. Clients branch on
+ * these, so renaming or removing one is a breaking change.
+ */
 export const ERROR_CODES = {
   BAD_USER_INPUT: 'BAD_USER_INPUT',
   INVALID_CURSOR: 'INVALID_CURSOR',
@@ -34,8 +38,14 @@ export const ERROR_CODES = {
   INTERNAL_SERVER_ERROR: 'INTERNAL_SERVER_ERROR',
 } as const;
 
+/** Union of every value in `ERROR_CODES`. */
 export type ErrorCode = (typeof ERROR_CODES)[keyof typeof ERROR_CODES];
 
+/**
+ * Coarse groups of error codes, for clients that handle a whole class of
+ * failure the same way (for example, showing a sign-in prompt for every
+ * `authentication` error).
+ */
 export const ERROR_CATEGORIES = {
   INVALID_INPUT: 'invalid_input',
   NOT_FOUND: 'not_found',
@@ -44,8 +54,10 @@ export const ERROR_CATEGORIES = {
   INTERNAL: 'internal',
 } as const;
 
+/** Union of every value in `ERROR_CATEGORIES`. */
 export type ErrorCategory = (typeof ERROR_CATEGORIES)[keyof typeof ERROR_CATEGORIES];
 
+/** The category and human-readable meaning of one error code, as listed in `ERROR_CODE_TAXONOMY`. */
 export interface ErrorCodeDefinition {
   category: ErrorCategory;
   description: string;

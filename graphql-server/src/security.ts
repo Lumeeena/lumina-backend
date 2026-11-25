@@ -30,9 +30,13 @@ import type {
 import { getArgumentValues } from 'graphql/execution/values';
 import { ERROR_CODES } from './errorCodes';
 
+/** Ten nested field levels protects resolvers while allowing normal object graphs. */
 export const DEFAULT_MAX_QUERY_DEPTH = 10;
+/** Cost budget that limits fan-out before a request reaches database resolvers. */
 export const DEFAULT_MAX_QUERY_COMPLEXITY = 1000;
+/** Database-side cancellation is shorter than the request deadline to leave time for an error response. */
 export const DEFAULT_DB_STATEMENT_TIMEOUT_MS = 15_000;
+/** Final HTTP backstop for work that is not governed by the database timeout. */
 export const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
 
 /** Parse a non-negative integer env var. Falls back on anything unusable. */
@@ -42,6 +46,7 @@ export function parseNonNegativeInt(raw: string | undefined, fallback: number): 
   return Number.isInteger(n) && n >= 0 ? n : fallback;
 }
 
+/** Parse the explicit boolean forms accepted by environment configuration. */
 export function parseBool(raw: string | undefined): boolean | undefined {
   if (raw === undefined || raw.trim() === '') return undefined;
   const v = raw.trim().toLowerCase();
@@ -50,6 +55,7 @@ export function parseBool(raw: string | undefined): boolean | undefined {
   return undefined;
 }
 
+/** Fully parsed request-hardening values consumed by server setup. */
 export interface SecurityConfig {
   maxDepth: number;
   maxComplexity: number;
@@ -59,6 +65,7 @@ export interface SecurityConfig {
   requestTimeoutMs: number;
 }
 
+/** Load security settings with production-safe defaults and explicit opt-outs. */
 export function loadSecurityConfig(env: NodeJS.ProcessEnv = process.env): SecurityConfig {
   const production = env['NODE_ENV'] === 'production';
   const origins = (env['ALLOWED_ORIGINS'] ?? '')
@@ -77,6 +84,7 @@ export function loadSecurityConfig(env: NodeJS.ProcessEnv = process.env): Securi
   };
 }
 
+/** Translate the configured origin allow-list into Express CORS options. */
 export function corsOptions(config: Pick<SecurityConfig, 'allowedOrigins'>): CorsOptions {
   return { origin: config.allowedOrigins === '*' ? true : config.allowedOrigins };
 }

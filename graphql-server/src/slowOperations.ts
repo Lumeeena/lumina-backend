@@ -10,7 +10,9 @@ import type { ApolloServerPlugin } from '@apollo/server';
 import { logger } from './logger';
 import { parseNonNegativeInt } from './security';
 
+/** One second balances useful production diagnostics with ordinary request variance. */
 export const DEFAULT_SLOW_OPERATION_THRESHOLD_MS = 1000;
+/** Replacement value used when a variable name indicates secret material. */
 export const REDACTED = '[REDACTED]';
 
 /** Variable names whose values must never reach a log line. */
@@ -21,6 +23,11 @@ export function loadSlowOperationThresholdMs(env: NodeJS.ProcessEnv = process.en
   return parseNonNegativeInt(env['SLOW_OPERATION_THRESHOLD_MS'], DEFAULT_SLOW_OPERATION_THRESHOLD_MS);
 }
 
+/**
+ * Recursively removes values whose keys look credential-like before logging.
+ * The depth cap bounds work and prevents pathological request data from making
+ * diagnostics expensive.
+ */
 export function redactVariables(value: unknown, depth = 0): unknown {
   if (depth > 8) return '[truncated]';
   if (Array.isArray(value)) return value.map(v => redactVariables(v, depth + 1));
@@ -35,11 +42,16 @@ export function redactVariables(value: unknown, depth = 0): unknown {
   return value;
 }
 
+/** Configuration for the low-overhead slow-operation Apollo plugin. */
 export interface SlowOperationOptions {
   thresholdMs: number;
   log?: (fields: Record<string, unknown>, message: string) => void;
 }
 
+/**
+ * Logs a completed operation only when it crosses the configured threshold.
+ * Timing starts before execution so resolver and response work are both visible.
+ */
 export function slowOperationPlugin(options: SlowOperationOptions): ApolloServerPlugin<any> {
   const log = options.log ?? ((fields, message) => logger.warn(fields, message));
   return {

@@ -11,6 +11,7 @@ Each migration file `db/migrations/<version>.sql` has a companion down migration
 - **Up migrations**: Named `<version>.sql` (matching `/^\d+_[a-z0-9_-]+\.sql$/i`).
 - **Down migrations**: Named `<version>.down.sql` (matching `/^\d+_[a-z0-9_-]+\.down\.sql$/i`).
 - **Isolation**: The regex for up migrations ignores `.down.sql` files because of the secondary extension dot (`.`), preventing forward migration runners from applying down scripts accidentally.
+- **History**: `runMigrations()` records each version after its SQL succeeds. Transactional migrations store the history row in the same transaction; migrations that use `CONCURRENTLY` are recorded after their statements finish. SQL files may also record themselves for direct `psql` execution.
 
 ### Applying Rollbacks Programmatically
 

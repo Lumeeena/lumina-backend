@@ -58,6 +58,7 @@ export function samplePool(pool: Pool): void {
   dbPoolWaiting.set(stats.waitingCount ?? 0);
 }
 
+/** Readiness payload returned by the server health endpoint. */
 export interface ServerHealthReport {
   status: 'ok' | 'degraded';
   /**
@@ -72,6 +73,7 @@ export interface ServerHealthReport {
   checks: { name: string; ok: boolean; detail?: string }[];
 }
 
+/** Runtime dependencies sampled to produce a health report. */
 export interface HealthInputs {
   pool: Pool;
   startedAt: number;
@@ -80,6 +82,10 @@ export interface HealthInputs {
   subscriptionCount?: number;
 }
 
+/**
+ * Probes database availability and reports optional listener degradation
+ * without marking a query-serving process unavailable for subscription-only trouble.
+ */
 export async function buildServerHealth(inputs: HealthInputs, now = Date.now()): Promise<ServerHealthReport> {
   const checks: ServerHealthReport['checks'] = [];
 
@@ -120,6 +126,7 @@ export async function buildServerHealth(inputs: HealthInputs, now = Date.now()):
   };
 }
 
+/** Maps the structured health result to the HTTP readiness status code. */
 export function serverHealthStatusCode(report: ServerHealthReport): number {
   return report.status === 'ok' ? 200 : 503;
 }

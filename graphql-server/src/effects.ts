@@ -96,6 +96,11 @@ export const EFFECT_TYPES: Readonly<Record<string, EffectDetailsKind | null>> = 
   contract_debited: 'ContractBalanceEffectDetails',
 };
 
+/**
+ * One row of the `effects` table as the pg driver returns it. `ledger` may
+ * arrive as a string because it is a bigint column, and `created_at` as a
+ * `Date`. Column meanings are in db/migrations/020_effects.sql.
+ */
 export interface EffectRow {
   id: string;
   paging_token: string;
@@ -283,6 +288,11 @@ export function mapEffectDetails(type: string, details: Raw | null, account: str
   }
 }
 
+/**
+ * Maps a raw effect row to the public GraphQL shape: columns become camelCase
+ * fields, `ledger` becomes a number, `created_at` an ISO 8601 string, and
+ * `details` is decoded by `mapEffectDetails` for the row's type.
+ */
 export function mapEffect(row: EffectRow) {
   return {
     network: row.network,
@@ -298,10 +308,16 @@ export function mapEffect(row: EffectRow) {
   };
 }
 
+/** The public effect shape produced by `mapEffect`; the element type of the `effects` connection. */
 export type Effect = ReturnType<typeof mapEffect>;
 
 const EFFECT_COLUMNS = 'id, paging_token, operation_id, ledger, account, type, type_i, created_at, details, network';
 
+/**
+ * Filters for `getEffects`. `network` and `account` are required. `type` is
+ * optional and narrows the page to one Horizon effect type. `cursor`, when set,
+ * resumes after the last row of the previous page.
+ */
 export interface EffectFilter {
   network: string;
   account: string;

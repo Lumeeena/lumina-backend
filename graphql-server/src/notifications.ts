@@ -15,10 +15,13 @@
  * indexer was running.
  */
 
+/** PostgreSQL LISTEN/NOTIFY channel used for indexer progress messages. */
 export const INDEXED_CHANNEL = 'lumina_indexed';
 
+/** Event families that readers understand across independently deployed services. */
 export type IndexedKind = 'ledger' | 'events';
 
+/** Tolerant wire payload sent after the indexer persists new progress. */
 export interface IndexedNotification {
   kind: IndexedKind;
   ledger: number;

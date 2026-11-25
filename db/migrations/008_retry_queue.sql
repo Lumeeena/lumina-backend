@@ -21,3 +21,7 @@ CREATE TABLE IF NOT EXISTS ledger_retry_queue (
 -- other index in db/migrations/ is guarded the same way.
 CREATE INDEX IF NOT EXISTS idx_retry_queue_next_attempt ON ledger_retry_queue (next_attempt_at)
     WHERE NOT permanently_failed;
+
+INSERT INTO schema_migrations (version, applied_at)
+VALUES ('008_retry_queue', NOW())
+ON CONFLICT (version) DO NOTHING;

@@ -53,7 +53,7 @@ function windows(overrides: Partial<RetentionWindows> = {}): RetentionWindows {
 test('every table defaults to an unlimited window', () => {
   const defaults = unlimitedRetentionWindows();
   assert.deepEqual(Object.keys(defaults).sort(), [
-    'account_state_history', 'contract_events', 'custom_events', 'ledgers', 'operations', 'transactions',
+    'account_state_history', 'contract_events', 'custom_events', 'effects', 'ledgers', 'operations', 'transactions',
   ]);
   for (const days of Object.values(defaults)) assert.equal(days, 0);
   // "Default to unlimited" is an acceptance criterion, so it is asserted
