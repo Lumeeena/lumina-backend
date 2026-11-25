@@ -19,6 +19,7 @@ import {
   getTransactionByHash,
   getTransactions,
   getTradesFromDb,
+  getOffersFromDb,
   getTableCountEstimateOrExact,
   getContractStorageEntries,
   getContractStorageKeyHistory,
@@ -697,6 +698,42 @@ export const resolvers = {
             'FORWARD',
             Boolean(args.cursor),
             totalCount
+          ),
+        };
+      });
+    },
+
+    async offers(
+      _: unknown,
+      args: {
+        network?: string | null;
+        sellingAsset?: string | null;
+        buyingAsset?: string | null;
+        seller?: string | null;
+        limit?: number;
+        cursor?: string | null;
+      },
+      ctx: Context
+    ) {
+      return memoizeRequestQuery(ctx.queryMemo, 'offers', args, async () => {
+        const limit = getPageSize(args.limit);
+        const network = networkArgument(args, ctx);
+        const items = await getOffersFromDb(ctx.pool, network.name, {
+          sellingAsset: args.sellingAsset ?? undefined,
+          buyingAsset: args.buyingAsset ?? undefined,
+          seller: args.seller ?? undefined,
+          limit,
+          cursor: args.cursor ?? null,
+        });
+        return {
+          items,
+          pageInfo: pageInfo(
+            KEYSETS.offers,
+            items,
+            limit,
+            offer => [offer.price, offer.id],
+            'FORWARD',
+            Boolean(args.cursor)
           ),
         };
       });
