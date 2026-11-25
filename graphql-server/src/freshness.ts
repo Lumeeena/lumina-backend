@@ -36,30 +36,68 @@ import { subsystem } from './logger';
  * and writes it after the fact. Beyond a handful, the gap is a stopped
  * indexer rather than ordinary lag, and a client labelling the data current
  * would be wrong.
+ *
+ * The value 20 is roughly 100 seconds on Stellar, which closes a ledger about
+ * every 5 seconds. Lag is measured in ledgers, so this threshold is in ledgers
+ * and not in seconds. The source does not record a more specific reason for 20.
+ * The test `lag exactly at the threshold is still current` pins the boundary.
  */
 export const STALE_AFTER_LEDGERS = 20;
 
 const log = subsystem('freshness');
 
+/**
+ * The result of `getIndexerStatus` for one network.
+ *
+ * A null field means the value is unknown (unreadable, or, for the indexed
+ * side, the index is empty), not that it is zero. `stale` is `true` whenever
+ * `lagLedgers` is null, so a null on either side forces `stale` to `true`.
+ */
 export interface IndexerStatusReport {
   /** The `Network` enum value these numbers describe. */
   network: string;
+  /** Highest ledger the indexer has written for this network, or null if unreadable or empty. */
   latestIndexedLedger: number | null;
+  /** When that ledger was written, as the database reports it, or null. */
   latestIndexedAt: string | null;
+  /** Latest ledger reported by Horizon for this network, or null if Horizon did not answer. */
   horizonLedger: number | null;
+  /** `horizonLedger - latestIndexedLedger`. Negative values are passed through unchanged. Null if either side is null. */
   lagLedgers: number | null;
+  /** True when the lag exceeds `staleAfterLedgers`, or when either side is unknown. */
   stale: boolean;
+  /** ISO-8601 time at which the comparison was made. */
   checkedAt: string;
 }
 
+/**
+ * Test seams for `getIndexerStatus`. Every field is optional and defaults to
+ * the production behaviour.
+ */
 export interface FreshnessOptions {
-  /** Injected so the test does not need Horizon. */
+  /** Injected so the test does not need Horizon. Defaults to `getLatestLedger`. */
   readHorizonLedger?: (baseUrl: NetworkConfig['horizonUrl']) => Promise<{ sequence: number } | null>;
+  /** Overrides `STALE_AFTER_LEDGERS`. */
   staleAfterLedgers?: number;
   /** Epoch milliseconds, injected so the test can pin `checkedAt`. */
   now?: () => number;
 }
 
+/**
+ * Compares the indexed tip for `network` with the Horizon tip and reports lag.
+ *
+ * Both reads run in parallel and neither is allowed to throw. A failed Horizon
+ * read is logged and treated as `null`, and a failed database read is logged and
+ * returned as `{ sequence: null, indexedAt: null }`. Neither failure rejects the
+ * returned promise.
+ *
+ * Staleness is decided here, and it is advisory. Callers should label data as
+ * stale, not withhold it.
+ *
+ * @param pool Database pool used to read the indexed tip.
+ * @param network Which network to compare. Only this network's Horizon endpoint is read.
+ * @param options Test seams. See `FreshnessOptions`.
+ */
 export async function getIndexerStatus(
   pool: Pool,
   network: NetworkConfig,

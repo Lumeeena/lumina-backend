@@ -53,6 +53,7 @@ export class SearchError extends InvalidInputError {
   }
 }
 
+/** Stable ranking tuple used to resume a memo-search result set. */
 export interface SearchCursor {
   rank: number;
   ledger: number;
@@ -83,6 +84,7 @@ export function decodeCursor(raw: string): SearchCursor | null {
   return { rank, ledger, hash };
 }
 
+/** Filters and pagination controls for a memo search request. */
 export interface SearchOptions {
   /** Network to search — ranking and cursors are scoped to it. */
   network: string;
@@ -176,6 +178,7 @@ export async function searchTransactions(pool: Pool, options: SearchOptions) {
   };
 }
 
+/** Normalized form of the native or issued asset input accepted by the API. */
 export interface ParsedAsset {
   /** Null for the native asset. */
   code: string | null;
@@ -236,6 +239,7 @@ export function assetConditions(asset: ParsedAsset, params: unknown[]): string {
         OR (details->>'buying_asset_code' = ${code} AND details->>'buying_asset_issuer' = ${issuer}))`;
 }
 
+/** Filters and cursor settings for operation history for one asset. */
 export interface AssetOperationsOptions {
   /** Network whose operations to filter. */
   network: string;

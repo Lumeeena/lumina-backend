@@ -17,6 +17,21 @@ test('export limiter enforces per-key windows and releases concurrency exactly o
   assert.ok(limiter.acquire());
 });
 
+test('export limiter frees a key once its request is a full window old', () => {
+  // The window is WINDOW_MS (one minute). A refused request is not recorded, so
+  // the key's slot reopens exactly one window after the allowed request.
+  const limiter = new ExportLimiter(1, 1);
+  assert.equal(limiter.allow('key', 0), true);
+  assert.equal(limiter.allow('key', 59_999), false);
+  assert.equal(limiter.allow('key', 60_000), true);
+});
+
+test('export limiter rejects limits that are not positive integers', () => {
+  assert.throws(() => new ExportLimiter(0, 1), /Export limits must be positive integers/);
+  assert.throws(() => new ExportLimiter(1, 0), /Export limits must be positive integers/);
+  assert.throws(() => new ExportLimiter(1.5, 1), /Export limits must be positive integers/);
+});
+
 test('export permission hashes plaintext key and requires active permission', async () => {
   const queries: { sql: string; params: unknown[] }[] = [];
   const pool = { query: async (sql: string, params: unknown[]) => {

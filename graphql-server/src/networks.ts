@@ -59,9 +59,21 @@ function defaultPassphrase(name: string): string {
   }
 }
 
-/** Endpoint used when a flat (single-network) deployment sets no `HORIZON_URL`. */
+/**
+ * Endpoint used when a flat (single-network) deployment sets no `HORIZON_URL`.
+ *
+ * Only the flat form falls back to it. The `NETWORKS` form has no default
+ * endpoint, because a missing `<NAME>_HORIZON_URL` is a startup error (see the
+ * table in `docs/MULTI_NETWORK.md`). The source does not record why the flat form
+ * defaults to the public endpoint rather than failing like the other form.
+ */
 export const DEFAULT_HORIZON_URL = 'https://horizon.stellar.org';
 
+/**
+ * Thrown by the resolver for any configuration it refuses. The message names the
+ * variable to set or unset. It is thrown rather than logged so that a caller
+ * which does not catch it stops the process from starting.
+ */
 export class NetworkConfigError extends Error {
   constructor(message: string) {
     super(message);
@@ -69,9 +81,16 @@ export class NetworkConfigError extends Error {
   }
 }
 
+/**
+ * One network as a deployment declares it, as built by {@link resolveNetworks}.
+ */
 export interface NetworkConfig {
   /** Lowercase declared name — the value stored in the `network` column. */
   name: string;
+  /**
+   * The Horizon endpoint, or the list when `<NAME>_HORIZON_URL` names several
+   * comma-separated endpoints. A single endpoint stays a plain string.
+   */
   horizonUrl: string | string[];
   /** Unset means Soroban event indexing is disabled for this network. */
   sorobanRpcUrl?: string;
@@ -79,6 +98,10 @@ export interface NetworkConfig {
   networkPassphrase: string;
 }
 
+/**
+ * Every network a deployment serves, plus the primary. The primary is the
+ * network a query gets when it names none (see {@link resolveNetworkArgument}).
+ */
 export interface NetworkRegistry {
   /** Declaration order — the first entry is the default primary. */
   networks: NetworkConfig[];

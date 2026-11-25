@@ -45,6 +45,22 @@ test('getAccount gives up and returns null after exhausting retries on repeated 
   assert.equal(result, null);
 });
 
+test('a per-network base URL routes the request to that Horizon, not the default', async () => {
+  // Falling back to the default host for another network would serve the wrong
+  // chain under the requested label, so the URL of the request is what is pinned.
+  const requested: string[] = [];
+  (global as unknown as { fetch: typeof fetch }).fetch = (async (url: string) => {
+    requested.push(String(url));
+    return { ok: true, status: 200, headers: { get: () => null }, json: async () => ({ account_id: 'GABC' }) };
+  }) as unknown as typeof fetch;
+
+  await getAccount('GABC', 'https://horizon-testnet.example');
+
+  assert.equal(requested.length, 1);
+  assert.ok(requested[0].startsWith('https://horizon-testnet.example'), requested[0]);
+  assert.ok(!requested[0].includes('horizon.stellar.org'), requested[0]);
+});
+
 test('requests are spaced by the throttle, so the fallback cannot burst Horizon', async () => {
   const times: number[] = [];
   (global as unknown as { fetch: typeof fetch }).fetch = (async () => {

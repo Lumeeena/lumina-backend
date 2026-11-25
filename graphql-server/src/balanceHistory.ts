@@ -1,28 +1,63 @@
 /**
  * Account balance history computation.
- * 
- * Derives balance over time by replaying balance-affecting operations.
- * See docs/BALANCE_HISTORY_DECISION.md for rationale.
+ *
+ * Derives an account's historical asset balance over a requested time window by
+ * replaying balance-affecting operations from the partitioned `operations` table.
+ * This exists instead of storing periodic balance snapshots so that we avoid
+ * linear storage growth per account and retain exact operation-level temporal
+ * resolution without backfills.
+ *
+ * See docs/BALANCE_HISTORY_DECISION.md for the full architectural rationale.
  */
 
 import type { Pool } from 'pg';
 import { StellarAmount } from './amount';
 import { InvalidInputError } from './errorCodes';
 
+/**
+ * Maximum query window in days.
+ * Capped at 90 days to bound operation-replay query cost and prevent
+ * unbounded scans on high-volume accounts (see docs/BALANCE_HISTORY_DECISION.md).
+ */
 const MAX_DAYS = 90;
+
+/**
+ * Default lookback window in days when `from` is omitted.
+ * 30 days provides a useful portfolio chart window while keeping replay cost low.
+ */
 const DEFAULT_DAYS = 30;
 
+/**
+ * Maximum number of pre-window operations replayed to establish the starting
+ * balance at `from`. Bounds the anchor query when no checkpoint table is used.
+ */
+const PRIOR_OPS_LIMIT = 100;
+
+/**
+ * A single point in an account's balance timeline.
+ */
 export interface BalanceSnapshot {
+  /** ISO-8601 timestamp of the operation (or window start for `'initial'`). */
   timestamp: string;
+  /** Canonical decimal string balance after the operation (e.g. `'100.5'`). */
   balance: string;
+  /** ID of the operation that caused the change, or `'initial'` for the window-start anchor. */
   operationId: string;
 }
 
+/**
+ * Computed balance history for an account and asset over `[from, to]`.
+ */
 export interface BalanceHistory {
+  /** Stellar account public key (G...). */
   address: string;
+  /** Requested asset identifier (`'XLM'`, `'native'`, or `'CODE:ISSUER'`). */
   asset: string;
+  /** Inclusive window start timestamp (ISO-8601). */
   from: string;
+  /** Inclusive window end timestamp (ISO-8601). */
   to: string;
+  /** Chronological list of snapshots where the balance changed, plus optional `'initial'`. */
   snapshots: BalanceSnapshot[];
 }
 
@@ -36,6 +71,20 @@ interface OperationRow {
 
 /**
  * Compute balance history for an account and asset by replaying operations.
+ *
+ * Non-obvious behaviour:
+ * - Defaults `to` to now and `from` to `DEFAULT_DAYS` (30) earlier; rejects
+ *   ranges where `from >= to` or the span exceeds `MAX_DAYS` (90) with
+ *   `InvalidInputError`.
+ * - Establishes a starting balance by replaying up to `PRIOR_OPS_LIMIT` (100)
+ *   operations strictly before `from` (queried `DESC` and reversed).
+ * - Emits an `'initial'` snapshot at `from` only if there are in-range
+ *   operations or the starting balance is positive, then emits a snapshot only
+ *   for operations that actually change the target asset's balance (using exact
+ *   fixed-point `StellarAmount` arithmetic).
+ * - For `account_merge`, the source account's native balance is zeroed, but the
+ *   destination (`into`) balance is left unchanged because the merged amount is
+ *   not recorded on the operation row.
  */
 export async function computeBalanceHistory(
   pool: Pool,
@@ -110,8 +159,8 @@ export async function computeBalanceHistory(
          'change_trust'
        )
      ORDER BY created_at DESC, id DESC
-     LIMIT 100`,
-    [network, fromDate.toISOString(), address]
+     LIMIT $4`,
+    [network, fromDate.toISOString(), address, PRIOR_OPS_LIMIT]
   );
 
   // Replay operations before the range to establish starting balance

@@ -32,11 +32,11 @@
  *   MIGRATION_TEST_BASE_URL=postgresql://lumina:lumina_test@localhost:5432/postgres \
  *     npm run test:migrations --prefix graphql-server
  *
- * The base URL is a maintenance connection used to create the scratch database
- * (the same convention as db/check-schema-parity.sh's PARITY_BASE_URL). It is
- * never the database under test. Skipped when the variable is unset, like the
- * other integration tests. Nothing here touches production data: every row is
- * generated from md5 of a row index by db/migration-test-seed.sql.
+ * The URL is used only to create and drop the scratch database; the database
+ * named in it is never modified. MIGRATION_TEST_BASE_URL can override
+ * TEST_DATABASE_URL when a separate maintenance connection is needed. The test
+ * is skipped when both are unset. Nothing here touches production data: every
+ * row is generated from md5 of a row index by db/migration-test-seed.sql.
  *
  * On success the scratch database is dropped. On failure it is left in place
  * and its name is printed, so a failing migration can be inspected.
@@ -49,7 +49,9 @@ import { Client, Pool } from 'pg';
 import { loadMigrations, runMigrations, type Migration } from './migrations';
 
 const BASE_URL =
-  process.env.MIGRATION_TEST_BASE_URL ?? 'postgresql://lumina:lumina_test@localhost:5432/postgres';
+  process.env.MIGRATION_TEST_BASE_URL ??
+  process.env.TEST_DATABASE_URL ??
+  'postgresql://localhost:5432/postgres';
 const SCRATCH_DATABASE = 'lumina_migration_test';
 const SEED_FILE = join(__dirname, '..', '..', 'db', 'migration-test-seed.sql');
 
@@ -74,7 +76,9 @@ const SEEDED_TABLES = [
 /** Generous: a slow migration is the finding, not a reason to cut the run off. */
 const TEST_TIMEOUT_MS = 15 * 60 * 1000;
 
-const skip = process.env.MIGRATION_TEST_BASE_URL ? false : 'MIGRATION_TEST_BASE_URL is not set';
+const skip = process.env.MIGRATION_TEST_BASE_URL || process.env.TEST_DATABASE_URL
+  ? false
+  : 'MIGRATION_TEST_BASE_URL and TEST_DATABASE_URL are not set';
 
 /** The base URL with its database replaced by the scratch database. */
 function scratchUrl(): string {
