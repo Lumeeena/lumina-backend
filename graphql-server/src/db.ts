@@ -55,6 +55,7 @@ interface LedgerRow {
   base_reserve: string;
 }
 
+/** Row shape from the transactions table (snake_case to match db schema). */
 export interface TransactionRow {
   hash: string;
   network: string;
@@ -68,6 +69,7 @@ export interface TransactionRow {
   memo: string | null;
 }
 
+/** Row shape from the operations table (snake_case to match db schema). */
 export interface OperationRow {
   id: string;
   network: string;
@@ -173,6 +175,7 @@ const TRADE_COLUMNS = `id, paging_token, ledger_close_time, trade_type, base_acc
 
 // ─── GraphQL-shaped mappers (camelCase, matching schema.graphql) ──────────────
 
+/** Convert LedgerRow (database snake_case) to GraphQL camelCase Ledger shape. */
 export function mapLedger(row: LedgerRow) {
   return {
     network: row.network,
@@ -185,6 +188,7 @@ export function mapLedger(row: LedgerRow) {
   };
 }
 
+/** Convert TransactionRow (database snake_case) to GraphQL camelCase Transaction shape. */
 export function mapTransaction(row: TransactionRow) {
   return {
     network: row.network,
@@ -211,6 +215,7 @@ function formatAsset(type?: string, code?: string, issuer?: string): string | nu
   return `${code}:${issuer}`;
 }
 
+/** Convert OperationRow (database snake_case) to GraphQL camelCase Operation shape. */
 export function mapOperation(row: OperationRow) {
   const d = row.details;
   return {
@@ -254,6 +259,7 @@ export interface NormalizedAccount {
   thresholds: Record<string, number>;
 }
 
+/** Convert NormalizedAccount (database snake_case) to GraphQL camelCase Account shape. */
 export function mapAccount(a: NormalizedAccount) {
   return {
     network: a.network,
@@ -286,6 +292,7 @@ export function mapAccount(a: NormalizedAccount) {
   };
 }
 
+/** Convert EventRow (database snake_case) to GraphQL camelCase ContractEvent shape. */
 export function mapEvent(row: EventRow) {
   return {
     network: row.network,
@@ -359,6 +366,7 @@ export interface TransactionQueryOptions {
   sourceAccount?: string | null;
 }
 
+/** Transactions for a network, paginated by keyset cursor, optionally filtered. */
 export async function getTransactions(
   pool: Pool,
   network: string,
@@ -406,6 +414,7 @@ export async function getTransactions(
   return isForward ? items : items.reverse();
 }
 
+/** Single transaction by hash, or null if not found. */
 export async function getTransactionByHash(pool: Pool, network: string, hash: string) {
   const { rows } = await pool.query<TransactionRow>(
     `SELECT ${TRANSACTION_COLUMNS} FROM transactions WHERE hash = $1 AND network = $2`,
@@ -424,6 +433,7 @@ export async function getTransactionsByHashes(pool: Pool, network: string, hashe
   return new Map(rows.map(row => [row.hash, mapTransaction(row)]));
 }
 
+/** Operations for a network, paginated by keyset cursor, optionally filtered by account or type. */
 export async function getOperations(
   pool: Pool,
   opts: {
@@ -527,6 +537,7 @@ export async function getOperationsByTransactionHashes(
  * the cursor is a single bound value — no row lookup to find where the previous
  * page stopped.
  */
+/** Ledgers for a network, newest first, paginated by keyset cursor. */
 export async function getLedgers(
   pool: Pool,
   network: string,
@@ -548,6 +559,7 @@ export async function getLedgers(
   return isForward ? items : items.reverse();
 }
 
+/** Single ledger by sequence, or null if not found. */
 export async function getLedgerBySequence(pool: Pool, network: string, sequence: number) {
   const { rows } = await pool.query<LedgerRow>(
     `SELECT ${LEDGER_COLUMNS} FROM ledgers WHERE sequence = $1 AND network = $2`,
@@ -697,6 +709,7 @@ export async function getIndexedTip(
   };
 }
 
+/** Latest state of an account from the indexed database, or null if never seen. */
 export async function getAccountFromDb(pool: Pool, network: string, address: string) {
   const { rows } = await pool.query<AccountRow>(
     `SELECT ${ACCOUNT_COLUMNS} FROM accounts WHERE address = $1 AND network = $2`,
@@ -796,6 +809,7 @@ function accountFromRow(row: AccountRow) {
  * A cursor from the other order is rejected rather than half-applied, because
  * the two orders have nothing in common to compare against.
  */
+/** Indexed accounts paginated by keyset cursor, ordered by recent activity or address. */
 export async function getAccounts(
   pool: Pool,
   opts: {
@@ -851,6 +865,7 @@ export async function getAccountOperations(pool: Pool, network: string, address:
   return rows.map(mapOperation);
 }
 
+/** Contract events for a contract and optional topic filter, paginated by keyset cursor. */
 export async function getEventsByContract(
   pool: Pool,
   opts: {
@@ -1135,6 +1150,7 @@ export interface TradeRow {
   network: string;
 }
 
+/** Convert TradeRow (database snake_case) to GraphQL camelCase Trade shape. */
 export function mapTrade(row: TradeRow) {
   return {
     id: row.id,
@@ -1232,6 +1248,13 @@ export async function getTradesFromDb(
   return rows.map(mapTrade);
 }
 
+/**
+ * Row count for a table: exact if below affordableThreshold, otherwise an estimate.
+ *
+ * Large tables use pg_class reltuples (fast, ~6ms even at 100M rows) unless a
+ * WHERE clause requires an exact count. affordableThreshold (default 5000) gates
+ * when a small table's exact count is cheaper than querying pg_class twice.
+ */
 export async function getTableCountEstimateOrExact(
   pool: Pool,
   tableName: string,

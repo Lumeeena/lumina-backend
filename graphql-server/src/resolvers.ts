@@ -1,3 +1,11 @@
+/**
+ * GraphQL resolvers for the Lumina schema.
+ *
+ * Resolvers read from PostgreSQL (populated by the indexer) and fall back to
+ * Horizon for accounts and ledgers not yet indexed. Network arguments are
+ * resolved to the network registry; requests are memoized per-query to avoid
+ * duplicate work. All type mappers and loaders are defined here.
+ */
 import type { Pool } from 'pg';
 import { GraphQLError } from 'graphql';
 import {
@@ -63,6 +71,7 @@ import { getTopAccountsByActivity, normalizeTopAccountsWindow } from './topAccou
 import { ERROR_CODES } from './errorCodes';
 import { latestLedgerCache } from './latestLedgerCache';
 
+/** Request context providing access to data, networks, and state for resolvers. */
 export interface BaseContext {
   pool: Pool;
   /**
@@ -98,6 +107,7 @@ export interface BaseContext {
 
 export type Context = BaseContext;
 
+/** Factory for request context, initializing loaders and memoization for each request. */
 export function createContext(
   pool: Pool,
   extra: Partial<Omit<Context, 'pool' | 'loaders'>> = {}
@@ -149,12 +159,7 @@ function networkForParent(ctx: Context, name?: string): NetworkConfig {
   return { ...ctx.registry.primary, name };
 }
 
-/**
- * Lumina GraphQL resolvers — backed by PostgreSQL (populated by indexer/).
- * Horizon is used only as an explicit fallback: an account that hasn't been
- * indexed yet (indexer only writes accounts it's seen activity for), or a
- * fresh database with no ledgers indexed yet.
- */
+/** Helper to resolve an account from db or Horizon, with Horizon as explicit fallback. */
 async function resolveAccount(address: string, ctx: Context, network: NetworkConfig) {
   if (ctx.loaders) return ctx.loaders(network).account.load(address);
 
@@ -192,6 +197,7 @@ function formatGranularity(dbValue: string): 'HOUR' | 'DAY' {
   throw new Error(`Unexpected stored granularity "${dbValue}".`);
 }
 
+/** Complete resolver set for the GraphQL schema: Query, Mutation, Subscription, and type resolvers. */
 export const resolvers = {
   Subscription: createSubscriptionResolvers(),
 

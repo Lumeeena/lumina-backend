@@ -46,16 +46,17 @@ interface SubscriptionLogger {
   warn(message: string, detail?: unknown): void;
 }
 
-/** Notifications about ledger writes; event-only notifications are not rows. */
+/** Returns true only for ledger-write notifications; event-only notifications are ignored. */
 function isLedgerWrite(notification: IndexedNotification): boolean {
   return notification.kind === 'ledger';
 }
 
 /**
- * Expand each ledger notification into individual rows.
+ * Expand ledger notifications into individual data rows via callback.
  *
- * A failed read is logged and skipped rather than ending the subscription: one
- * unreadable ledger should cost a client that ledger, not its connection.
+ * Filters by network first, then loads rows for each notification. If a read
+ * fails, logs and continues rather than breaking the subscription — one
+ * unreadable ledger costs a client that ledger, not its connection.
  */
 async function* expandLedgers<T>(
   notifications: AsyncIterableIterator<IndexedNotification>,
@@ -89,9 +90,12 @@ async function* expandLedgers<T>(
 }
 
 /**
- * @param logSink Captures the dropped-ledger warning instead of the process
- *   logger. Only the test passes one: it asserts a failed read is reported
- *   rather than silently swallowed, and a real process reports to its log.
+ * GraphQL subscription resolvers that expand ledger notifications into rows.
+ *
+ * Returns resolvers for `newTransaction` and `accountActivity` subscriptions,
+ * each expanding a ledger notification into the rows the client asked for.
+ *
+ * @param logSink Captures dropped-ledger warnings for testing; production logs to process logger.
  */
 export function createSubscriptionResolvers(logSink?: (message: string, detail?: unknown) => void) {
   return {
