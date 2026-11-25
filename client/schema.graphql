@@ -509,6 +509,29 @@ type Query {
   ): TradePage!
 
   """
+  Indexed sell offers, ordered by price (best first) and keyset-paginated.
+
+  Offers are derived from indexed manage-offer operations: the latest
+  operation for each offer id is its current state, and a zero amount means
+  the offer was deleted. Filter by pair and/or seller; cursors are only valid
+  for this price ordering.
+  """
+  offers(
+    """Network to read; defaults to the primary network configured for this deployment."""
+    network: Network
+    """Only offers selling this asset (`XLM` or `CODE:ISSUER`)."""
+    sellingAsset: String
+    """Only offers buying this asset (`XLM` or `CODE:ISSUER`)."""
+    buyingAsset: String
+    """Only offers created by this Stellar account address."""
+    seller: String
+    """Maximum page size is 100. Larger limits are rejected."""
+    limit: Int = 20
+    """Opaque cursor from a previous page's `pageInfo`; see `PageInfo`."""
+    cursor: String
+  ): OfferPage!
+
+  """
   Effects on one account, newest first: what each operation actually did to
   it (credited, debited, trustline created, signer added, ...). One operation
   can produce several effects, on several accounts, which makes this the
@@ -1500,6 +1523,38 @@ A page of trades, ordered by ledger close time descending.
 """
 type TradePage {
   items: [Trade!]!
+  pageInfo: PageInfo!
+}
+
+# ─── Offers (#219) ────────────────────────────────────────────────────────────
+
+"""One indexed order-book offer, in price-first order."""
+type Offer {
+  """Stellar offer id; stable across updates to the same offer."""
+  id: String!
+  """Account that created or last updated the offer."""
+  seller: String!
+  """Asset being sold (`XLM` or `CODE:ISSUER`)."""
+  sellingAsset: String!
+  """Asset being bought (`XLM` or `CODE:ISSUER`)."""
+  buyingAsset: String!
+  """Remaining amount being sold, as a decimal string."""
+  amount: String!
+  """Price (selling/buying) as a decimal string; the book's primary sort key."""
+  price: String!
+  """Price numerator, when Horizon supplied a rational price."""
+  priceNumerator: String
+  """Price denominator, when Horizon supplied a rational price."""
+  priceDenominator: String
+  """Ledger containing the latest operation for this offer."""
+  ledger: Int!
+  """ISO-8601 time that ledger closed."""
+  createdAt: String!
+}
+
+"""A page of offers, ordered by price ascending then id ascending."""
+type OfferPage {
+  items: [Offer!]!
   pageInfo: PageInfo!
 }
 
