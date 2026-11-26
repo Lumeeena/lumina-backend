@@ -27,7 +27,11 @@ import {
   getTransactionByHash,
   getTransactions,
   getTradesFromDb,
-  getOffersFromDb,
+  getOrderBookFromDb,
+  getPriceHistoryFromDb,
+  getLiquidityPoolsFromDb,
+  getLiquidityPoolFromDb,
+  getAccountLiquidityPoolsFromDb,
   getTableCountEstimateOrExact,
   getContractStorageEntries,
   getContractStorageKeyHistory,
@@ -674,6 +678,7 @@ export const resolvers = {
         baseAsset?: { assetType?: string | null; assetCode?: string | null; assetIssuer?: string | null } | null;
         counterAsset?: { assetType?: string | null; assetCode?: string | null; assetIssuer?: string | null } | null;
         account?: string | null;
+        order?: string | null;
         limit?: number;
         cursor?: string | null;
         includeTotalCount?: boolean | null;
@@ -683,10 +688,12 @@ export const resolvers = {
       return memoizeRequestQuery(ctx.queryMemo, 'trades', args, async () => {
         const limit = getPageSize(args.limit);
         const network = networkArgument(args, ctx);
+        const order = args.order === 'ASC' ? 'ASC' : 'DESC';
         const items = await getTradesFromDb(ctx.pool, network.name, {
           baseAsset: args.baseAsset ?? undefined,
           counterAsset: args.counterAsset ?? undefined,
           account: args.account ?? undefined,
+          order,
           limit,
           cursor: args.cursor ?? null,
         });
@@ -709,40 +716,168 @@ export const resolvers = {
       });
     },
 
-    async offers(
+    async orderBook(
       _: unknown,
       args: {
         network?: string | null;
-        sellingAsset?: string | null;
-        buyingAsset?: string | null;
-        seller?: string | null;
+        baseAsset: string;
+        counterAsset: string;
+        depth?: number | null;
+      },
+      ctx: Context
+    ) {
+      const baseAsset = args.baseAsset?.trim();
+      const counterAsset = args.counterAsset?.trim();
+      const depth = Math.min(args.depth ?? 100, 1000);
+
+      if (!baseAsset || !counterAsset) {
+        throw new GraphQLError('baseAsset and counterAsset are required', {
+          extensions: { code: ERROR_CODES.BAD_USER_INPUT },
+        });
+      }
+
+      const network = networkArgument(args, ctx);
+      const { bids, asks } = await getOrderBookFromDb(
+        ctx.pool,
+        network.name,
+        baseAsset,
+        counterAsset,
+        depth
+      );
+
+      const indexed = await getLatestLedgerFromDb(ctx.pool, network.name);
+
+      return {
+        bids,
+        asks,
+        indexedAt: indexed?.closedAt ?? new Date().toISOString(),
+      };
+    },
+
+    async priceHistory(
+      _: unknown,
+      args: {
+        network?: string | null;
+        baseAsset: string;
+        counterAsset: string;
+        from?: string | null;
+        to?: string | null;
+        bucketSeconds?: number | null;
+      },
+      ctx: Context
+    ) {
+      const baseAsset = args.baseAsset?.trim();
+      const counterAsset = args.counterAsset?.trim();
+
+      if (!baseAsset || !counterAsset) {
+        throw new GraphQLError('baseAsset and counterAsset are required', {
+          extensions: { code: ERROR_CODES.BAD_USER_INPUT },
+        });
+      }
+
+      const bucketSeconds = Math.max(60, Math.min(args.bucketSeconds ?? 86400, 86400));
+
+      const toTime = args.to ? new Date(args.to) : new Date();
+      const fromTime = args.from ? new Date(args.from) : new Date(toTime.getTime() - 30 * 24 * 60 * 60 * 1000);
+
+      if (fromTime >= toTime) {
+        throw new GraphQLError('from must be before to', {
+          extensions: { code: ERROR_CODES.BAD_USER_INPUT },
+        });
+      }
+
+      const network = networkArgument(args, ctx);
+
+      return getPriceHistoryFromDb(
+        ctx.pool,
+        network.name,
+        baseAsset,
+        counterAsset,
+        fromTime,
+        toTime,
+        bucketSeconds
+      );
+    },
+
+    async liquidityPools(
+      _: unknown,
+      args: {
+        network?: string | null;
+        limit?: number;
+        cursor?: string | null;
+        includeTotalCount?: boolean | null;
+      },
+      ctx: Context
+    ) {
+      const limit = getPageSize(args.limit);
+      const network = networkArgument(args, ctx);
+
+      const items = await getLiquidityPoolsFromDb(ctx.pool, network.name, limit, args.cursor ?? null);
+
+      let totalCount = null;
+      if (args.includeTotalCount) {
+        totalCount = await getTableCountEstimateOrExact(ctx.pool, 'liquidity_pools', network.name);
+      }
+
+      return {
+        items,
+        pageInfo: pageInfo(
+          KEYSETS.liquidityPools,
+          items,
+          limit,
+          pool => [pool.totalShares, pool.id],
+          'FORWARD',
+          Boolean(args.cursor),
+          totalCount
+        ),
+      };
+    },
+
+    async liquidityPool(
+      _: unknown,
+      args: {
+        network?: string | null;
+        poolId: string;
+      },
+      ctx: Context
+    ) {
+      const network = networkArgument(args, ctx);
+      return getLiquidityPoolFromDb(ctx.pool, network.name, args.poolId);
+    },
+
+    async accountLiquidityPools(
+      _: unknown,
+      args: {
+        network?: string | null;
+        account: string;
         limit?: number;
         cursor?: string | null;
       },
       ctx: Context
     ) {
-      return memoizeRequestQuery(ctx.queryMemo, 'offers', args, async () => {
-        const limit = getPageSize(args.limit);
-        const network = networkArgument(args, ctx);
-        const items = await getOffersFromDb(ctx.pool, network.name, {
-          sellingAsset: args.sellingAsset ?? undefined,
-          buyingAsset: args.buyingAsset ?? undefined,
-          seller: args.seller ?? undefined,
-          limit,
-          cursor: args.cursor ?? null,
-        });
-        return {
+      const limit = getPageSize(args.limit);
+      const network = networkArgument(args, ctx);
+
+      const items = await getAccountLiquidityPoolsFromDb(
+        ctx.pool,
+        network.name,
+        args.account,
+        limit,
+        args.cursor ?? null
+      );
+
+      return {
+        items,
+        pageInfo: pageInfo(
+          KEYSETS.liquidityPools,
           items,
-          pageInfo: pageInfo(
-            KEYSETS.offers,
-            items,
-            limit,
-            offer => [offer.price, offer.id],
-            'FORWARD',
-            Boolean(args.cursor)
-          ),
-        };
-      });
+          limit,
+          pool => [pool.totalShares, pool.id],
+          'FORWARD',
+          Boolean(args.cursor),
+          null
+        ),
+      };
     },
 
     async effects(

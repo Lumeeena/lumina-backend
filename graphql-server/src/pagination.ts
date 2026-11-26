@@ -203,6 +203,7 @@ export const KEYSETS = {
   effects: { query: 'effects', columns: ['ledger', 'id'], types: ['bigint', 'text'] },
   claimableBalances: { query: 'claimableBalances', columns: ['created_ledger', 'balance_id'], types: ['bigint', 'text'] },
   contractsPage: { query: 'contractsPage', columns: ['deployed_ledger', 'contract_id'], types: ['bigint', 'text'] },
+  liquidityPools: { query: 'liquidityPools', columns: ['total_shares', 'pool_id'], types: ['numeric', 'text'] },
 } as const satisfies Record<string, Keyset>;
 
 /** The keyset for a paginated query, by its GraphQL field name. */

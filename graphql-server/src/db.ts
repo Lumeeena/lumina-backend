@@ -1182,6 +1182,7 @@ export interface TradeFilter {
   account?: string | null;
   limit?: number;
   cursor?: string | null;
+  order?: 'ASC' | 'DESC';
 }
 
 export async function getTradesFromDb(
@@ -1190,6 +1191,7 @@ export async function getTradesFromDb(
   filter: TradeFilter = {}
 ) {
   const limit = Math.min(filter.limit ?? 20, 100);
+  const order = filter.order === 'ASC' ? 'ASC' : 'DESC';
   const conditions = ['network = $1'];
   const params: unknown[] = [network];
 
@@ -1240,7 +1242,7 @@ export async function getTradesFromDb(
   const sql = `
     SELECT ${TRADE_COLUMNS} FROM trades
     WHERE ${conditions.join(' AND ')}
-    ORDER BY ledger_close_time DESC, id DESC
+    ORDER BY ledger_close_time ${order}, id ${order}
     LIMIT $${limitPos}
   `;
 
@@ -1248,13 +1250,272 @@ export async function getTradesFromDb(
   return rows.map(mapTrade);
 }
 
-/**
- * Row count for a table: exact if below affordableThreshold, otherwise an estimate.
- *
- * Large tables use pg_class reltuples (fast, ~6ms even at 100M rows) unless a
- * WHERE clause requires an exact count. affordableThreshold (default 5000) gates
- * when a small table's exact count is cheaper than querying pg_class twice.
- */
+interface OrderBookLevelRow {
+  price: string;
+  amount: string;
+  offer_count: number;
+}
+
+export async function getOrderBookFromDb(
+  pool: Pool,
+  network: string,
+  baseAsset: string,
+  counterAsset: string,
+  depth: number
+) {
+  const parseAsset = (asset: string) => {
+    if (asset === 'XLM') return { type: 'native', code: null, issuer: null };
+    const [code, issuer] = asset.split(':');
+    return { type: 'credit_alphanum12', code, issuer };
+  };
+
+  const base = parseAsset(baseAsset);
+  const counter = parseAsset(counterAsset);
+
+  const query = `
+    SELECT
+      price,
+      SUM(CAST(base_amount AS NUMERIC)) as amount,
+      COUNT(*) as offer_count
+    FROM trades
+    WHERE network = $1
+      AND base_asset_type = $2
+      AND COALESCE(base_asset_code, '') = COALESCE($3, '')
+      AND COALESCE(base_asset_issuer, '') = COALESCE($4, '')
+      AND counter_asset_type = $5
+      AND COALESCE(counter_asset_code, '') = COALESCE($6, '')
+      AND COALESCE(counter_asset_issuer, '') = COALESCE($7, '')
+    GROUP BY price
+    ORDER BY CAST(price AS NUMERIC) DESC
+    LIMIT $8
+  `;
+
+  const params = [
+    network,
+    base.type,
+    base.code,
+    base.issuer,
+    counter.type,
+    counter.code,
+    counter.issuer,
+    depth,
+  ];
+
+  const result = await pool.query<OrderBookLevelRow>(query, params);
+
+  const levels = result.rows.map(row => ({
+    price: row.price,
+    amount: row.amount,
+    offerCount: row.offer_count,
+  }));
+
+  return {
+    bids: levels.slice(0, Math.floor(levels.length / 2)),
+    asks: levels.slice(Math.floor(levels.length / 2)),
+  };
+}
+
+interface PriceCandleRow {
+  time: Date;
+  open: string | null;
+  high: string | null;
+  low: string | null;
+  close: string | null;
+  volume: string;
+}
+
+export async function getPriceHistoryFromDb(
+  pool: Pool,
+  network: string,
+  baseAsset: string,
+  counterAsset: string,
+  fromTime: Date,
+  toTime: Date,
+  bucketSeconds: number
+) {
+  const parseAsset = (asset: string) => {
+    if (asset === 'XLM') return { type: 'native', code: null, issuer: null };
+    const [code, issuer] = asset.split(':');
+    return { type: 'credit_alphanum12', code, issuer };
+  };
+
+  const base = parseAsset(baseAsset);
+  const counter = parseAsset(counterAsset);
+
+  const query = `
+    WITH buckets AS (
+      SELECT generate_series(
+        date_trunc('second', $1::timestamptz),
+        date_trunc('second', $2::timestamptz),
+        ($3::INTEGER || ' seconds')::interval
+      ) as bucket_time
+    ),
+    trades_in_range AS (
+      SELECT
+        date_trunc('second', ledger_close_time + ($3::INTEGER || ' seconds')::interval *
+          EXTRACT(EPOCH FROM ledger_close_time - $1::timestamptz) / $3) as bucket,
+        FIRST_VALUE(CAST(price AS NUMERIC)) OVER (ORDER BY ledger_close_time) as open_price,
+        MAX(CAST(price AS NUMERIC)) as high_price,
+        MIN(CAST(price AS NUMERIC)) as low_price,
+        LAST_VALUE(CAST(price AS NUMERIC)) OVER (ORDER BY ledger_close_time
+          ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) as close_price,
+        SUM(CAST(base_amount AS NUMERIC)) as total_volume
+      FROM trades
+      WHERE network = $4
+        AND base_asset_type = $5
+        AND COALESCE(base_asset_code, '') = COALESCE($6, '')
+        AND COALESCE(base_asset_issuer, '') = COALESCE($7, '')
+        AND counter_asset_type = $8
+        AND COALESCE(counter_asset_code, '') = COALESCE($9, '')
+        AND COALESCE(counter_asset_issuer, '') = COALESCE($10, '')
+        AND ledger_close_time >= $1
+        AND ledger_close_time < $2
+      GROUP BY bucket
+    )
+    SELECT
+      b.bucket_time as time,
+      t.open_price as open,
+      t.high_price as high,
+      t.low_price as low,
+      t.close_price as close,
+      COALESCE(t.total_volume, 0) as volume
+    FROM buckets b
+    LEFT JOIN trades_in_range t ON b.bucket_time = t.bucket
+    ORDER BY b.bucket_time ASC
+  `;
+
+  const params = [
+    fromTime,
+    toTime,
+    bucketSeconds,
+    network,
+    base.type,
+    base.code,
+    base.issuer,
+    counter.type,
+    counter.code,
+    counter.issuer,
+  ];
+
+  const result = await pool.query<PriceCandleRow>(query, params);
+
+  return result.rows.map(row => ({
+    time: row.time.toISOString(),
+    open: row.open?.toString() ?? null,
+    high: row.high?.toString() ?? null,
+    low: row.low?.toString() ?? null,
+    close: row.close?.toString() ?? null,
+    volume: row.volume?.toString() ?? '0',
+  }));
+}
+
+interface LiquidityPoolRow {
+  pool_id: string;
+  asset_a: string;
+  asset_b: string;
+  fee_bp: number;
+  reserve_a: string;
+  reserve_b: string;
+  total_shares: string;
+  network: string;
+}
+
+interface LiquidityPoolShareRow extends LiquidityPoolRow {
+  shares: string | null;
+}
+
+function mapLiquidityPool(row: LiquidityPoolRow) {
+  return {
+    id: row.pool_id,
+    assetA: row.asset_a,
+    assetB: row.asset_b,
+    fee: row.fee_bp,
+    reserveA: row.reserve_a,
+    reserveB: row.reserve_b,
+    totalShares: row.total_shares,
+  };
+}
+
+export async function getLiquidityPoolsFromDb(
+  pool: Pool,
+  network: string,
+  limit: number,
+  cursor: string | null
+) {
+  const conditions = ['network = $1'];
+  const params: unknown[] = [network];
+
+  const cursorClause = cursorCondition(params, KEYSETS.liquidityPools, cursor);
+  if (cursorClause) {
+    conditions.push(cursorClause);
+  }
+
+  params.push(limit);
+
+  const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
+  const query = `
+    SELECT pool_id, asset_a, asset_b, fee_bp, reserve_a, reserve_b, total_shares, network
+    FROM liquidity_pools
+    ${whereClause}
+    ORDER BY reserve_a DESC, reserve_b DESC, pool_id
+    LIMIT $${params.length}
+  `;
+
+  const result = await pool.query<LiquidityPoolRow>(query, params);
+  return result.rows.map(mapLiquidityPool);
+}
+
+export async function getLiquidityPoolFromDb(
+  pool: Pool,
+  network: string,
+  poolId: string
+) {
+  const query = `
+    SELECT pool_id, asset_a, asset_b, fee_bp, reserve_a, reserve_b, total_shares, network
+    FROM liquidity_pools
+    WHERE network = $1 AND pool_id = $2
+  `;
+
+  const result = await pool.query<LiquidityPoolRow>(query, [network, poolId]);
+  return result.rows[0] ? mapLiquidityPool(result.rows[0]) : null;
+}
+
+export async function getAccountLiquidityPoolsFromDb(
+  pool: Pool,
+  network: string,
+  account: string,
+  limit: number,
+  cursor: string | null
+) {
+  const conditions = ['lp.network = $1', 'lps.account = $2', 'lps.shares > 0'];
+  const params: unknown[] = [network, account];
+
+  const cursorClause = cursorCondition(params, KEYSETS.liquidityPools, cursor);
+  if (cursorClause) {
+    conditions.push(cursorClause);
+  }
+
+  params.push(limit);
+
+  const whereClause = conditions.join(' AND ');
+  const query = `
+    SELECT
+      lp.pool_id, lp.asset_a, lp.asset_b, lp.fee_bp, lp.reserve_a, lp.reserve_b,
+      lp.total_shares, lp.network, lps.shares
+    FROM liquidity_pools lp
+    JOIN liquidity_pool_shares lps ON lp.pool_id = lps.pool_id AND lp.network = lps.network
+    WHERE ${whereClause}
+    ORDER BY lps.shares DESC, lp.pool_id
+    LIMIT $${params.length}
+  `;
+
+  const result = await pool.query<LiquidityPoolShareRow>(query, params);
+  return result.rows.map(row => ({
+    ...mapLiquidityPool(row),
+    accountShares: row.shares ?? null,
+  }));
+}
+
 export async function getTableCountEstimateOrExact(
   pool: Pool,
   tableName: string,

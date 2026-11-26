@@ -515,6 +515,8 @@ type Query {
     counterAsset: TradeAssetInput
     """Filter by account address (matches base or counter account)."""
     account: String
+    """Trade ordering: DESC (newest first) or ASC (oldest first)."""
+    order: LedgerOrder = DESC
     """Maximum page size is 100. Larger limits are rejected."""
     limit: Int = 20
     """Opaque cursor from a previous page's `pageInfo`; see `PageInfo`."""
@@ -524,27 +526,84 @@ type Query {
   ): TradePage!
 
   """
-  Indexed sell offers, ordered by price (best first) and keyset-paginated.
+  Real-time order book snapshot for a trading pair, aggregated by price level.
 
-  Offers are derived from indexed manage-offer operations: the latest
-  operation for each offer id is its current state, and a zero amount means
-  the offer was deleted. Filter by pair and/or seller; cursors are only valid
-  for this price ordering.
+  Bids and asks are separated, ordered by price (best first). Prices are expressed
+  as the ratio of the counter asset to the base asset. Empty book sides return
+  empty arrays. The snapshot is current as of the latest indexed ledger.
   """
-  offers(
+  orderBook(
     """Network to read; defaults to the primary network configured for this deployment."""
     network: Network
-    """Only offers selling this asset (`XLM` or `CODE:ISSUER`)."""
-    sellingAsset: String
-    """Only offers buying this asset (`XLM` or `CODE:ISSUER`)."""
-    buyingAsset: String
-    """Only offers created by this Stellar account address."""
-    seller: String
+    """Base asset as "CODE:ISSUER" or "XLM"."""
+    baseAsset: String!
+    """Counter asset as "CODE:ISSUER" or "XLM"."""
+    counterAsset: String!
+    """Maximum price levels per side. Defaults to 100; maximum 1000."""
+    depth: Int = 100
+  ): OrderBook!
+
+  """
+  Time-bucketed OHLC (Open, High, Low, Close) data for a trading pair.
+
+  Useful for candlestick charts. Empty buckets are represented explicitly as
+  null candles so callers can distinguish gaps in trading activity from no data.
+  Defaults to daily buckets; bucketSeconds minimum is 60 seconds, maximum 86400 (1 day).
+  """
+  priceHistory(
+    """Network to read; defaults to the primary network configured for this deployment."""
+    network: Network
+    """Base asset as "CODE:ISSUER" or "XLM"."""
+    baseAsset: String!
+    """Counter asset as "CODE:ISSUER" or "XLM"."""
+    counterAsset: String!
+    """Range start (ISO-8601). Defaults to 30 days before `to`."""
+    from: String
+    """Range end (ISO-8601). Defaults to now."""
+    to: String
+    """Bucket width in seconds (min 60, max 86400). Defaults to 86400 (daily)."""
+    bucketSeconds: Int = 86400
+  ): [PriceCandle!]!
+
+  """
+  Browse indexed liquidity pools.
+
+  Returns all pools with current reserves and fee, ordered by reserve size.
+  """
+  liquidityPools(
+    """Network to read; defaults to the primary network configured for this deployment."""
+    network: Network
     """Maximum page size is 100. Larger limits are rejected."""
     limit: Int = 20
     """Opaque cursor from a previous page's `pageInfo`; see `PageInfo`."""
     cursor: String
-  ): OfferPage!
+    """Opt-in request for total matching count."""
+    includeTotalCount: Boolean = false
+  ): LiquidityPoolPage!
+
+  """Get a single liquidity pool by pool ID."""
+  liquidityPool(
+    """Network to read; defaults to the primary network configured for this deployment."""
+    network: Network
+    """Pool ID."""
+    poolId: String!
+  ): LiquidityPool
+
+  """
+  Browse liquidity pools an account participates in.
+
+  Returns pools where the account holds shares, with the account's share amount.
+  """
+  accountLiquidityPools(
+    """Network to read; defaults to the primary network configured for this deployment."""
+    network: Network
+    """Account address."""
+    account: String!
+    """Maximum page size is 100. Larger limits are rejected."""
+    limit: Int = 20
+    """Opaque cursor from a previous page's `pageInfo`; see `PageInfo`."""
+    cursor: String
+  ): LiquidityPoolPage!
 
   """
   Effects on one account, newest first: what each operation actually did to
@@ -1554,35 +1613,78 @@ type TradePage {
   pageInfo: PageInfo!
 }
 
-# ─── Offers (#219) ────────────────────────────────────────────────────────────
-
-"""One indexed order-book offer, in price-first order."""
-type Offer {
-  """Stellar offer id; stable across updates to the same offer."""
-  id: String!
-  """Account that created or last updated the offer."""
-  seller: String!
-  """Asset being sold (`XLM` or `CODE:ISSUER`)."""
-  sellingAsset: String!
-  """Asset being bought (`XLM` or `CODE:ISSUER`)."""
-  buyingAsset: String!
-  """Remaining amount being sold, as a decimal string."""
-  amount: String!
-  """Price (selling/buying) as a decimal string; the book's primary sort key."""
+"""An order book level aggregating multiple offers."""
+type OrderBookLevel {
+  """Price at this level (counter/base)."""
   price: String!
-  """Price numerator, when Horizon supplied a rational price."""
-  priceNumerator: String
-  """Price denominator, when Horizon supplied a rational price."""
-  priceDenominator: String
-  """Ledger containing the latest operation for this offer."""
-  ledger: Int!
-  """ISO-8601 time that ledger closed."""
-  createdAt: String!
+  """Sum of all amounts offered at this price."""
+  amount: String!
+  """Count of offers at this price level."""
+  offerCount: Int!
 }
 
-"""A page of offers, ordered by price ascending then id ascending."""
-type OfferPage {
-  items: [Offer!]!
+"""
+A complete order book snapshot for a trading pair.
+
+Both `bids` and `asks` are sorted by price with the best prices first (highest for bids,
+lowest for asks). Precision is preserved as decimal strings.
+"""
+type OrderBook {
+  """Bid side (accounts offering to buy base in exchange for counter)."""
+  bids: [OrderBookLevel!]!
+  """Ask side (accounts offering to sell base in exchange for counter)."""
+  asks: [OrderBookLevel!]!
+  """When this snapshot was indexed (ISO-8601)."""
+  indexedAt: String!
+}
+
+"""
+One OHLC candle representing trading activity within a time bucket.
+
+When no trades occur in a bucket, `open`, `high`, `low`, and `close` are null
+but the candle is still present, allowing gap detection.
+"""
+type PriceCandle {
+  """Bucket start time (ISO-8601)."""
+  time: String!
+  """First trade price in the bucket, or null if no trades."""
+  open: String
+  """Highest trade price in the bucket, or null if no trades."""
+  high: String
+  """Lowest trade price in the bucket, or null if no trades."""
+  low: String
+  """Last trade price in the bucket, or null if no trades."""
+  close: String
+  """Sum of base asset volume in the bucket."""
+  volume: String!
+}
+
+"""Details of one liquidity pool."""
+type LiquidityPool {
+  """Unique pool ID."""
+  id: String!
+  """First asset in the pool as "CODE:ISSUER" or "XLM"."""
+  assetA: String!
+  """Second asset in the pool as "CODE:ISSUER" or "XLM"."""
+  assetB: String!
+  """Fee in basis points (e.g., 30 for 0.3%)."""
+  fee: Int!
+  """Reserve amount of asset A."""
+  reserveA: String!
+  """Reserve amount of asset B."""
+  reserveB: String!
+  """Total pool shares outstanding."""
+  totalShares: String!
+  """
+  This account's share of the pool, if queried via
+  `accountLiquidityPools`. Null otherwise.
+  """
+  accountShares: String
+}
+
+"""A page of liquidity pools."""
+type LiquidityPoolPage {
+  items: [LiquidityPool!]!
   pageInfo: PageInfo!
 }
 
